@@ -1,0 +1,18 @@
+language: c
+os:
+ - linux
+# - osx
+#jobs:
+#  allow_failures:
+#    - os: osx
+dist: bionic
+arch:
+ - amd64
+ - arm64
+git:
+  quiet: true
+branches:
+  only:
+    - master
+script:
+  - make c2mir-test

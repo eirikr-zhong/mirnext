@@ -1,0 +1,13 @@
+*.o
+*.d
+/b2ctab
+/b2m
+/c2m
+/m2b
+*.so
+*.so.*
+*.a
+/mir-run
+/build
+/build-msvc
+/.cache

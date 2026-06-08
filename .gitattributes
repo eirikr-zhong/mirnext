@@ -1,0 +1,2 @@
+c-benchmarks/*.wav filter=lfs diff=lfs merge=lfs -text
+c-benchmarks/oggenc.c filter=lfs diff=lfs merge=lfs -text
