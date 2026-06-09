@@ -7938,7 +7938,6 @@ struct rewrite_data {
   bitmap_t live, regs_to_save;
 };
 
-#define MAX_INSN_RELOAD_MEM_OPS 2
 static int try_spilled_reg_mem (gen_ctx_t gen_ctx, MIR_insn_t insn, int nop, MIR_reg_t loc,
                                 MIR_reg_t base_reg) {
   MIR_context_t ctx = gen_ctx->ctx;
@@ -7949,15 +7948,18 @@ static int try_spilled_reg_mem (gen_ctx_t gen_ctx, MIR_insn_t insn, int nop, MIR
   MIR_reg_t reg = op->u.var;
   MIR_op_t saved_op = *op;
   MIR_op_t mem_op = _MIR_new_var_mem_op (ctx, type, offset, base_reg, MIR_NON_VAR, 0);
-  int n = 0, op_nums[MAX_INSN_RELOAD_MEM_OPS];
-  for (int i = nop; i < (int) insn->nops; i++)
+  size_t n = 0, *op_nums = gen_malloc (gen_ctx, sizeof (size_t) * insn->nops);
+  for (size_t i = nop; i < insn->nops; i++)
     if (insn->ops[i].mode == MIR_OP_VAR && insn->ops[i].u.var == reg) {
       insn->ops[i] = mem_op;
-      gen_assert (n < MAX_INSN_RELOAD_MEM_OPS);
       op_nums[n++] = i;
     }
-  if (target_insn_ok_p (gen_ctx, insn)) return TRUE;
-  for (int i = 0; i < n; i++) insn->ops[op_nums[i]] = saved_op;
+  if (target_insn_ok_p (gen_ctx, insn)) {
+    gen_free (gen_ctx, op_nums);
+    return TRUE;
+  }
+  for (size_t i = 0; i < n; i++) insn->ops[op_nums[i]] = saved_op;
+  gen_free (gen_ctx, op_nums);
   return FALSE;
 }
 

@@ -1,5 +1,5 @@
 
-cmake_minimum_required (VERSION 3.8)
+cmake_minimum_required (VERSION 3.11)
 
 #set(CMAKE_C_COMPILER "clang-cl")
 
@@ -14,26 +14,35 @@ if(NOT DEFINED CMAKE_BUILD_TYPE)
 endif()
 
 #set(CMAKE_VERBOSE_MAKEFILE ON)
-
-if(NOT WIN32)
-  add_compile_options(
-    $<$<CONFIG:RELEASE>:-O3>
-    $<$<CONFIG:RelWithDebInfo>:-O3>
-  )
-  add_compile_options(-std=gnu11 -Wno-abi -fsigned-char -fPIC)
-endif()
-
 include(CheckCCompilerFlag)
+set(MIR_C_WORKAROUND_FLAGS "")
 if(CMAKE_COMPILER_IS_GNUCC)
   check_c_compiler_flag(-fno-tree-sra NO_TREE_SRA)
   if (NO_TREE_SRA)
-    add_compile_options(-fno-tree-sra)
+    list(APPEND MIR_C_WORKAROUND_FLAGS -fno-tree-sra)
   endif()
   check_c_compiler_flag(-fno-ipa-cp-clone NO_IPA_CP_CLONE)
   if (NO_IPA_CP_CLONE)
-    add_compile_options(-fno-ipa-cp-clone)
+    list(APPEND MIR_C_WORKAROUND_FLAGS -fno-ipa-cp-clone)
   endif()
 endif()
+
+function(mir_target_common_options target)
+  if(NOT WIN32)
+    target_compile_options(${target} PRIVATE
+      $<$<CONFIG:RELEASE>:-O3>
+      $<$<CONFIG:RelWithDebInfo>:-O3>
+      -fsigned-char
+      -fPIC
+    )
+  endif()
+endfunction()
+
+function(mir_target_c_options target)
+  if(NOT WIN32)
+    target_compile_options(${target} PRIVATE -std=gnu11 -Wno-abi ${MIR_C_WORKAROUND_FLAGS})
+  endif()
+endfunction()
 
 include(FindThreads)
 if(Threads_FOUND)
@@ -45,6 +54,21 @@ message("C++ compiler flags: ${CMAKE_CXX_FLAGS}")
 
 option(BUILD_TESTING "" ON)
 include(CTest)
+
+if(BUILD_TESTING)
+  include(FetchContent)
+  set(DOCTEST_WITH_TESTS OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(
+    doctest
+    GIT_REPOSITORY https://github.com/doctest/doctest.git
+    GIT_TAG v2.4.12
+  )
+  FetchContent_GetProperties(doctest)
+  if(NOT doctest_POPULATED)
+    FetchContent_Populate(doctest)
+    add_subdirectory(${doctest_SOURCE_DIR} ${doctest_BINARY_DIR})
+  endif()
+endif()
 
 add_library(mir_c_obj OBJECT mir.c mir-gen.c c2mir/c2mir.c mir.h mir-gen.h c2mir/c2mir.h)
 target_include_directories(mir_c_obj PRIVATE ${PROJECT_SOURCE_DIR})
@@ -69,7 +93,14 @@ set_target_properties(mir-c PROPERTIES OUTPUT_NAME "mir-c")
 target_link_libraries(mir-c PRIVATE mir_c_obj)
 
 # ------------------ MIRNEXT C++ CORE -----------------------
-add_library(mirnext_obj OBJECT mir.cpp mir-legacy.cpp mir.hpp mir-legacy.hpp)
+add_library(mirnext_obj OBJECT
+  mir-core.cpp
+  mir-builder.cpp
+  mir-dump.cpp
+  mir-legacy.cpp
+  mir.hpp
+  mir-legacy.hpp
+)
 target_include_directories(mirnext_obj PUBLIC ${PROJECT_SOURCE_DIR})
 if(MSVC)
   target_compile_options(mirnext_obj PRIVATE /EHs-c- /GR-)
@@ -275,7 +306,7 @@ target_link_libraries(cpp_sieve_smoke mirnext)
 
 add_executable(cpp_exec_smoke "mir-tests/cpp-exec-smoke.cpp")
 target_include_directories(cpp_exec_smoke PRIVATE ${PROJECT_SOURCE_DIR})
-target_link_libraries(cpp_exec_smoke mirnext)
+target_link_libraries(cpp_exec_smoke mirnext doctest::doctest)
 
 add_test(mirnext-cpp-core-smoke cpp_core_smoke)
 add_test(mirnext-cpp-sieve-smoke cpp_sieve_smoke)
@@ -285,4 +316,49 @@ add_test(mirnext-cpp-exec-smoke cpp_exec_smoke)
 
 add_test(c2mir-simple-test c2m -v ${PROJECT_SOURCE_DIR}/sieve.c -ei)
 add_test(c2mir-simple-gen-test c2m -v ${PROJECT_SOURCE_DIR}/sieve.c -eg)
+
+set(MIR_C_TARGETS
+  mir_c_obj
+  varr_test
+  dlist_test
+  bitmap_test
+  htab_test
+  reduce_test
+  c2m
+  m2b
+  b2m
+  b2ctab
+  simplify_test
+  scan_test
+  io_test
+  run_test
+  interp_loop
+  interp_loop_c
+  interp_sieve
+  interp_sieve_c
+  interp_hi
+  interp_args
+  interp_args_c
+  run_test_d
+  gen_loop
+  gen_sieve
+  readme_example
+  mir2c_test
+)
+
+foreach(target IN LISTS MIR_C_TARGETS)
+  mir_target_common_options(${target})
+  mir_target_c_options(${target})
+endforeach()
+
+set(MIR_CXX_TARGETS
+  mirnext_obj
+  cpp_core_smoke
+  cpp_sieve_smoke
+  cpp_exec_smoke
+)
+
+foreach(target IN LISTS MIR_CXX_TARGETS)
+  mir_target_common_options(${target})
+endforeach()
 

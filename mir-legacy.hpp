@@ -47,6 +47,13 @@ Result<std::int64_t> generate_and_call_i64(LegacyContext &context, MIR_module_t 
                                            MIR_item_t function, const std::int64_t *args = nullptr,
                                            std::size_t arg_count = 0);
 
+Result<double> interpret_double(LegacyContext &context, MIR_module_t module, MIR_item_t function,
+                                const double *args = nullptr, std::size_t arg_count = 0);
+
+Result<double> generate_and_call_double(LegacyContext &context, MIR_module_t module,
+                                        MIR_item_t function, const double *args = nullptr,
+                                        std::size_t arg_count = 0);
+
 } // namespace mirnext
 
 #endif
