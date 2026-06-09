@@ -69,11 +69,16 @@ set_target_properties(mir-c PROPERTIES OUTPUT_NAME "mir-c")
 target_link_libraries(mir-c PRIVATE mir_c_obj)
 
 # ------------------ MIRNEXT C++ CORE -----------------------
-add_library(mirnext_obj OBJECT mir.cpp mirnext-c.cpp mir.hpp mirnext-c.h)
+add_library(mirnext_obj OBJECT mir.cpp mir-legacy.cpp mir.hpp mir-legacy.hpp)
 target_include_directories(mirnext_obj PUBLIC ${PROJECT_SOURCE_DIR})
+if(MSVC)
+  target_compile_options(mirnext_obj PRIVATE /EHs-c- /GR-)
+else()
+  target_compile_options(mirnext_obj PRIVATE -fno-exceptions -fno-rtti)
+endif()
 
 add_library(mirnext_static STATIC)
-target_link_libraries(mirnext_static PRIVATE mirnext_obj)
+target_link_libraries(mirnext_static PRIVATE mirnext_obj mir_c_obj)
 set_target_properties(mirnext_static PROPERTIES OUTPUT_NAME "mirnext-static")
 
 add_library(mirnext SHARED)
@@ -81,7 +86,7 @@ if(WIN32)
   set_target_properties(mirnext PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS TRUE)
 endif()
 set_target_properties(mirnext PROPERTIES OUTPUT_NAME "mirnext")
-target_link_libraries(mirnext PRIVATE mirnext_obj)
+target_link_libraries(mirnext PRIVATE mirnext_obj mir_c_obj)
 
 # ------------------ C2M --------------------------
 add_executable (c2m "c2mir/c2mir-driver.c")
@@ -264,12 +269,17 @@ add_executable(cpp_core_smoke "mir-tests/cpp-core-smoke.cpp")
 target_include_directories(cpp_core_smoke PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(cpp_core_smoke mirnext)
 
-add_executable(c_compat_smoke "mir-tests/c-compat-smoke.c")
-target_include_directories(c_compat_smoke PRIVATE ${PROJECT_SOURCE_DIR})
-target_link_libraries(c_compat_smoke mirnext)
+add_executable(cpp_sieve_smoke "mir-tests/cpp-sieve-smoke.cpp")
+target_include_directories(cpp_sieve_smoke PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(cpp_sieve_smoke mirnext)
+
+add_executable(cpp_exec_smoke "mir-tests/cpp-exec-smoke.cpp")
+target_include_directories(cpp_exec_smoke PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(cpp_exec_smoke mirnext)
 
 add_test(mirnext-cpp-core-smoke cpp_core_smoke)
-add_test(mirnext-c-compat-smoke c_compat_smoke)
+add_test(mirnext-cpp-sieve-smoke cpp_sieve_smoke)
+add_test(mirnext-cpp-exec-smoke cpp_exec_smoke)
 
 # ------------------ c2m tests --------------------------
 
