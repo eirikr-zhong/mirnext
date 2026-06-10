@@ -743,6 +743,11 @@ private:
     bool closed = false;
   };
 
+  struct InsertPoint {
+    std::size_t label_id;
+    bool scoped;
+  };
+
   friend class Label;
   friend Value operator+(Value lhs, Value rhs);
   friend Value operator-(Value lhs, Value rhs);
@@ -822,6 +827,7 @@ private:
   bool validate_label(Label label);
   bool validate_target(Label target);
   BlockState *find_block(std::size_t label_id) noexcept;
+  bool materialize_block(Label label);
   bool ensure_block(Label label);
   Label create_attached_label(bool entry);
   void append_branch(Label label, Opcode opcode, Label target);
@@ -831,7 +837,7 @@ private:
   std::optional<Error> error_;
   std::vector<BlockState> blocks_;
   std::optional<std::size_t> entry_label_id_;
-  std::optional<std::size_t> current_label_id_;
+  std::vector<InsertPoint> insert_stack_;
   bool first_block_started_ = false;
   std::size_t next_temp_id_ = 0;
 };

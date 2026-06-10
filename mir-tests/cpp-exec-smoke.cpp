@@ -129,7 +129,6 @@ static mirnext::Function &create_sum_to_n(mirnext::Context &ctx, mirnext::Module
   i = 1;
   sum = 0;
   entry.jmp(loop);
-  entry.end();
 
   loop.begin();
   loop.if_(i > n, done);
@@ -145,6 +144,7 @@ static mirnext::Function &create_sum_to_n(mirnext::Context &ctx, mirnext::Module
   done.begin();
   done.ret(sum);
   done.end();
+  entry.end();
   if (!builder.ok()) {
     FAIL("sum_to_n DSL builder error: " << builder.error().message);
     std::abort();

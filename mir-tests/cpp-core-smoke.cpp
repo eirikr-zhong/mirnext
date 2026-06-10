@@ -297,7 +297,6 @@ static int check_numeric_label_dsl() {
   sum = 0;
   ptr = 0;
   var_entry.jmp(var_body);
-  var_entry.end();
   var_body.begin();
   sum = sum + i;
   var_body.if_(sum > compatible, var_done);
@@ -306,6 +305,7 @@ static int check_numeric_label_dsl() {
   var_done.begin();
   var_done.ret(sum);
   var_done.end();
+  var_entry.end();
   if (!var_builder.ok()) return 176;
 
   mirnext::Function &float_mod_function = module.new_function("float_mod", {}, {});

@@ -715,23 +715,19 @@ void IRBuilder::ret(Label label) {
 
 void IRBuilder::begin(Label label) {
   if (!ok()) return;
-  (void) ensure_block(label);
+  if (!materialize_block(label)) return;
+  insert_stack_.push_back(InsertPoint{label.id(), true});
 }
 
 void IRBuilder::end(Label label) {
   if (!ok()) return;
   if (!validate_label(label)) return;
-  if (!current_label_id_ || *current_label_id_ != label.id()) {
+  if (insert_stack_.empty() || insert_stack_.back().label_id != label.id()
+      || !insert_stack_.back().scoped) {
     fail(Error{ErrorCode::InvalidOperand, "label is not the current insert block"});
     return;
   }
-  BlockState *block = find_block(label.id());
-  if (block == nullptr) {
-    fail(Error{ErrorCode::InvalidOperand, "unknown builder label"});
-    return;
-  }
-  block->closed = true;
-  current_label_id_.reset();
+  insert_stack_.pop_back();
 }
 
 Value IRBuilder::call(Label label, const Prototype &prototype, const Import &callee,
@@ -773,8 +769,9 @@ void IRBuilder::fail(Error error) {
 }
 
 Label IRBuilder::current_or(Label fallback) noexcept {
-  if (!current_label_id_) return fallback;
-  return Label(function_, *current_label_id_, this, *current_label_id_ == entry_label_id_.value_or(0));
+  if (insert_stack_.empty()) return fallback;
+  const std::size_t label_id = insert_stack_.back().label_id;
+  return Label(function_, label_id, this, label_id == entry_label_id_.value_or(0));
 }
 
 Value IRBuilder::integer_literal(Label label, Type type, std::int64_t value) {
@@ -901,7 +898,7 @@ std::optional<std::size_t> IRBuilder::resolve_binary_label(Value lhs, Value rhs)
   }
   if (!lhs_register && rhs_register) return lhs.label_id_;
   if (lhs_register && !rhs_register) return rhs.label_id_;
-  if (current_label_id_) return *current_label_id_;
+  if (!insert_stack_.empty()) return insert_stack_.back().label_id;
   if (!first_block_started_) return lhs.label_id_;
   fail(Error{ErrorCode::InvalidOperand, "cannot infer current label for register operands"});
   return std::nullopt;
@@ -1050,7 +1047,7 @@ IRBuilder::BlockState *IRBuilder::find_block(std::size_t label_id) noexcept {
   return nullptr;
 }
 
-bool IRBuilder::ensure_block(Label label) {
+bool IRBuilder::materialize_block(Label label) {
   if (!validate_label(label)) return false;
 
   BlockState *block = find_block(label.id());
@@ -1066,16 +1063,32 @@ bool IRBuilder::ensure_block(Label label) {
     fail(Error{ErrorCode::InvalidOperand, "entry label must be emitted first"});
     return false;
   }
-  if (current_label_id_ && *current_label_id_ != block->label_id) {
-    BlockState *current = find_block(*current_label_id_);
-    if (current != nullptr) current->closed = true;
-  }
   if (!block->materialized) {
     function_->append_label(label);
     block->materialized = true;
     first_block_started_ = true;
   }
-  current_label_id_ = block->label_id;
+  return true;
+}
+
+bool IRBuilder::ensure_block(Label label) {
+  if (!materialize_block(label)) return false;
+  if (insert_stack_.empty()) {
+    insert_stack_.push_back(InsertPoint{label.id(), false});
+    return true;
+  }
+  if (insert_stack_.back().scoped) {
+    if (insert_stack_.back().label_id != label.id()) {
+      fail(Error{ErrorCode::InvalidOperand, "label is not the current insert block"});
+      return false;
+    }
+    return true;
+  }
+  if (insert_stack_.back().label_id != label.id()) {
+    BlockState *current = find_block(insert_stack_.back().label_id);
+    if (current != nullptr) current->closed = true;
+    insert_stack_.back().label_id = label.id();
+  }
   return true;
 }
 
