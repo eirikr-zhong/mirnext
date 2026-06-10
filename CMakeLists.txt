@@ -44,6 +44,30 @@ function(mir_target_c_options target)
   endif()
 endfunction()
 
+function(mir_strip_msvc_exception_flags variable)
+  if(DEFINED ${variable})
+    string(REGEX REPLACE "(^| )[/-]EH[a-zA-Z0-9+-]*" "" ${variable} "${${variable}}")
+    string(STRIP "${${variable}}" ${variable})
+    set(${variable} "${${variable}}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+function(mir_target_cxx_options target)
+  if(MSVC)
+    target_compile_definitions(${target} PRIVATE _HAS_EXCEPTIONS=0)
+    target_compile_options(${target} PRIVATE /EHs- /EHc- /GR-)
+  else()
+    target_compile_options(${target} PRIVATE -fno-exceptions -fno-rtti)
+  endif()
+endfunction()
+
+if(MSVC)
+  mir_strip_msvc_exception_flags(CMAKE_CXX_FLAGS)
+  foreach(config DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+    mir_strip_msvc_exception_flags(CMAKE_CXX_FLAGS_${config})
+  endforeach()
+endif()
+
 include(FindThreads)
 if(Threads_FOUND)
   link_libraries(${CMAKE_THREAD_LIBS_INIT})
@@ -98,15 +122,12 @@ add_library(mirnext_obj OBJECT
   mir-builder.cpp
   mir-dump.cpp
   mir-legacy.cpp
+  mir-binary.cpp
   mir.hpp
   mir-legacy.hpp
 )
 target_include_directories(mirnext_obj PUBLIC ${PROJECT_SOURCE_DIR})
-if(MSVC)
-  target_compile_options(mirnext_obj PRIVATE /EHs-c- /GR-)
-else()
-  target_compile_options(mirnext_obj PRIVATE -fno-exceptions -fno-rtti)
-endif()
+mir_target_cxx_options(mirnext_obj)
 
 add_library(mirnext_static STATIC)
 target_link_libraries(mirnext_static PRIVATE mirnext_obj mir_c_obj)
@@ -360,5 +381,6 @@ set(MIR_CXX_TARGETS
 
 foreach(target IN LISTS MIR_CXX_TARGETS)
   mir_target_common_options(${target})
+  mir_target_cxx_options(${target})
 endforeach()
 

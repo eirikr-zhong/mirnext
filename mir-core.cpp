@@ -48,6 +48,9 @@ bool Register::is_valid() const noexcept { return function_ != nullptr && id_ !=
 
 Label::Label(const Function *function, std::size_t id) noexcept : function_(function), id_(id) {}
 
+Label::Label(const Function *function, std::size_t id, IRBuilder *builder, bool entry) noexcept
+    : function_(function), id_(id), builder_(builder), entry_(entry) {}
+
 std::size_t Label::id() const noexcept { return id_; }
 
 bool Label::is_valid() const noexcept { return function_ != nullptr && id_ != 0; }
@@ -75,6 +78,9 @@ Operand::Operand(Label label) : Operand(Kind::LabelRef, 0, 0, label.id()) {}
 
 Operand::Operand(std::int64_t value) : Operand(Kind::Int64, value, 0, 0) {}
 
+Operand::Operand(std::uint64_t value)
+    : Operand(Kind::UInt64, static_cast<std::int64_t>(value), 0, 0) {}
+
 Operand::Operand(Kind kind, std::int64_t int_value, std::size_t reg, std::size_t label)
     : kind_(kind), int_value_(int_value), register_id_(reg), label_id_(label) {}
 
@@ -92,6 +98,8 @@ Operand::Operand(ReferenceKind reference_kind, const void *reference)
 Operand Operand::reg(Register value) { return Operand(value); }
 
 Operand Operand::int64(std::int64_t value) { return Operand(value); }
+
+Operand Operand::uint64(std::uint64_t value) { return Operand(value); }
 
 Operand Operand::float32(float value) {
   Operand operand(Kind::Float32, 0, 0, 0);
@@ -135,6 +143,10 @@ Operand::Kind Operand::kind() const noexcept { return kind_; }
 std::size_t Operand::register_id() const noexcept { return register_id_; }
 
 std::int64_t Operand::int64_value() const noexcept { return int_value_; }
+
+std::uint64_t Operand::uint64_value() const noexcept {
+  return static_cast<std::uint64_t>(int_value_);
+}
 
 float Operand::float32_value() const noexcept { return float32_value_; }
 

@@ -6,14 +6,11 @@
 #include <cstdlib>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 static bool contains(const std::string &text, const char *needle) {
   return text.find(needle) != std::string::npos;
-}
-
-template <class T> static T expect(mirnext::Result<T> result, int code) {
-  if (!result) std::exit(code);
-  return result.value();
 }
 
 int main() {
@@ -21,72 +18,71 @@ int main() {
   mirnext::Module &module = ctx.new_module("m_sieve");
   mirnext::Function &function = module.new_function("sieve", {mirnext::Type::i64()}, {});
 
-  mirnext::Register iter = expect(function.create_register(mirnext::Type::i64(), "iter"), 15);
-  mirnext::Register count = expect(function.create_register(mirnext::Type::i64(), "count"), 16);
-  mirnext::Register i = expect(function.create_register(mirnext::Type::i64(), "i"), 17);
-  mirnext::Register k = expect(function.create_register(mirnext::Type::i64(), "k"), 18);
-  mirnext::Register prime = expect(function.create_register(mirnext::Type::i64(), "prime"), 19);
-  mirnext::Register flags = expect(function.create_register(mirnext::Type::i64(), "flags"), 20);
+  mirnext::IRBuilder builder(function);
 
-  mirnext::IRBuilder builder(ctx);
-  builder.set_insert_point(function);
+  mirnext::Label entry = builder.entry();
+  mirnext::Label loop = builder.label();
+  mirnext::Label loop2 = builder.label();
+  mirnext::Label loop3 = builder.label();
+  mirnext::Label loop4 = builder.label();
+  mirnext::Label fin = builder.label();
+  mirnext::Label fin2 = builder.label();
+  mirnext::Label fin3 = builder.label();
+  mirnext::Label fin4 = builder.label();
+  mirnext::Label cont3 = builder.label();
+  if (!builder.ok()) return 21;
 
-  mirnext::Label loop = expect(builder.create_label(), 21);
-  mirnext::Label loop2 = expect(builder.create_label(), 22);
-  mirnext::Label loop3 = expect(builder.create_label(), 23);
-  mirnext::Label loop4 = expect(builder.create_label(), 24);
-  mirnext::Label fin = expect(builder.create_label(), 25);
-  mirnext::Label fin2 = expect(builder.create_label(), 26);
-  mirnext::Label fin3 = expect(builder.create_label(), 27);
-  mirnext::Label fin4 = expect(builder.create_label(), 28);
-  mirnext::Label cont3 = expect(builder.create_label(), 29);
+  mirnext::Value flags = entry.alloca(819000, "flags");
+  mirnext::Value iter = entry.local(mirnext::Type::i64(), "iter");
+  mirnext::Value count = entry.local(mirnext::Type::i64(), "count");
+  mirnext::Value i = entry.local(mirnext::Type::i64(), "i");
+  mirnext::Value k = entry.local(mirnext::Type::i64(), "k");
+  mirnext::Value prime = entry.local(mirnext::Type::i64(), "prime");
+  entry.assign(iter, entry.i64(0));
+  entry.jmp(loop);
 
-  expect(builder.create_alloca(flags, mirnext::Operand::int64(819000)), 30);
-  expect(builder.create_mov(iter, mirnext::Operand::int64(0)), 31);
-  expect(builder.bind(loop), 32);
-  expect(builder.create_bge(fin, iter, mirnext::Operand::int64(100)), 33);
-  expect(builder.create_mov(count, mirnext::Operand::int64(0)), 34);
-  expect(builder.create_mov(i, mirnext::Operand::int64(0)), 35);
-  expect(builder.bind(loop2), 36);
-  expect(builder.create_bge(fin2, i, mirnext::Operand::int64(819000)), 37);
-  expect(builder.create_mov(mirnext::Operand::mem(mirnext::Type::u8(), flags, i),
-                            mirnext::Operand::int64(1)),
-         38);
-  expect(builder.create_add(i, i, mirnext::Operand::int64(1)), 39);
-  expect(builder.create_jmp(loop2), 40);
-  expect(builder.bind(fin2), 41);
-  expect(builder.create_mov(i, mirnext::Operand::int64(1)), 42);
-  expect(builder.bind(loop3), 43);
-  expect(builder.create_bge(fin3, i, mirnext::Operand::int64(819000)), 44);
-  expect(builder.create_beq(cont3, mirnext::Operand::mem(mirnext::Type::u8(), flags, i),
-                            mirnext::Operand::int64(0)),
-         45);
-  expect(builder.create_add(prime, i, mirnext::Operand::int64(1)), 46);
-  expect(builder.create_add(k, i, prime), 47);
-  expect(builder.bind(loop4), 48);
-  expect(builder.create_bge(fin4, k, mirnext::Operand::int64(819000)), 49);
-  expect(builder.create_mov(mirnext::Operand::mem(mirnext::Type::u8(), flags, k),
-                            mirnext::Operand::int64(0)),
-         50);
-  expect(builder.create_add(k, k, prime), 51);
-  expect(builder.create_jmp(loop4), 52);
-  expect(builder.bind(fin4), 53);
-  expect(builder.create_add(count, count, mirnext::Operand::int64(1)), 54);
-  expect(builder.bind(cont3), 55);
-  expect(builder.create_add(i, i, mirnext::Operand::int64(1)), 56);
-  expect(builder.create_jmp(loop3), 57);
-  expect(builder.bind(fin3), 58);
-  expect(builder.create_add(iter, iter, mirnext::Operand::int64(1)), 59);
-  expect(builder.create_jmp(loop), 60);
-  expect(builder.bind(fin), 61);
-  expect(builder.create_ret({count}), 62);
+  loop.if_(iter >= loop.i64(100), fin);
+  loop.assign(count, loop.i64(0));
+  loop.assign(i, loop.i64(0));
+  loop.jmp(loop2);
+
+  loop2.if_(i >= loop2.i64(819000), fin2);
+  loop2.store(loop2.mem(mirnext::Type::u8(), flags, i), loop2.u8(1));
+  loop2.assign(i, i + loop2.i64(1));
+  loop2.jmp(loop2);
+
+  fin2.assign(i, fin2.i64(1));
+  fin2.jmp(loop3);
+
+  loop3.if_(i >= loop3.i64(819000), fin3);
+  loop3.if_(loop3.load(loop3.mem(mirnext::Type::u8(), flags, i)) == loop3.u8(0), cont3);
+  loop3.assign(prime, i + loop3.i64(1));
+  loop3.assign(k, i + prime);
+  loop3.jmp(loop4);
+
+  loop4.if_(k >= loop4.i64(819000), fin4);
+  loop4.store(loop4.mem(mirnext::Type::u8(), flags, k), loop4.u8(0));
+  loop4.assign(k, k + prime);
+  loop4.jmp(loop4);
+
+  fin4.assign(count, count + fin4.i64(1));
+  fin4.jmp(cont3);
+
+  cont3.assign(i, i + cont3.i64(1));
+  cont3.jmp(loop3);
+
+  fin3.assign(iter, iter + fin3.i64(1));
+  fin3.jmp(loop);
+
+  fin.ret(count);
+  if (!builder.ok()) return 62;
 
   if (module.name() != "m_sieve") return 1;
   if (function.name() != "sieve") return 2;
   if (function.return_types().size() != 1) return 3;
   if (function.arguments().size() != 0) return 4;
-  if (function.local_registers().size() != 6) return 5;
-  if (function.instruction_count() != 33) return 6;
+  if (function.local_registers().size() != 14) return 5;
+  if (function.instruction_count() != 47) return 6;
 
   std::ostringstream out;
   ctx.dump(out);

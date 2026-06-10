@@ -4,10 +4,12 @@
 #ifndef MIRNEXT_HPP
 #define MIRNEXT_HPP
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <iosfwd>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -19,6 +21,12 @@ namespace mirnext {
 class Function;
 class Import;
 class Prototype;
+class IRBuilder;
+class Value;
+class Var;
+class Memory;
+class Cond;
+class CallResult;
 
 enum class ErrorCode { InvalidArgument, DuplicateName, UnknownName, NoInsertPoint, InvalidOperand };
 
@@ -27,37 +35,88 @@ struct Error {
   std::string message;
 };
 
+// Result<T> is the no-exceptions error carrier used by the C++ API.
+// Check it with `if (!result)` before accessing the value. Calling value() on an error, or
+// error() on a value, aborts intentionally to catch unchecked misuse during development.
 template <class T> class Result {
 public:
   Result(T value) : storage_(std::move(value)) {}
   Result(Error error) : storage_(std::move(error)) {}
 
   bool has_value() const noexcept { return std::holds_alternative<T>(storage_); }
+  bool has_error() const noexcept { return std::holds_alternative<Error>(storage_); }
   explicit operator bool() const noexcept { return has_value(); }
 
-  T &value() noexcept {
+  // Pointer accessors are useful when a caller wants to inspect without aborting.
+  T *value_ptr() noexcept { return std::get_if<T>(&storage_); }
+  const T *value_ptr() const noexcept { return std::get_if<T>(&storage_); }
+  Error *error_ptr() noexcept { return std::get_if<Error>(&storage_); }
+  const Error *error_ptr() const noexcept { return std::get_if<Error>(&storage_); }
+
+  T &value() & noexcept {
     if (T *value = std::get_if<T>(&storage_)) return *value;
     std::abort();
   }
 
-  const T &value() const noexcept {
+  const T &value() const & noexcept {
     if (const T *value = std::get_if<T>(&storage_)) return *value;
     std::abort();
   }
 
-  Error &error() noexcept {
+  T value() && noexcept {
+    if (T *value = std::get_if<T>(&storage_)) return std::move(*value);
+    std::abort();
+  }
+
+  Error &error() & noexcept {
     if (Error *error = std::get_if<Error>(&storage_)) return *error;
     std::abort();
   }
 
-  const Error &error() const noexcept {
+  const Error &error() const & noexcept {
     if (const Error *error = std::get_if<Error>(&storage_)) return *error;
     std::abort();
   }
 
+  Error error() && noexcept {
+    if (Error *error = std::get_if<Error>(&storage_)) return std::move(*error);
+    std::abort();
+  }
+
+  // Convenience access for already-checked results:
+  //   auto r = f();
+  //   if (!r) return r.error();
+  //   use(*r);
+  T &operator*() & noexcept { return value(); }
+  const T &operator*() const & noexcept { return value(); }
+  T *operator->() noexcept { return &value(); }
+  const T *operator->() const noexcept { return &value(); }
+
 private:
   std::variant<T, Error> storage_;
 };
+
+#define MIRNEXT_CONCAT_IMPL(lhs, rhs) lhs##rhs
+#define MIRNEXT_CONCAT(lhs, rhs) MIRNEXT_CONCAT_IMPL(lhs, rhs)
+
+// Propagate an Error from a Result-returning expression.
+// Use only inside functions that return Result<...>.
+//
+// This is a statement macro, not an expression. A syntax like
+// `value = MIRNEXT_TRY(expr)` would need non-portable compiler extensions to return
+// from the current function on failure. Write the destination as the first macro argument instead:
+//
+//   MIRNEXT_TRY(auto reg, function.create_register(Type::i64(), "tmp"));
+//   MIRNEXT_TRY(existing_reg, function.argument("arg1"));
+//
+// The first argument is the assignment left-hand side. It can declare a new variable
+// (`auto reg`, `Register reg`) or name an existing one (`reg`).
+#define MIRNEXT_TRY(lhs, expr) MIRNEXT_TRY_IMPL(lhs, MIRNEXT_CONCAT(_mirnext_try_result_, __LINE__), expr)
+
+#define MIRNEXT_TRY_IMPL(lhs, result_name, expr)          \
+  auto result_name = (expr);                              \
+  if (!result_name) return std::move(result_name).error(); \
+  lhs = std::move(result_name).value()
 
 class Type {
 public:
@@ -113,14 +172,54 @@ public:
 
   std::size_t id() const noexcept;
   bool is_valid() const noexcept;
+  void begin();
+  void end();
+
+  Value arg(std::string_view name);
+  Var local(Type type, std::string_view name);
+  Value i8(std::int8_t value);
+  Value u8(std::uint8_t value);
+  Value i16(std::int16_t value);
+  Value u16(std::uint16_t value);
+  Value i32(std::int32_t value);
+  Value u32(std::uint32_t value);
+  Value i64(std::int64_t value);
+  Value u64(std::uint64_t value);
+  Value f32(float value);
+  Value f64(double value);
+  Value ld(long double value);
+  Value alloca(std::int64_t size, std::string_view name);
+  Value alloca(Type element_type, std::string_view name);
+  Value alloca(Type element_type, std::int64_t count, std::string_view name);
+  Memory mem(Type type, Value base);
+  Memory mem(Type type, Value base, Value index, int scale = 1,
+             std::int64_t displacement = 0);
+  Value load(Memory memory);
+  void store(Memory memory, Value value);
+  void assign(Value dst, Value src);
+  Value call(const Prototype &prototype, const Import &callee, std::vector<Value> args);
+  Value call(const Prototype &prototype, const Function &callee, std::vector<Value> args);
+  CallResult call_multi(const Prototype &prototype, const Import &callee, std::vector<Value> args);
+  CallResult call_multi(const Prototype &prototype, const Function &callee, std::vector<Value> args);
+  void call_void(const Prototype &prototype, const Import &callee, std::vector<Value> args);
+  void call_void(const Prototype &prototype, const Function &callee, std::vector<Value> args);
+  void jmp(Label target);
+  void if_(Cond cond, Label target);
+  void ret(Value value);
+  void ret(std::vector<Value> values);
+  void ret();
 
 private:
   friend class Function;
+  friend class IRBuilder;
 
   Label(const Function *function, std::size_t id) noexcept;
+  Label(const Function *function, std::size_t id, IRBuilder *builder, bool entry) noexcept;
 
   const Function *function_ = nullptr;
   std::size_t id_ = 0;
+  IRBuilder *builder_ = nullptr;
+  bool entry_ = false;
 };
 
 class Prototype {
@@ -154,15 +253,17 @@ private:
 
 class Operand {
 public:
-  enum class Kind { Int64, Float32, Float64, LongDouble, Register, LabelRef, Memory, Reference };
+  enum class Kind { Int64, UInt64, Float32, Float64, LongDouble, Register, LabelRef, Memory, Reference };
   enum class ReferenceKind { None, Prototype, Import, Function };
 
   Operand(Register reg);
   Operand(Label label);
   Operand(std::int64_t value);
+  Operand(std::uint64_t value);
 
   static Operand reg(Register value);
   static Operand int64(std::int64_t value);
+  static Operand uint64(std::uint64_t value);
   static Operand float32(float value);
   static Operand float64(double value);
   static Operand long_double(long double value);
@@ -177,6 +278,7 @@ public:
   Kind kind() const noexcept;
   std::size_t register_id() const noexcept;
   std::int64_t int64_value() const noexcept;
+  std::uint64_t uint64_value() const noexcept;
   float float32_value() const noexcept;
   double float64_value() const noexcept;
   long double long_double_value() const noexcept;
@@ -190,6 +292,8 @@ public:
   const void *reference_pointer() const noexcept;
 
 private:
+  friend class IRBuilder;
+
   Operand(Kind kind, std::int64_t int_value, std::size_t reg, std::size_t label);
   Operand(Type memory_type, std::size_t base_register, std::size_t index_register,
           std::int64_t displacement, int scale);
@@ -461,6 +565,7 @@ public:
   Prototype &new_prototype(std::string_view name, std::vector<Type> return_types,
                            std::vector<Prototype::Parameter> parameters);
   Import &new_import(std::string_view name);
+  Result<std::vector<std::byte>> encode_binary() const;
   const std::vector<std::unique_ptr<Prototype>> &prototypes() const noexcept;
   const std::vector<std::unique_ptr<Import>> &imports() const noexcept;
   const std::vector<std::unique_ptr<Function>> &functions() const noexcept;
@@ -490,197 +595,263 @@ private:
   std::vector<std::unique_ptr<Module>> modules_;
 };
 
-class IRBuilder {
+// Threading contract:
+// Context, Module, Function, and IRBuilder are not internally synchronized.
+// It is safe for different threads to build distinct Module instances after
+// those modules have been created, as long as no thread concurrently mutates or
+// traverses the owning Context as a whole. Likewise, a Module or Function must
+// not be concurrently modified from multiple threads without external
+// synchronization. Linking, dumping, and lowering a Context must happen after
+// all builder threads that mutate it have joined.
+class Value {
 public:
-  explicit IRBuilder(Context &context) noexcept;
+  Value() noexcept;
 
-  void set_insert_point(Function &function) noexcept;
-  Function *insert_point() const noexcept;
-
-  Result<Label> create_label();
-  Result<Instruction *> bind(Label label);
-  Result<Instruction *> create_alloca(Register dst, Operand size);
-  Result<Instruction *> create_mov(Operand dst, Operand src);
-  Result<Instruction *> create_mov(Register dst, Operand src);
-  Result<Instruction *> create_fmov(Register dst, Operand src);
-  Result<Instruction *> create_dmov(Register dst, Operand src);
-  Result<Instruction *> create_ldmov(Register dst, Operand src);
-  Result<Instruction *> create_ext8(Register dst, Operand src);
-  Result<Instruction *> create_ext16(Register dst, Operand src);
-  Result<Instruction *> create_ext32(Register dst, Operand src);
-  Result<Instruction *> create_uext8(Register dst, Operand src);
-  Result<Instruction *> create_uext16(Register dst, Operand src);
-  Result<Instruction *> create_uext32(Register dst, Operand src);
-  Result<Instruction *> create_i2f(Register dst, Operand src);
-  Result<Instruction *> create_i2d(Register dst, Operand src);
-  Result<Instruction *> create_i2ld(Register dst, Operand src);
-  Result<Instruction *> create_ui2f(Register dst, Operand src);
-  Result<Instruction *> create_ui2d(Register dst, Operand src);
-  Result<Instruction *> create_ui2ld(Register dst, Operand src);
-  Result<Instruction *> create_f2i(Register dst, Operand src);
-  Result<Instruction *> create_d2i(Register dst, Operand src);
-  Result<Instruction *> create_ld2i(Register dst, Operand src);
-  Result<Instruction *> create_f2d(Register dst, Operand src);
-  Result<Instruction *> create_f2ld(Register dst, Operand src);
-  Result<Instruction *> create_d2f(Register dst, Operand src);
-  Result<Instruction *> create_d2ld(Register dst, Operand src);
-  Result<Instruction *> create_ld2f(Register dst, Operand src);
-  Result<Instruction *> create_ld2d(Register dst, Operand src);
-  Result<Instruction *> create_neg(Register dst, Operand src);
-  Result<Instruction *> create_negs(Register dst, Operand src);
-  Result<Instruction *> create_fneg(Register dst, Operand src);
-  Result<Instruction *> create_dneg(Register dst, Operand src);
-  Result<Instruction *> create_ldneg(Register dst, Operand src);
-  Result<Instruction *> create_add(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_adds(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fadd(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dadd(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldadd(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_sub(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_subs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fsub(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dsub(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldsub(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_mul(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_muls(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fmul(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dmul(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldmul(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_div(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_divs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_udiv(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_udivs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fdiv(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ddiv(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_lddiv(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_mod(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_mods(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_umod(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_umods(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_and(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ands(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_or(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ors(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_xor(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_xors(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_lsh(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_lshs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_rsh(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_rshs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ursh(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_urshs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_eq(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_eqs(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_feq(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_deq(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldeq(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ne(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_nes(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fne(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dne(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldne(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_lt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_lts(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ult(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ults(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_flt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dlt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldlt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_le(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_les(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ule(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ules(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fle(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dle(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldle(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_gt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_gts(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ugt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ugts(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fgt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dgt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldgt(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ge(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ges(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_uge(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_uges(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fge(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dge(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldge(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_addo(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_addos(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_subo(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_subos(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_mulo(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_mulos(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_umulo(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_umulos(Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_jmp(Label target);
-  Result<Instruction *> create_bt(Label target, Operand value);
-  Result<Instruction *> create_bts(Label target, Operand value);
-  Result<Instruction *> create_bf(Label target, Operand value);
-  Result<Instruction *> create_bfs(Label target, Operand value);
-  Result<Instruction *> create_beq(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_beqs(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fbeq(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dbeq(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldbeq(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bne(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bnes(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fbne(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dbne(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldbne(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bge(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bges(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ubge(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ubges(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fbge(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dbge(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldbge(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_blt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_blts(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ublt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ublts(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fblt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dblt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldblt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ble(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bles(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_uble(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ubles(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fble(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dble(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldble(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bgt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bgts(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ubgt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ubgts(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_fbgt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_dbgt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_ldbgt(Label target, Operand lhs, Operand rhs);
-  Result<Instruction *> create_bo(Label target);
-  Result<Instruction *> create_ubo(Label target);
-  Result<Instruction *> create_bno(Label target);
-  Result<Instruction *> create_ubno(Label target);
-  Result<Instruction *> create_call(const Prototype &prototype, Operand callee,
-                                    std::vector<Operand> results,
-                                    std::vector<Operand> arguments);
-  Result<Instruction *> create_ret(std::vector<Operand> values = {});
+  Type type() const noexcept;
+  Operand operand() const noexcept;
+  IRBuilder *builder() const noexcept;
+  bool is_valid() const noexcept;
 
 private:
-  Result<Instruction *> create_unary(Opcode opcode, Register dst, Operand src);
-  Result<Instruction *> create_binary(Opcode opcode, Register dst, Operand lhs, Operand rhs);
-  Result<Instruction *> create_branch(Opcode opcode, Label target);
-  Result<Instruction *> create_branch(Opcode opcode, Label target, Operand value);
-  Result<Instruction *> create_branch(Opcode opcode, Label target, Operand lhs, Operand rhs);
-  Result<Function *> require_insert_point() const;
+  friend class IRBuilder;
+  friend class Cond;
+  friend Value operator+(Value lhs, Value rhs);
+  friend Value operator-(Value lhs, Value rhs);
+  friend Value operator*(Value lhs, Value rhs);
+  friend Value operator/(Value lhs, Value rhs);
+  friend Value operator%(Value lhs, Value rhs);
+  friend Cond operator==(Value lhs, Value rhs);
+  friend Cond operator!=(Value lhs, Value rhs);
+  friend Cond operator<(Value lhs, Value rhs);
+  friend Cond operator<=(Value lhs, Value rhs);
+  friend Cond operator>(Value lhs, Value rhs);
+  friend Cond operator>=(Value lhs, Value rhs);
 
-  Context *context_;
-  Function *insert_point_ = nullptr;
+  Value(IRBuilder *builder, std::size_t label_id, Type type, Operand operand) noexcept;
+
+  IRBuilder *builder_;
+  std::size_t label_id_;
+  Type type_;
+  Operand operand_;
 };
+
+class Var {
+public:
+  Var() noexcept;
+
+  operator Value() const noexcept;
+
+  Type type() const noexcept;
+  Value value() const noexcept;
+  IRBuilder *builder() const noexcept;
+  bool is_valid() const noexcept;
+
+  Var &operator=(const Var &rhs);
+  Var &operator=(Value rhs);
+  Var &operator=(std::int64_t rhs);
+
+private:
+  friend class IRBuilder;
+
+  Var(Label label, Value value) noexcept;
+
+  Label label_;
+  Value value_;
+};
+
+class Memory {
+public:
+  Memory() noexcept;
+
+  Type type() const noexcept;
+  Operand operand() const noexcept;
+  IRBuilder *builder() const noexcept;
+  bool is_valid() const noexcept;
+
+private:
+  friend class IRBuilder;
+
+  Memory(IRBuilder *builder, std::size_t label_id, Type type, Operand operand) noexcept;
+
+  IRBuilder *builder_;
+  std::size_t label_id_;
+  Type type_;
+  Operand operand_;
+};
+
+class CallResult {
+public:
+  CallResult() = default;
+
+  bool empty() const noexcept { return values_.empty(); }
+  std::size_t size() const noexcept { return values_.size(); }
+  const Value &operator[](std::size_t index) const noexcept { return values_[index]; }
+  Value &operator[](std::size_t index) noexcept { return values_[index]; }
+  const std::vector<Value> &values() const noexcept { return values_; }
+  std::vector<Value> &&take_values() noexcept { return std::move(values_); }
+
+  std::vector<Value>::const_iterator begin() const noexcept { return values_.begin(); }
+  std::vector<Value>::const_iterator end() const noexcept { return values_.end(); }
+
+private:
+  friend class IRBuilder;
+
+  explicit CallResult(std::vector<Value> values) : values_(std::move(values)) {}
+
+  std::vector<Value> values_;
+};
+
+class Cond {
+public:
+  Cond() noexcept;
+
+  IRBuilder *builder() const noexcept;
+  bool is_valid() const noexcept;
+
+private:
+  friend class IRBuilder;
+  friend Cond operator==(Value lhs, Value rhs);
+  friend Cond operator!=(Value lhs, Value rhs);
+  friend Cond operator<(Value lhs, Value rhs);
+  friend Cond operator<=(Value lhs, Value rhs);
+  friend Cond operator>(Value lhs, Value rhs);
+  friend Cond operator>=(Value lhs, Value rhs);
+
+  Cond(IRBuilder *builder, std::size_t label_id, Opcode opcode, Value lhs, Value rhs) noexcept;
+
+  IRBuilder *builder_;
+  std::size_t label_id_;
+  Opcode opcode_;
+  Value lhs_;
+  Value rhs_;
+};
+
+class IRBuilder {
+public:
+  explicit IRBuilder(Function &function) noexcept;
+
+  Label entry();
+  Label label();
+  bool ok() const noexcept;
+  const Error &error() const noexcept;
+
+private:
+  struct BlockState {
+    std::size_t label_id;
+    bool entry;
+    bool materialized = false;
+    bool closed = false;
+  };
+
+  friend class Label;
+  friend Value operator+(Value lhs, Value rhs);
+  friend Value operator-(Value lhs, Value rhs);
+  friend Value operator*(Value lhs, Value rhs);
+  friend Value operator/(Value lhs, Value rhs);
+  friend Value operator%(Value lhs, Value rhs);
+  friend Cond operator==(Value lhs, Value rhs);
+  friend Cond operator!=(Value lhs, Value rhs);
+  friend Cond operator<(Value lhs, Value rhs);
+  friend Cond operator<=(Value lhs, Value rhs);
+  friend Cond operator>(Value lhs, Value rhs);
+  friend Cond operator>=(Value lhs, Value rhs);
+  friend class Var;
+
+  Value arg(Label label, std::string_view name);
+  Var local(Label label, Type type, std::string_view name);
+  Value i8(Label label, std::int8_t value);
+  Value u8(Label label, std::uint8_t value);
+  Value i16(Label label, std::int16_t value);
+  Value u16(Label label, std::uint16_t value);
+  Value i32(Label label, std::int32_t value);
+  Value u32(Label label, std::uint32_t value);
+  Value i64(Label label, std::int64_t value);
+  Value u64(Label label, std::uint64_t value);
+  Value f32(Label label, float value);
+  Value f64(Label label, double value);
+  Value ld(Label label, long double value);
+  Value alloca(Label label, std::int64_t size, std::string_view name);
+  Value alloca(Label label, Type element_type, std::string_view name);
+  Value alloca(Label label, Type element_type, std::int64_t count, std::string_view name);
+  Memory mem(Label label, Type type, Value base);
+  Memory mem(Label label, Type type, Value base, Value index, int scale,
+             std::int64_t displacement);
+  Value load(Label label, Memory memory);
+  void store(Label label, Memory memory, Value value);
+  void assign(Label label, Value dst, Value src);
+  Value call(Label label, const Prototype &prototype, const Import &callee,
+             std::vector<Value> args);
+  Value call(Label label, const Prototype &prototype, const Function &callee,
+             std::vector<Value> args);
+  CallResult call_multi(Label label, const Prototype &prototype, const Import &callee,
+                        std::vector<Value> args);
+  CallResult call_multi(Label label, const Prototype &prototype, const Function &callee,
+                        std::vector<Value> args);
+  void call_void(Label label, const Prototype &prototype, const Import &callee,
+                 std::vector<Value> args);
+  void call_void(Label label, const Prototype &prototype, const Function &callee,
+                 std::vector<Value> args);
+  void jmp(Label label, Label target);
+  void if_(Label label, Cond cond, Label target);
+  void ret(Label label, Value value);
+  void ret(Label label, std::vector<Value> values);
+  void ret(Label label);
+
+  void begin(Label label);
+  void end(Label label);
+  void fail(Error error);
+  Label current_or(Label fallback) noexcept;
+  Value integer_literal(Label label, Type type, std::int64_t value);
+  Value invalid_value() noexcept;
+  Memory invalid_memory() noexcept;
+  Cond invalid_cond() noexcept;
+  Register temp(Type type);
+  std::optional<Opcode> typed_move_opcode(Type type) noexcept;
+  Operand memory_operand(Type type, const Value &base, std::size_t index_register,
+                         std::int64_t displacement, int scale);
+  bool validate_value(Label label, const Value &value, std::string_view description);
+  bool validate_register_value(Label label, const Value &value, std::string_view description);
+  bool validate_memory(Label label, const Memory &memory);
+  std::optional<std::size_t> resolve_binary_label(Value lhs, Value rhs);
+  CallResult append_call(Label label, const Prototype &prototype, Operand callee,
+                         std::vector<Value> args, std::optional<std::size_t> return_count);
+  Value append_binary(Opcode opcode, Value lhs, Value rhs);
+  Cond compare(Opcode opcode, Value lhs, Value rhs);
+  bool validate_call_args(Label label, const Prototype &prototype, const std::vector<Value> &args);
+  bool validate_binary(Value lhs, Value rhs, bool require_integer = false);
+  bool validate_label(Label label);
+  bool validate_target(Label target);
+  BlockState *find_block(std::size_t label_id) noexcept;
+  bool ensure_block(Label label);
+  Label create_attached_label(bool entry);
+  void append_branch(Label label, Opcode opcode, Label target);
+  void append_branch(Label label, Opcode opcode, Label target, Operand lhs, Operand rhs);
+
+  Function *function_;
+  std::optional<Error> error_;
+  std::vector<BlockState> blocks_;
+  std::optional<std::size_t> entry_label_id_;
+  std::optional<std::size_t> current_label_id_;
+  bool first_block_started_ = false;
+  std::size_t next_temp_id_ = 0;
+};
+
+Value operator+(Value lhs, Value rhs);
+Value operator-(Value lhs, Value rhs);
+Value operator*(Value lhs, Value rhs);
+Value operator/(Value lhs, Value rhs);
+Value operator%(Value lhs, Value rhs);
+Cond operator==(Value lhs, Value rhs);
+Cond operator!=(Value lhs, Value rhs);
+Cond operator<(Value lhs, Value rhs);
+Cond operator<=(Value lhs, Value rhs);
+Cond operator>(Value lhs, Value rhs);
+Cond operator>=(Value lhs, Value rhs);
 
 const char *opcode_name(Opcode opcode) noexcept;
 const char *type_name(Type type) noexcept;
+
+Result<std::vector<std::byte>> encode_binary(const Module &module);
 
 } // namespace mirnext
 

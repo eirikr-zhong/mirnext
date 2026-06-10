@@ -39,6 +39,9 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
   case Operand::Kind::Int64:
     out << operand.int64_value();
     break;
+  case Operand::Kind::UInt64:
+    out << operand.uint64_value();
+    break;
   case Operand::Kind::Float32:
     out << std::setprecision(9) << operand.float32_value() << 'f';
     break;

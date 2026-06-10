@@ -47,6 +47,15 @@ Result<std::int64_t> generate_and_call_i64(LegacyContext &context, MIR_module_t 
                                            MIR_item_t function, const std::int64_t *args = nullptr,
                                            std::size_t arg_count = 0);
 
+Result<std::uint64_t> interpret_u64(LegacyContext &context, MIR_module_t module, MIR_item_t function,
+                                    const std::uint64_t *args = nullptr,
+                                    std::size_t arg_count = 0);
+
+Result<std::uint64_t> generate_and_call_u64(LegacyContext &context, MIR_module_t module,
+                                            MIR_item_t function,
+                                            const std::uint64_t *args = nullptr,
+                                            std::size_t arg_count = 0);
+
 Result<double> interpret_double(LegacyContext &context, MIR_module_t module, MIR_item_t function,
                                 const double *args = nullptr, std::size_t arg_count = 0);
 
