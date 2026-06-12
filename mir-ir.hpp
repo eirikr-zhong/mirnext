@@ -27,6 +27,7 @@ class Var;
 class Memory;
 class Expr;
 class VarRef;
+class MemoryRef;
 class CallResult;
 
 class Type {

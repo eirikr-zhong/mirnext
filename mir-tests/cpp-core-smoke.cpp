@@ -28,6 +28,49 @@ template <class T> static T expect(T value, int) {
     expr;                     \
   } while (false)
 
+template <class T>
+concept HasPublicNop = requires(T &block) { block.nop(); };
+
+template <class T>
+concept HasPublicBts = requires(T &block, mirnext::Value cond, mirnext::Label &target) {
+  block.bts(cond, target);
+};
+
+template <class T>
+concept HasPublicBfs = requires(T &block, mirnext::Value cond, mirnext::Label &target) {
+  block.bfs(cond, target);
+};
+
+template <class T>
+concept HasPublicBeq = requires(T &block, mirnext::Value lhs, mirnext::Value rhs,
+                                mirnext::Label &target) { block.beq(lhs, rhs, target); };
+
+template <class T>
+concept HasPublicBne = requires(T &block, mirnext::Value lhs, mirnext::Value rhs,
+                                mirnext::Label &target) { block.bne(lhs, rhs, target); };
+
+template <class T>
+concept HasPublicBlt = requires(T &block, mirnext::Value lhs, mirnext::Value rhs,
+                                mirnext::Label &target) { block.blt(lhs, rhs, target); };
+
+template <class T>
+concept HasPublicUble = requires(T &block, mirnext::Value lhs, mirnext::Value rhs,
+                                 mirnext::Label &target) { block.uble(lhs, rhs, target); };
+
+template <class T>
+concept HasPublicDbge = requires(T &block, mirnext::Value lhs, mirnext::Value rhs,
+                                 mirnext::Label &target) { block.dbge(lhs, rhs, target); };
+
+// Public branch DSL stays at value-producing comparisons plus bool branches.
+static_assert(!HasPublicNop<mirnext::Block>);
+static_assert(!HasPublicBts<mirnext::Block>);
+static_assert(!HasPublicBfs<mirnext::Block>);
+static_assert(!HasPublicBeq<mirnext::Block>);
+static_assert(!HasPublicBne<mirnext::Block>);
+static_assert(!HasPublicBlt<mirnext::Block>);
+static_assert(!HasPublicUble<mirnext::Block>);
+static_assert(!HasPublicDbge<mirnext::Block>);
+
 static int check_result_api() {
   mirnext::Result<int> ok = 7;
   if (!ok || *ok != 7 || ok.value_ptr() == nullptr || ok.error_ptr() != nullptr) return 10;
@@ -213,14 +256,52 @@ static int check_errors() {
   }
   if (condition_fn.instruction_count() != condition_instruction_count) return 86;
 
+  mirnext::Module &false_condition_module = ctx.new_module("false_condition_error");
+  mirnext::Function &false_condition_fn = false_condition_module.new_function(
+      "false_condition", {}, {});
+  mirnext::Label &false_condition_target = false_condition_fn.label();
+  const std::size_t false_condition_instruction_count = false_condition_fn.instruction_count();
+  false_condition_fn.if_not(false_condition_fn.i64(1), false_condition_target);
+  if (!false_condition_module.error()
+      || false_condition_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 122;
+  }
+  if (false_condition_fn.instruction_count() != false_condition_instruction_count) return 123;
+
+  mirnext::Module &false_target_module = ctx.new_module("false_target_error");
+  mirnext::Function &false_left = false_target_module.new_function("false_left", {}, {});
+  mirnext::Function &false_right = false_target_module.new_function("false_right", {}, {});
+  mirnext::Label &foreign_false_target = false_right.label();
+  const std::size_t false_target_instruction_count = false_left.instruction_count();
+  false_left.if_not(false_left.b(true), foreign_false_target);
+  if (!false_target_module.error()
+      || false_target_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 124;
+  }
+  if (false_left.instruction_count() != false_target_instruction_count) return 125;
+
   mirnext::Module &bool_mem_module = ctx.new_module("bool_mem_error");
   mirnext::Function &bool_mem_fn = bool_mem_module.new_function("bool_mem", {}, {});
-  mirnext::Value storage = expect(bool_mem_fn.alloca(8, "storage"), 87);
-  mirnext::Memory bool_mem = bool_mem_fn.mem(mirnext::Type::b(), storage);
+  mirnext::Value storage = expect(bool_mem_fn.value(mirnext::Type::p(), "storage"), 87);
+  mirnext::Memory bool_mem = bool_mem_fn.mem(mirnext::Type::b(), storage, 8);
   if (!bool_mem.is_valid()) return 88;
   if (!bool_mem_module.error()
       || bool_mem_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
     return 89;
+  }
+
+  mirnext::Module &non_register_mem_module = ctx.new_module("non_register_mem_error");
+  mirnext::Function &non_register_mem_fn = non_register_mem_module.new_function(
+      "non_register_mem", {}, {});
+  mirnext::Memory non_register_mem = non_register_mem_fn.mem(
+      mirnext::Type::i64(), non_register_mem_fn.i64(1), 8);
+  if (!non_register_mem.is_valid()
+      || non_register_mem.operand().kind() != mirnext::Operand::Kind::Poison) {
+    return 120;
+  }
+  if (!non_register_mem_module.error()
+      || non_register_mem_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 121;
   }
 
   return 0;
@@ -241,8 +322,11 @@ static int check_bool_api() {
   if (literal.type() != mirnext::Type::b()) return 196;
   mirnext::Label &target = function.label("target");
   expect_ok(function.if_(literal, target), 197);
-  expect_ok(function.ret(less), 198);
-  expect_ok(target.ret(expect(target.b(false), 199)), 200);
+  mirnext::Label &false_target = function.label("false_target");
+  expect_ok(function.if_not(equal, false_target), 198);
+  expect_ok(function.ret(less), 199);
+  expect_ok(target.ret(expect(target.b(false), 200)), 201);
+  expect_ok(false_target.ret(expect(false_target.b(true), 209)), 210);
   expect_ok(function.end(), 201);
   if (module.error()) return 202;
 
@@ -254,7 +338,10 @@ static int check_bool_api() {
   if (!contains(text, "lt %")) return 205;
   if (!contains(text, "eq %")) return 206;
   if (!contains(text, "bt L")) return 207;
+  if (!contains(text, "bf L")) return 211;
   if (!contains(text, "ret %")) return 208;
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 212;
   return 0;
 }
 
@@ -309,7 +396,8 @@ static int check_expression_ops() {
 
   mirnext::Module &ptr_module = error_ctx.new_module("ptr_shift_error");
   mirnext::Function &ptr_fn = ptr_module.new_function("p", {}, {});
-  mirnext::Value bad_ptr = ptr_fn.alloca(8, "buf") << ptr_fn.i64(1);
+  mirnext::Value ptr = expect(ptr_fn.value(mirnext::Type::p(), "ptr"), 152);
+  mirnext::Value bad_ptr = ptr << ptr_fn.i64(1);
   if (!bad_ptr.is_valid() || !bad_ptr.is_poison()) return 152;
   if (!ptr_module.error()
       || ptr_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
@@ -389,6 +477,42 @@ static int check_overflow_api() {
   expect_ok(small_function.end(), 294);
   if (module.error()) return 295;
 
+  mirnext::Function &unsigned_mul_function = module.new_function(
+      "checked_unsigned_mul", {mirnext::Type::u64()}, {{mirnext::Type::u64(), "a"},
+                                                       {mirnext::Type::u64(), "b"}});
+  mirnext::Value unsigned_mul_a = expect(unsigned_mul_function.arg("a"), 370).overflow(true);
+  mirnext::Value unsigned_mul_b = expect(unsigned_mul_function.arg("b"), 371);
+  mirnext::Label &unsigned_overflow = unsigned_mul_function.label("unsigned_overflow");
+  mirnext::Value unsigned_product = expect(unsigned_mul_a * unsigned_mul_b, 372);
+  if (!unsigned_product.checks_overflow() || !unsigned_product.has_overflow_result()) return 373;
+  expect_ok(unsigned_mul_function.if_overflow(unsigned_product, unsigned_overflow), 374);
+  expect_ok(unsigned_mul_function.ret(unsigned_product), 375);
+  expect_ok(unsigned_overflow.ret(expect(unsigned_overflow.u64(0), 376)), 377);
+  expect_ok(unsigned_mul_function.end(), 378);
+  if (module.error()) return 379;
+
+  mirnext::Function &unsigned_small_mul_function = module.new_function(
+      "checked_unsigned_i32_mul", {mirnext::Type::u32()}, {{mirnext::Type::u32(), "a"},
+                                                           {mirnext::Type::u32(), "b"}});
+  mirnext::Value unsigned_small_a
+      = expect(unsigned_small_mul_function.arg("a"), 380).overflow(true);
+  mirnext::Value unsigned_small_b = expect(unsigned_small_mul_function.arg("b"), 381);
+  mirnext::Label &unsigned_no_overflow
+      = unsigned_small_mul_function.label("unsigned_no_overflow");
+  mirnext::Value unsigned_small_product = expect(unsigned_small_a * unsigned_small_b, 382);
+  if (!unsigned_small_product.checks_overflow()
+      || !unsigned_small_product.has_overflow_result()) {
+    return 383;
+  }
+  expect_ok(unsigned_small_mul_function.if_no_overflow(unsigned_small_product,
+                                                       unsigned_no_overflow),
+            384);
+  expect_ok(unsigned_small_mul_function.ret(expect(unsigned_small_mul_function.u32(0), 385)),
+            386);
+  expect_ok(unsigned_no_overflow.ret(unsigned_small_product), 387);
+  expect_ok(unsigned_small_mul_function.end(), 388);
+  if (module.error()) return 389;
+
   mirnext::Function &plain_function = module.new_function(
       "overflow_disabled", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "a"},
                                                    {mirnext::Type::i64(), "b"}});
@@ -411,6 +535,10 @@ static int check_overflow_api() {
   if (!contains(text, "addos %")) return 307;
   if (!contains(text, "bo L")) return 308;
   if (!contains(text, "bno L")) return 309;
+  if (!contains(text, "umulo %")) return 390;
+  if (!contains(text, "umulos %")) return 391;
+  if (!contains(text, "ubo L")) return 392;
+  if (!contains(text, "ubno L")) return 393;
   if (!contains(text, "func overflow_disabled")) return 310;
 
   auto expect_invalid = [](mirnext::Module &m, int code) {
@@ -451,7 +579,7 @@ static int check_overflow_api() {
 
   mirnext::Module &ptr_module = ctx.new_module("overflow_ptr_error");
   mirnext::Function &ptr_fn = ptr_module.new_function("f", {}, {});
-  mirnext::Value ptr = expect(ptr_fn.alloca(8, "p"), 327).overflow(true);
+  mirnext::Value ptr = expect(ptr_fn.value(mirnext::Type::p(), "p"), 327).overflow(true);
   mirnext::Value ptr_bad = ptr + ptr;
   if (!ptr_bad.is_valid() || !ptr_bad.is_poison()) return 328;
   if (int code = expect_invalid(ptr_module, 329)) return code;
@@ -694,6 +822,202 @@ static int check_binary_encode_errors() {
   return 0;
 }
 
+static int check_memory_displacement_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("memory_displacement");
+  mirnext::Function &function = module.new_function("memory_displacement",
+                                                    {mirnext::Type::i64()}, {});
+  mirnext::Memory ptr = expect(function.alloca(16, "buf"), 430);
+  function[ptr.cast_ptr(mirnext::Type::i64())[1]] = expect(function.i64(42), 432);
+  mirnext::Value loaded = expect(function[ptr.cast_ptr(mirnext::Type::i64())[1]], 435);
+  expect_ok(function.ret(loaded), 436);
+  expect_ok(function.end(), 437);
+  if (module.error()) return 438;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "mov i64:(%buf, %r0, 1, 8) 42")) return 439;
+  if (!contains(text, "mov %.t1 i64:(%buf, %r0, 1, 8)")) return 440;
+
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 441;
+  return 0;
+}
+
+static int check_memory_pointer_dsl_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("memory_pointer_dsl");
+  mirnext::Function &function = module.new_function(
+      "memory_pointer_dsl", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "index"}});
+
+  mirnext::Memory bytes = expect(function.alloca(32, "buf"), 450);
+  if (bytes.type() != mirnext::Type::u8()) return 451;
+  if (bytes.operand().memory_displacement() != 0) return 452;
+
+  mirnext::Memory words = bytes.cast_ptr(mirnext::Type::i64());
+  if (words.type() != mirnext::Type::i64()) return 453;
+  if (bytes.type() != mirnext::Type::u8()) return 454;
+
+  mirnext::Memory zero = words[0];
+  mirnext::Memory next = words[1];
+  mirnext::Memory prev = words[-1];
+  if (zero.operand().memory_displacement() != 0) return 455;
+  if (next.operand().memory_displacement() != 8) return 456;
+  if (prev.operand().memory_displacement() != -8) return 457;
+
+  function[zero] = expect(function.i64(7), 458);
+  function[next] = expect(function.i64(11), 459);
+  mirnext::Value index = expect(function.arg("index"), 460);
+  mirnext::Memory indexed = words[index];
+  if (indexed.operand().memory_index_register_id() != index.operand().register_id()) return 461;
+  if (indexed.operand().memory_scale() != 8) return 462;
+  mirnext::Value loaded = function[next];
+  expect_ok(function.ret(loaded), 463);
+  expect_ok(function.end(), 464);
+  if (module.error()) return 465;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "alloca %buf 32")) return 466;
+  if (!contains(text, "mov i64:(%buf, %r0, 1) 7")) return 467;
+  if (!contains(text, "mov i64:(%buf, %r0, 1, 8) 11")) return 468;
+
+  mirnext::Module &typed_module = ctx.new_module("typed_alloca_pointer_dsl");
+  mirnext::Function &typed_fn = typed_module.new_function("typed", {mirnext::Type::i64()}, {});
+  mirnext::Memory typed = expect(typed_fn.alloca(mirnext::Type::i64(), 2, "items"), 469);
+  if (typed.type() != mirnext::Type::i64()) return 470;
+  typed_fn[typed[1]] = expect(typed_fn.i64(3), 471);
+  typed_fn.ret(typed_fn[typed[1]]);
+  typed_fn.end();
+  if (typed_module.error()) return 472;
+
+  mirnext::Module &addr_module = ctx.new_module("value_as_mem_pointer_dsl");
+  mirnext::Function &addr_fn = addr_module.new_function(
+      "addr", {}, {{mirnext::Type::p(), "ptr"}, {mirnext::Type::i64(), "value"}});
+  mirnext::Value raw = expect(addr_fn.arg("ptr"), 473);
+  mirnext::Value value = expect(addr_fn.arg("value"), 474);
+  addr_fn[raw.as_mem(mirnext::Type::i64())] = value;
+  addr_fn.ret();
+  addr_fn.end();
+  if (addr_module.error()) return 475;
+
+  return 0;
+}
+
+static int check_memory_pointer_dsl_errors() {
+  mirnext::Context ctx;
+
+  mirnext::Module &byte_store_module = ctx.new_module("byte_store_error");
+  mirnext::Function &byte_store_fn = byte_store_module.new_function("byte_store", {}, {});
+  mirnext::Memory byte_mem = expect(byte_store_fn.alloca(8, "buf"), 480);
+  byte_store_fn[byte_mem] = expect(byte_store_fn.i64(1), 481);
+  if (!byte_store_module.error()
+      || byte_store_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 482;
+  }
+
+  mirnext::Module &as_mem_module = ctx.new_module("as_mem_error");
+  mirnext::Function &as_mem_fn = as_mem_module.new_function("as_mem", {}, {});
+  mirnext::Memory bad_addr = as_mem_fn.i64(1).as_mem(mirnext::Type::i64());
+  if (!bad_addr.is_valid()
+      || bad_addr.operand().kind() != mirnext::Operand::Kind::Poison) {
+    return 483;
+  }
+  if (!as_mem_module.error()
+      || as_mem_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 484;
+  }
+
+  mirnext::Module &scale_module = ctx.new_module("memory_scale_error");
+  mirnext::Function &scale_fn = scale_module.new_function(
+      "scale", {}, {{mirnext::Type::i64(), "index"}});
+  mirnext::Memory ld_mem = expect(scale_fn.alloca(mirnext::Type::ld(), 2, "ld"), 485);
+  mirnext::Value index = expect(scale_fn.arg("index"), 486);
+  mirnext::Memory bad_indexed = ld_mem[index];
+  if (!bad_indexed.is_valid()
+      || bad_indexed.operand().kind() != mirnext::Operand::Kind::Poison) {
+    return 487;
+  }
+  if (!scale_module.error()
+      || scale_module.error()->code != mirnext::ErrorCode::InvalidArgument) {
+    return 488;
+  }
+
+  return 0;
+}
+
+static int check_call_result_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("call_result_api");
+  mirnext::Prototype &prototype = module.new_prototype(
+      "pair_p",
+      {mirnext::Type::i64(), mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "arg"}});
+
+  mirnext::Function &callee = module.new_function(
+      "pair",
+      {mirnext::Type::i64(), mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "arg"}});
+  mirnext::Value callee_arg = expect(callee.arg("arg"), 401);
+  expect_ok(callee.ret({callee_arg, expect(callee_arg + expect(callee.i64(1), 402), 403)}), 404);
+  expect_ok(callee.end(), 405);
+
+  mirnext::Function &caller = module.new_function(
+      "call_pair",
+      {mirnext::Type::i64(), mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "arg"}});
+  mirnext::Value arg = expect(caller.arg("arg"), 406);
+  mirnext::CallResult result = caller.call_multi(prototype, callee, {arg});
+  if (result.empty()) return 407;
+  if (result.size() != 2) return 408;
+  if (result.values().size() != 2) return 409;
+
+  std::size_t first = 0;
+  std::size_t second = 1;
+  mirnext::Value a = result[first];
+  mirnext::Value b = result[second];
+  if (!a.is_valid() || !b.is_valid()) return 410;
+  if (a.type() != mirnext::Type::i64() || b.type() != mirnext::Type::i64()) return 411;
+  if (result.values()[first].type() != mirnext::Type::i64()
+      || result.values()[second].type() != mirnext::Type::i64()) {
+    return 412;
+  }
+  expect_ok(caller.ret({result[first], result[second]}), 413);
+  expect_ok(caller.end(), 414);
+
+  mirnext::Function &take_caller = module.new_function(
+      "take_pair",
+      {mirnext::Type::i64(), mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "arg"}});
+  mirnext::Value take_arg = expect(take_caller.arg("arg"), 415);
+  mirnext::CallResult take_result = take_caller.call_multi(prototype, callee, {take_arg});
+  std::vector<mirnext::Value> taken = take_result.take_values();
+  if (taken.size() != 2) return 417;
+  if (taken[first].type() != mirnext::Type::i64()
+      || taken[second].type() != mirnext::Type::i64()) {
+    return 418;
+  }
+  expect_ok(take_caller.ret(taken), 419);
+  expect_ok(take_caller.end(), 420);
+
+  if (module.error()) return 421;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "proto pair_p(i64 %arg) -> i64, i64")) return 422;
+  if (!contains(text, "func pair(i64 %arg) -> i64, i64")) return 423;
+  if (!contains(text, "func call_pair(i64 %arg) -> i64, i64")) return 424;
+  if (!contains(text, "call @pair_p @pair %.t0 %.t1 %arg")) return 425;
+  if (!contains(text, "ret %.t0 %.t1")) return 426;
+
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 427;
+  return 0;
+}
+
 int main() {
   if (int code = check_result_api()) return code;
   if (int code = check_block_tree_api()) return code;
@@ -704,6 +1028,10 @@ int main() {
   if (int code = check_overflow_api()) return code;
   if (int code = check_switch_and_data_api()) return code;
   if (int code = check_binary_encode_errors()) return code;
+  if (int code = check_memory_displacement_api()) return code;
+  if (int code = check_memory_pointer_dsl_api()) return code;
+  if (int code = check_memory_pointer_dsl_errors()) return code;
+  if (int code = check_call_result_api()) return code;
 
   mirnext::Context ctx;
   mirnext::Module &module = ctx.new_module("m");

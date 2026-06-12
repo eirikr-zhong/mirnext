@@ -6,6 +6,7 @@
 
 #include "mir-ir.hpp"
 
+#include <cstdlib>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
@@ -115,10 +116,10 @@ public:
   Var var(Type type, std::string_view name);
   Value value(Type type, std::string_view name);
   Value addr(Value ref, std::string_view name = {});
-  Value alloca(std::int64_t size, std::string_view name);
-  Value alloca(Type element_type, std::string_view name);
-  Value alloca(Type element_type, std::int64_t count, std::string_view name);
-  Memory mem(Type type, Value base);
+  Memory alloca(std::int64_t size, std::string_view name);
+  Memory alloca(Type element_type, std::string_view name);
+  Memory alloca(Type element_type, std::int64_t count, std::string_view name);
+  Memory mem(Type type, Value base, std::int64_t displacement = 0);
   Memory mem(Type type, Value base, Value index, int scale = 1,
              std::int64_t displacement = 0);
   Value load(Memory memory);
@@ -140,10 +141,14 @@ public:
   void call_void(const Prototype &prototype, const Import &callee, std::vector<Value> args);
   void call_void(const Prototype &prototype, const Function &callee, std::vector<Value> args);
   VarRef operator[](Var var);
+  MemoryRef operator[](Memory memory);
   Expr expr(Value value);
   Expr expr(std::int64_t value);
   void jmp(Label &target);
+  // Keep compare-and-branch opcodes (beq/blt/ublt/dbge, etc.) IR-only for now.
+  // The Builder DSL uses value-producing comparisons plus bool branches instead.
   void if_(Value cond, Label &target);
+  void if_not(Value cond, Label &target);
   void if_overflow(Value value, Label &target);
   void if_no_overflow(Value value, Label &target);
   void switch_(Value index, std::vector<Label *> targets);
@@ -172,6 +177,8 @@ private:
   friend class Module;
   friend class Expr;
   friend class VarRef;
+  friend class Memory;
+  friend class MemoryRef;
   friend class Var;
   friend Value detail::value_unary(int op, Value value);
   friend Value detail::value_binary(int op, Value lhs, Value rhs);
@@ -204,6 +211,9 @@ private:
   bool validate_value(const Value &value, std::string_view description);
   bool validate_register_value(const Value &value, std::string_view description);
   bool validate_memory(const Memory &memory);
+  Memory cast_memory(Memory memory, Type element_type);
+  Memory index_memory(Memory memory, std::int64_t index);
+  Memory index_memory(Memory memory, Value index);
   bool validate_reference_value(const Value &value, std::string_view description);
   bool validate_target(const Label &target);
   bool validate_overflow_branch_value(const Value &value);
@@ -390,6 +400,7 @@ public:
   template <Type::Kind To> Value convert() const {
     return convert(To);
   }
+  Memory as_mem(Type element_type) const;
 
 private:
   friend class Block;
@@ -409,6 +420,7 @@ private:
   bool overflow_enabled_ = false;
   bool overflow_pending_ = false;
   std::size_t overflow_sequence_ = 0;
+  bool unsigned_overflow_branch_ = false;
 };
 
 class Var {
@@ -445,6 +457,9 @@ public:
   Type type() const noexcept;
   Operand operand() const noexcept;
   bool is_valid() const noexcept;
+  Memory cast_ptr(Type element_type) const;
+  Memory operator[](std::int64_t index) const;
+  Memory operator[](Value index) const;
 
 private:
   friend class Block;
@@ -463,8 +478,14 @@ public:
 
   bool empty() const noexcept { return values_.empty(); }
   std::size_t size() const noexcept { return values_.size(); }
-  const Value &operator[](std::size_t index) const noexcept { return values_[index]; }
-  Value &operator[](std::size_t index) noexcept { return values_[index]; }
+  const Value &operator[](std::size_t index) const noexcept {
+    if (index >= values_.size()) std::abort();
+    return values_[index];
+  }
+  Value &operator[](std::size_t index) noexcept {
+    if (index >= values_.size()) std::abort();
+    return values_[index];
+  }
   const std::vector<Value> &values() const noexcept { return values_; }
   std::vector<Value> &&take_values() noexcept { return std::move(values_); }
 
@@ -528,6 +549,22 @@ private:
 
   Block *block_;
   Var var_;
+};
+
+class MemoryRef {
+public:
+  MemoryRef() noexcept;
+
+  operator Value() const;
+  void operator=(Value rhs) const;
+
+private:
+  friend class Block;
+
+  MemoryRef(Block &block, Memory memory) noexcept;
+
+  Block *block_;
+  Memory memory_;
 };
 
 Value operator-(Value value);

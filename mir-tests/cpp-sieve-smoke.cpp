@@ -43,7 +43,7 @@ int main() {
   mirnext::Label &fin4 = function.label();
   mirnext::Label &cont3 = function.label();
 
-  mirnext::Value flags = expect(function.alloca(819000, "flags"), 21);
+  mirnext::Memory flags = expect(function.alloca(819000, "flags"), 21);
   mirnext::Var iter = expect(function.var(mirnext::Type::i64(), "iter"), 22);
   mirnext::Var count = expect(function.var(mirnext::Type::i64(), "count"), 23);
   mirnext::Var i = expect(function.var(mirnext::Type::i64(), "i"), 24);
@@ -60,9 +60,7 @@ int main() {
 
   mirnext::Value loop2_i = expect(loop2.load(i), 39);
   expect_ok(loop2.if_(expect(loop2_i >= expect(loop2.i64(819000), 40), 41), fin2), 42);
-  expect_ok(loop2.store(expect(loop2.mem(mirnext::Type::u8(), flags, loop2_i), 43),
-                        expect(loop2.u8(1), 44)),
-            45);
+  loop2[flags[loop2_i]] = expect(loop2.u8(1), 44);
   expect_ok(loop2.store(i, expect(loop2_i + expect(loop2.i64(1), 46), 47)), 48);
   expect_ok(loop2.jmp(loop2), 49);
 
@@ -71,8 +69,7 @@ int main() {
 
   mirnext::Value loop3_i = expect(loop3.load(i), 53);
   expect_ok(loop3.if_(expect(loop3_i >= expect(loop3.i64(819000), 54), 55), fin3), 56);
-  mirnext::Value flag = expect(loop3.load(expect(loop3.mem(mirnext::Type::u8(), flags, loop3_i), 57)),
-                               58);
+  mirnext::Value flag = expect(loop3[flags[loop3_i]], 58);
   expect_ok(loop3.if_(expect(flag == expect(loop3.u8(0), 59), 60), cont3), 61);
   mirnext::Value next_prime = expect(loop3_i + expect(loop3.i64(1), 62), 63);
   expect_ok(loop3.store(prime, next_prime), 64);
@@ -81,9 +78,7 @@ int main() {
 
   mirnext::Value loop4_k = expect(loop4.load(k), 68);
   expect_ok(loop4.if_(expect(loop4_k >= expect(loop4.i64(819000), 69), 70), fin4), 71);
-  expect_ok(loop4.store(expect(loop4.mem(mirnext::Type::u8(), flags, loop4_k), 72),
-                        expect(loop4.u8(0), 73)),
-            74);
+  loop4[flags[loop4_k]] = expect(loop4.u8(0), 73);
   expect_ok(loop4.store(k, expect(loop4_k + expect(loop4.load(prime), 75), 76)), 77);
   expect_ok(loop4.jmp(loop4), 78);
 

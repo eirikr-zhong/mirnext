@@ -430,11 +430,29 @@ std::optional<Opcode> overflow_binary_opcode(BinaryOp op, Type type) noexcept {
       return std::nullopt;
     }
     break;
-  case Type::Kind::B:
   case Type::Kind::U8:
   case Type::Kind::U16:
   case Type::Kind::U32:
+    switch (op) {
+    case BinaryOp::Mul: return Opcode::UMulos;
+    case BinaryOp::Add:
+    case BinaryOp::Sub:
+    case BinaryOp::Div:
+    case BinaryOp::Mod:
+      return std::nullopt;
+    }
+    break;
   case Type::Kind::U64:
+    switch (op) {
+    case BinaryOp::Mul: return Opcode::UMulo;
+    case BinaryOp::Add:
+    case BinaryOp::Sub:
+    case BinaryOp::Div:
+    case BinaryOp::Mod:
+      return std::nullopt;
+    }
+    break;
+  case Type::Kind::B:
   case Type::Kind::F:
   case Type::Kind::D:
   case Type::Kind::LD:
@@ -452,6 +470,8 @@ bool is_overflow_opcode(Opcode opcode) noexcept {
   case Opcode::Subos:
   case Opcode::Mulo:
   case Opcode::Mulos:
+  case Opcode::UMulo:
+  case Opcode::UMulos:
     return true;
   default:
     return false;
@@ -584,6 +604,10 @@ Operand memory_operand(Type type, const Value &base, std::size_t index_register,
   return Operand::mem(type, base.operand().register_id(), index_register, displacement, scale);
 }
 
+bool valid_memory_scale(std::int64_t scale) noexcept {
+  return scale == 1 || scale == 2 || scale == 4 || scale == 8;
+}
+
 Error invalid_operand(std::string message) {
   return Error{ErrorCode::InvalidOperand, std::move(message)};
 }
@@ -608,6 +632,7 @@ Value &Value::overflow(bool enabled) & noexcept {
   if (!enabled) {
     overflow_pending_ = false;
     overflow_sequence_ = 0;
+    unsigned_overflow_branch_ = false;
   }
   return *this;
 }
@@ -617,6 +642,7 @@ Value &&Value::overflow(bool enabled) && noexcept {
   if (!enabled) {
     overflow_pending_ = false;
     overflow_sequence_ = 0;
+    unsigned_overflow_branch_ = false;
   }
   return std::move(*this);
 }
@@ -637,6 +663,11 @@ Value Value::convert(Type::Kind to) const {
 Value Value::convert(Type to) const {
   if (!is_valid()) return Value();
   return block_->convert(*this, to);
+}
+
+Memory Value::as_mem(Type element_type) const {
+  if (!is_valid()) return Memory();
+  return block_->mem(element_type, *this);
 }
 
 Var::Var() noexcept : block_(nullptr), storage_() {}
@@ -680,6 +711,21 @@ Operand Memory::operand() const noexcept { return operand_; }
 bool Memory::is_valid() const noexcept { return block_ != nullptr; }
 Memory Memory::poison(Block &block, Type type) noexcept {
   return Memory(block, type, Operand::poison());
+}
+
+Memory Memory::cast_ptr(Type element_type) const {
+  if (!is_valid()) return Memory();
+  return block_->cast_memory(*this, element_type);
+}
+
+Memory Memory::operator[](std::int64_t index) const {
+  if (!is_valid()) return Memory();
+  return block_->index_memory(*this, index);
+}
+
+Memory Memory::operator[](Value index) const {
+  if (!is_valid()) return Memory();
+  return block_->index_memory(*this, std::move(index));
 }
 
 Expr::Expr() noexcept : block_(nullptr), type_(Type::i64()), value_() {}
@@ -972,6 +1018,24 @@ void VarRef::operator=(std::int64_t rhs) const {
   *this = Expr(*block_, block_->integer_literal(var_.is_valid() ? var_.type() : Type::i64(), rhs));
 }
 
+MemoryRef::MemoryRef() noexcept : block_(nullptr), memory_() {}
+MemoryRef::MemoryRef(Block &block, Memory memory) noexcept
+    : block_(&block), memory_(std::move(memory)) {}
+
+MemoryRef::operator Value() const {
+  if (block_ == nullptr) return Value();
+  if (block_->error()) {
+    return block_->poison_value(memory_.is_valid() ? memory_.type() : Type::i64());
+  }
+  return block_->load(memory_);
+}
+
+void MemoryRef::operator=(Value rhs) const {
+  if (block_ == nullptr) return;
+  if (block_->error()) return;
+  block_->store(memory_, std::move(rhs));
+}
+
 Value Block::i8(std::int8_t value) { return integer_literal(Type::i8(), value); }
 Value Block::u8(std::uint8_t value) { return integer_literal(Type::u8(), value); }
 Value Block::i16(std::int16_t value) { return integer_literal(Type::i16(), value); }
@@ -1001,6 +1065,8 @@ Value Block::ld(long double value) {
 }
 
 VarRef Block::operator[](Var var) { return VarRef(*this, std::move(var)); }
+
+MemoryRef Block::operator[](Memory memory) { return MemoryRef(*this, std::move(memory)); }
 
 Expr Block::expr(Value value) {
   if (error()) return Expr(*this, poison_value(value.is_valid() ? value.type() : Type::i64()));
@@ -1124,57 +1190,58 @@ void Block::init_module_var(Value storage, Value rhs) {
   binding.initializer = rhs.operand();
 }
 
-Value Block::alloca(std::int64_t size, std::string_view name) {
-  if (error()) return poison_value(Type::p());
+Memory Block::alloca(std::int64_t size, std::string_view name) {
+  if (error()) return poison_memory(Type::u8());
   if (function_ == nullptr) {
     fail(invalid_operand("alloca requires a function block"));
-    return poison_value(Type::p());
+    return poison_memory(Type::u8());
   }
   if (size < 0) {
     fail(Error{ErrorCode::InvalidArgument, "alloca size must be non-negative"});
-    return poison_value(Type::p());
+    return poison_memory(Type::u8());
   }
 
   Result<Register> reg = function_->create_register_internal(Type::p(), name, false);
   if (!reg) {
     fail(std::move(reg).error());
-    return poison_value(Type::p());
+    return poison_memory(Type::u8());
   }
   Register reg_value = *reg;
   append_operation(Instruction(Opcode::Alloca, {Operand(reg_value), Operand::int64(size)}));
-  return Value(*this, Type::p(), Operand(reg_value));
+  Value base(*this, Type::p(), Operand(reg_value));
+  return Memory(*this, Type::u8(), memory_operand(Type::u8(), base, 0, 0, 1));
 }
 
-Value Block::alloca(Type element_type, std::string_view name) {
+Memory Block::alloca(Type element_type, std::string_view name) {
   return alloca(element_type, 1, name);
 }
 
-Value Block::alloca(Type element_type, std::int64_t count, std::string_view name) {
-  if (error()) return poison_value(Type::p());
+Memory Block::alloca(Type element_type, std::int64_t count, std::string_view name) {
+  if (error()) return poison_memory(element_type);
   if (count < 0) {
     fail(Error{ErrorCode::InvalidArgument, "alloca element count must be non-negative"});
-    return poison_value(Type::p());
+    return poison_memory(element_type);
   }
   if (!is_memory_type(element_type)) {
     fail(invalid_operand("alloca element type is not supported"));
-    return poison_value(Type::p());
+    return poison_memory(element_type);
   }
   const std::int64_t element_size = type_size(element_type);
   if (count > std::numeric_limits<std::int64_t>::max() / element_size) {
     fail(Error{ErrorCode::InvalidArgument, "alloca size overflow"});
-    return poison_value(Type::p());
+    return poison_memory(element_type);
   }
-  return alloca(element_size * count, name);
+  return alloca(element_size * count, name).cast_ptr(element_type);
 }
 
-Memory Block::mem(Type type, Value base) {
+Memory Block::mem(Type type, Value base, std::int64_t displacement) {
   if (error()) return poison_memory(type);
   if (!is_memory_type(type)) {
     fail(invalid_operand("memory type is not supported"));
     return poison_memory(type);
   }
   if (!validate_register_value(base, "memory base")) return poison_memory(type);
-  return Memory(*this, type, memory_operand(type, base, 0, 0, 1));
+  return Memory(*this, type, memory_operand(type, base, 0, displacement, 1));
 }
 
 Memory Block::mem(Type type, Value base, Value index, int scale,
@@ -1184,7 +1251,7 @@ Memory Block::mem(Type type, Value base, Value index, int scale,
     fail(invalid_operand("memory type is not supported"));
     return poison_memory(type);
   }
-  if (scale != 1 && scale != 2 && scale != 4 && scale != 8) {
+  if (!valid_memory_scale(scale)) {
     fail(Error{ErrorCode::InvalidArgument, "memory scale must be 1, 2, 4, or 8"});
     return poison_memory(type);
   }
@@ -1359,18 +1426,31 @@ void Block::if_(Value cond, Label &target) {
   append_operation(Instruction(Opcode::Bt, {Operand(target), cond.operand_}));
 }
 
+void Block::if_not(Value cond, Label &target) {
+  if (error()) return;
+  if (!validate_value(cond, "condition")) return;
+  if (cond.type_ != Type::b()) {
+    fail(invalid_operand("condition must be a bool value"));
+    return;
+  }
+  if (!validate_target(target)) return;
+  append_operation(Instruction(Opcode::Bf, {Operand(target), cond.operand_}));
+}
+
 void Block::if_overflow(Value value, Label &target) {
   if (error()) return;
   if (!validate_overflow_branch_value(value)) return;
   if (!validate_target(target)) return;
-  append_operation(Instruction(Opcode::Bo, {Operand(target)}));
+  append_operation(Instruction(value.unsigned_overflow_branch_ ? Opcode::UBo : Opcode::Bo,
+                               {Operand(target)}));
 }
 
 void Block::if_no_overflow(Value value, Label &target) {
   if (error()) return;
   if (!validate_overflow_branch_value(value)) return;
   if (!validate_target(target)) return;
-  append_operation(Instruction(Opcode::Bno, {Operand(target)}));
+  append_operation(Instruction(value.unsigned_overflow_branch_ ? Opcode::UBno : Opcode::Bno,
+                               {Operand(target)}));
 }
 
 void Block::switch_(Value index, std::vector<Label *> targets) {
@@ -1532,8 +1612,12 @@ bool Block::validate_memory(const Memory &memory) {
     fail(invalid_operand("memory operand is invalid"));
     return false;
   }
-  if (&memory.block() != this) {
-    fail(invalid_operand("memory operand does not belong to this block"));
+  if (&memory.block().module() != &module()) {
+    fail(invalid_operand("memory operand does not belong to this module"));
+    return false;
+  }
+  if (function_ != nullptr && memory.block().function() != function_) {
+    fail(invalid_operand("memory operand does not belong to this function"));
     return false;
   }
   if (memory.operand_.kind() != Operand::Kind::Memory) {
@@ -1541,6 +1625,67 @@ bool Block::validate_memory(const Memory &memory) {
     return false;
   }
   return true;
+}
+
+Memory Block::cast_memory(Memory memory, Type element_type) {
+  if (error()) return poison_memory(element_type);
+  if (!is_memory_type(element_type)) {
+    fail(invalid_operand("memory type is not supported"));
+    return poison_memory(element_type);
+  }
+  if (!validate_memory(memory)) return poison_memory(element_type);
+  const Operand &operand = memory.operand_;
+  return Memory(*this, element_type,
+                Operand::mem(element_type, operand.memory_base_register_id(),
+                             operand.memory_index_register_id(),
+                             operand.memory_displacement(), operand.memory_scale()));
+}
+
+Memory Block::index_memory(Memory memory, std::int64_t index) {
+  if (error()) return poison_memory(memory.is_valid() ? memory.type() : Type::i64());
+  if (!validate_memory(memory)) return poison_memory(memory.is_valid() ? memory.type() : Type::i64());
+  const std::int64_t element_size = type_size(memory.type_);
+  if (index > 0 && element_size > std::numeric_limits<std::int64_t>::max() / index) {
+    fail(Error{ErrorCode::InvalidArgument, "memory index displacement overflow"});
+    return poison_memory(memory.type_);
+  }
+  if (index < 0 && index < std::numeric_limits<std::int64_t>::min() / element_size) {
+    fail(Error{ErrorCode::InvalidArgument, "memory index displacement overflow"});
+    return poison_memory(memory.type_);
+  }
+  const std::int64_t offset = index * element_size;
+  const std::int64_t displacement = memory.operand_.memory_displacement();
+  if ((offset > 0 && displacement > std::numeric_limits<std::int64_t>::max() - offset)
+      || (offset < 0 && displacement < std::numeric_limits<std::int64_t>::min() - offset)) {
+    fail(Error{ErrorCode::InvalidArgument, "memory index displacement overflow"});
+    return poison_memory(memory.type_);
+  }
+  const Operand &operand = memory.operand_;
+  return Memory(*this, memory.type_,
+                Operand::mem(memory.type_, operand.memory_base_register_id(),
+                             operand.memory_index_register_id(), displacement + offset,
+                             operand.memory_scale()));
+}
+
+Memory Block::index_memory(Memory memory, Value index) {
+  if (error()) return poison_memory(memory.is_valid() ? memory.type() : Type::i64());
+  if (!validate_memory(memory)) return poison_memory(memory.is_valid() ? memory.type() : Type::i64());
+  if (memory.operand_.memory_index_register_id() != 0) {
+    fail(invalid_operand("memory operand already has an index register"));
+    return poison_memory(memory.type_);
+  }
+  const std::int64_t scale64 = type_size(memory.type_);
+  if (!valid_memory_scale(scale64)) {
+    fail(Error{ErrorCode::InvalidArgument, "memory scale must be 1, 2, 4, or 8"});
+    return poison_memory(memory.type_);
+  }
+  if (!validate_register_value(index, "memory index")) return poison_memory(memory.type_);
+  const Operand &operand = memory.operand_;
+  Block &owner = index.block();
+  return Memory(owner, memory.type_,
+                Operand::mem(memory.type_, operand.memory_base_register_id(),
+                             index.operand_.register_id(), operand.memory_displacement(),
+                             static_cast<int>(scale64)));
 }
 
 bool Block::validate_target(const Label &target) {
@@ -1752,6 +1897,7 @@ Value Block::append_binary(Opcode opcode, Value lhs, Value rhs) {
     result.overflow(true);
     result.overflow_pending_ = true;
     result.overflow_sequence_ = emit_block->mark_overflow_pending();
+    result.unsigned_overflow_branch_ = opcode == Opcode::UMulo || opcode == Opcode::UMulos;
   }
   return result;
 }
@@ -1782,6 +1928,7 @@ Value Block::append_binary_in_current(Opcode opcode, Value lhs, Value rhs) {
     result.overflow(true);
     result.overflow_pending_ = true;
     result.overflow_sequence_ = mark_overflow_pending();
+    result.unsigned_overflow_branch_ = opcode == Opcode::UMulo || opcode == Opcode::UMulos;
   }
   return result;
 }
