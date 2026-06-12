@@ -38,6 +38,7 @@ enum class Tag : std::uint8_t {
   LD = 19,
   REG1 = 20,
   NAME1 = 24,
+  STR1 = 28,
   LAB1 = 32,
   MEM_DISP = 36,
   MEM_BASE = 37,
@@ -82,6 +83,7 @@ enum class BinaryOpcode : std::uint64_t {
   FNeg = 27,
   DNeg = 28,
   LDNeg = 29,
+  Addr = 30,
   Add = 34,
   Adds = 35,
   FAdd = 36,
@@ -214,6 +216,7 @@ enum class BinaryOpcode : std::uint64_t {
   Bno = 163,
   UBno = 164,
   Call = 167,
+  Switch = 170,
   Ret = 171,
   Alloca = 173,
 };
@@ -226,9 +229,20 @@ public:
     add(bytes);
   }
 
+  void add_string(std::string_view value) {
+    add(std::string(value));
+  }
+
   Result<std::uint64_t> name_index(std::string_view name) const {
     std::string bytes(name);
     bytes.push_back('\0');
+    const auto it = index_.find(bytes);
+    if (it == index_.end()) return Error{ErrorCode::InvalidArgument, "missing binary string"};
+    return it->second - 1;
+  }
+
+  Result<std::uint64_t> string_index(std::string_view value) const {
+    std::string bytes(value);
     const auto it = index_.find(bytes);
     if (it == index_.end()) return Error{ErrorCode::InvalidArgument, "missing binary string"};
     return it->second - 1;
@@ -312,7 +326,24 @@ void write_long_double(std::vector<std::byte> &out, long double value) {
 
 Result<void *> write_name(std::vector<std::byte> &out, const StringTable &strings,
                           std::string_view name, Tag base_tag) {
-  MIRNEXT_TRY(auto index, strings.name_index(name));
+  auto index_result = strings.name_index(name);
+  MIRNEXT_RESULT_RET(index_result);
+  auto index = *index_result;
+  std::size_t length = uint_length(index);
+  if (length == 0) length = 1;
+  if (length > 4) {
+    return Error{ErrorCode::InvalidArgument, "binary string table is too large"};
+  }
+  append_byte(out, static_cast<std::uint8_t>(static_cast<std::uint8_t>(base_tag) + length - 1));
+  append_little_uint(out, index, length);
+  return static_cast<void *>(nullptr);
+}
+
+Result<void *> write_string_ref(std::vector<std::byte> &out, const StringTable &strings,
+                                std::string_view value, Tag base_tag) {
+  auto index_result = strings.string_index(value);
+  MIRNEXT_RESULT_RET(index_result);
+  auto index = *index_result;
   std::size_t length = uint_length(index);
   if (length == 0) length = 1;
   if (length > 4) {
@@ -331,6 +362,7 @@ Result<void *> write_type(std::vector<std::byte> &out, BinaryType type) {
 
 Result<BinaryType> lower_type(Type type) {
   switch (type.kind()) {
+  case Type::Kind::B: return BinaryType::I64;
   case Type::Kind::I8: return BinaryType::I8;
   case Type::Kind::U8: return BinaryType::U8;
   case Type::Kind::I16: return BinaryType::I16;
@@ -354,6 +386,7 @@ Result<BinaryType> lower_type(Type type) {
 
 Result<BinaryType> lower_register_type(Type type) {
   switch (type.kind()) {
+  case Type::Kind::B:
   case Type::Kind::I8:
   case Type::Kind::U8:
   case Type::Kind::I16:
@@ -370,6 +403,26 @@ Result<BinaryType> lower_register_type(Type type) {
     return lower_type(type);
   }
   return Error{ErrorCode::InvalidArgument, "unsupported MIRNext register type"};
+}
+
+Result<BinaryType> lower_data_type(Type type) {
+  switch (type.kind()) {
+  case Type::Kind::B:
+    return Error{ErrorCode::InvalidArgument, "unsupported MIRNext data type"};
+  case Type::Kind::I8: return BinaryType::I8;
+  case Type::Kind::U8: return BinaryType::U8;
+  case Type::Kind::I16: return BinaryType::I16;
+  case Type::Kind::U16: return BinaryType::U16;
+  case Type::Kind::I32: return BinaryType::I32;
+  case Type::Kind::U32: return BinaryType::U32;
+  case Type::Kind::I64: return BinaryType::I64;
+  case Type::Kind::U64: return BinaryType::U64;
+  case Type::Kind::F: return BinaryType::F;
+  case Type::Kind::D: return BinaryType::D;
+  case Type::Kind::LD: return BinaryType::LD;
+  case Type::Kind::P: return BinaryType::U64;
+  }
+  return Error{ErrorCode::InvalidArgument, "unsupported MIRNext data type"};
 }
 
 Result<BinaryOpcode> lower_opcode(Opcode opcode) {
@@ -399,6 +452,7 @@ Result<BinaryOpcode> lower_opcode(Opcode opcode) {
   case Opcode::D2LD: return BinaryOpcode::D2LD;
   case Opcode::LD2F: return BinaryOpcode::LD2F;
   case Opcode::LD2D: return BinaryOpcode::LD2D;
+  case Opcode::Addr: return BinaryOpcode::Addr;
   case Opcode::Alloca: return BinaryOpcode::Alloca;
   case Opcode::Neg: return BinaryOpcode::Neg;
   case Opcode::Negs: return BinaryOpcode::Negs;
@@ -538,6 +592,7 @@ Result<BinaryOpcode> lower_opcode(Opcode opcode) {
   case Opcode::UBno: return BinaryOpcode::UBno;
   case Opcode::Ret: return BinaryOpcode::Ret;
   case Opcode::Call: return BinaryOpcode::Call;
+  case Opcode::Switch: return BinaryOpcode::Switch;
   case Opcode::Nop:
   case Opcode::Label:
     break;
@@ -561,11 +616,14 @@ public:
     for (const auto &function : module_.functions()) {
       refs_.emplace(function.get(), std::string(function->name()));
     }
+    for (const auto &data : module_.data_items()) {
+      if (!data->name().empty()) refs_.emplace(data.get(), std::string(data->name()));
+    }
   }
 
   Result<std::vector<std::byte>> write_raw() {
-    MIRNEXT_TRY(auto ignored, collect_strings());
-    (void) ignored;
+    auto collect_result = collect_strings();
+    MIRNEXT_RESULT_RET(collect_result);
 
     std::vector<std::byte> out;
     write_uint(out, 1);
@@ -574,7 +632,8 @@ public:
       write_uint(out, string.size());
       for (unsigned char ch : string) append_byte(out, ch);
     }
-    MIRNEXT_TRY(ignored, write_module(out));
+    auto module_result = write_module(out);
+    MIRNEXT_RESULT_RET(module_result);
     append_byte(out, static_cast<std::uint8_t>(Tag::EOFILE));
     return out;
   }
@@ -594,24 +653,46 @@ private:
     return write_name(out, strings_, name, base_tag);
   }
 
+  Result<void *> write_string_token(std::vector<std::byte> &out, std::string_view value,
+                                    Tag base_tag = Tag::STR1, bool collect_only = false) {
+    if (collect_only) {
+      strings_.add_string(value);
+      return static_cast<void *>(nullptr);
+    }
+    return write_string_ref(out, strings_, value, base_tag);
+  }
+
   Result<void *> write_module(std::vector<std::byte> &out, bool collect_only = false) {
-    MIRNEXT_TRY(auto ignored, write_name_token(out, "module", Tag::NAME1, collect_only));
-    MIRNEXT_TRY(ignored, write_name_token(out, module_.name(), Tag::NAME1, collect_only));
+    auto result = write_name_token(out, "module", Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    result = write_name_token(out, module_.name(), Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
     for (const auto &prototype : module_.prototypes()) {
-      MIRNEXT_TRY(ignored, write_prototype(out, *prototype, collect_only));
+      result = write_prototype(out, *prototype, collect_only);
+      MIRNEXT_RESULT_RET(result);
     }
     for (const auto &import : module_.imports()) {
-      MIRNEXT_TRY(ignored, write_name_token(out, "import", Tag::NAME1, collect_only));
-      MIRNEXT_TRY(ignored, write_name_token(out, import->name(), Tag::NAME1, collect_only));
+      result = write_name_token(out, "import", Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
+      result = write_name_token(out, import->name(), Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
     }
     for (const auto &function : module_.functions()) {
-      MIRNEXT_TRY(ignored, write_name_token(out, "forward", Tag::NAME1, collect_only));
-      MIRNEXT_TRY(ignored, write_name_token(out, function->name(), Tag::NAME1, collect_only));
+      result = write_name_token(out, "forward", Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
+      result = write_name_token(out, function->name(), Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
+    }
+    for (const auto &data : module_.data_items()) {
+      result = write_data(out, *data, collect_only);
+      MIRNEXT_RESULT_RET(result);
     }
     for (const auto &function : module_.functions()) {
-      MIRNEXT_TRY(ignored, write_function(out, *function, collect_only));
+      result = write_function(out, *function, collect_only);
+      MIRNEXT_RESULT_RET(result);
     }
-    MIRNEXT_TRY(ignored, write_name_token(out, "endmodule", Tag::NAME1, collect_only));
+    result = write_name_token(out, "endmodule", Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
     return static_cast<void *>(nullptr);
   }
 
@@ -623,24 +704,26 @@ private:
       write_uint(out, 0);
       write_uint(out, return_types.size());
       for (Type type : return_types) {
-        MIRNEXT_TRY(auto lowered, lower_type(type));
-        MIRNEXT_TRY(auto ignored, write_type(out, lowered));
-        (void) ignored;
+        auto lowered_result = lower_type(type);
+        MIRNEXT_RESULT_RET(lowered_result);
+        auto write_result = write_type(out, *lowered_result);
+        MIRNEXT_RESULT_RET(write_result);
       }
     } else {
       for (Type type : return_types) {
-        MIRNEXT_TRY(auto lowered, lower_type(type));
-        (void) lowered;
+        auto lowered_result = lower_type(type);
+        MIRNEXT_RESULT_RET(lowered_result);
       }
     }
     for (const Prototype::Parameter &parameter : parameters) {
-      MIRNEXT_TRY(auto lowered, lower_type(parameter.type));
+      auto lowered_result = lower_type(parameter.type);
+      MIRNEXT_RESULT_RET(lowered_result);
       if (!collect_only) {
-        MIRNEXT_TRY(auto ignored, write_type(out, lowered));
-        (void) ignored;
+        auto write_result = write_type(out, *lowered_result);
+        MIRNEXT_RESULT_RET(write_result);
       }
-      MIRNEXT_TRY(auto ignored, write_name_token(out, parameter.name, Tag::NAME1, collect_only));
-      (void) ignored;
+      auto name_result = write_name_token(out, parameter.name, Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(name_result);
     }
     if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
     return static_cast<void *>(nullptr);
@@ -658,10 +741,117 @@ private:
 
   Result<void *> write_prototype(std::vector<std::byte> &out, const Prototype &prototype,
                                  bool collect_only) {
-    MIRNEXT_TRY(auto ignored, write_name_token(out, "proto", Tag::NAME1, collect_only));
-    MIRNEXT_TRY(ignored, write_name_token(out, prototype.name(), Tag::NAME1, collect_only));
-    MIRNEXT_TRY(ignored,
-                write_signature(out, prototype.return_types(), prototype.parameters(), collect_only));
+    auto result = write_name_token(out, "proto", Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    result = write_name_token(out, prototype.name(), Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    result = write_signature(out, prototype.return_types(), prototype.parameters(), collect_only);
+    MIRNEXT_RESULT_RET(result);
+    return static_cast<void *>(nullptr);
+  }
+
+  Result<void *> write_named_item_header(std::vector<std::byte> &out, std::string_view item,
+                                         std::string_view named_item,
+                                         std::string_view name, bool collect_only) {
+    auto result = write_name_token(out, name.empty() ? item : named_item,
+                                   Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    if (!name.empty()) {
+      result = write_name_token(out, name, Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
+    }
+    return static_cast<void *>(nullptr);
+  }
+
+  Result<void *> write_data(std::vector<std::byte> &out, const Data &data, bool collect_only) {
+    switch (data.kind()) {
+    case Data::Kind::Bss: {
+      auto result = write_named_item_header(out, "bss", "nbss", data.name(), collect_only);
+      MIRNEXT_RESULT_RET(result);
+      if (!collect_only) write_uint(out, data.size());
+      return static_cast<void *>(nullptr);
+    }
+    case Data::Kind::Typed:
+      return write_typed_data(out, data.name(), data.element_type(), data.values(),
+                              collect_only);
+    case Data::Kind::String:
+      return write_string_data(out, data.name(), data.string_value(), collect_only);
+    case Data::Kind::Ref:
+      return write_ref_data(out, data, collect_only);
+    }
+    return Error{ErrorCode::InvalidArgument, "unsupported MIRNext data item"};
+  }
+
+  Result<void *> write_typed_data(std::vector<std::byte> &out, std::string_view name,
+                                  Type element_type, const std::vector<Operand> &values,
+                                  bool collect_only) {
+    auto result = write_named_item_header(out, "data", "ndata", name, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    auto type_result = lower_data_type(element_type);
+    MIRNEXT_RESULT_RET(type_result);
+    if (!collect_only) {
+      result = write_type(out, *type_result);
+      MIRNEXT_RESULT_RET(result);
+    }
+    for (const Operand &value : values) {
+      result = write_data_value(out, value, collect_only);
+      MIRNEXT_RESULT_RET(result);
+    }
+    if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
+    return static_cast<void *>(nullptr);
+  }
+
+  Result<void *> write_string_data(std::vector<std::byte> &out, std::string_view name,
+                                   std::string_view value, bool collect_only) {
+    auto result = write_named_item_header(out, "data", "ndata", name, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    if (!collect_only) {
+      result = write_type(out, BinaryType::U8);
+      MIRNEXT_RESULT_RET(result);
+    }
+    for (unsigned char ch : value) {
+      if (!collect_only) write_uint(out, ch);
+    }
+    if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
+    return static_cast<void *>(nullptr);
+  }
+
+  Result<void *> write_data_value(std::vector<std::byte> &out, const Operand &value,
+                                  bool collect_only) {
+    switch (value.kind()) {
+    case Operand::Kind::Int64:
+      if (!collect_only) write_int(out, value.int64_value());
+      return static_cast<void *>(nullptr);
+    case Operand::Kind::UInt64:
+      if (!collect_only) write_uint(out, value.uint64_value());
+      return static_cast<void *>(nullptr);
+    case Operand::Kind::Float32:
+      if (!collect_only) write_float(out, value.float32_value());
+      return static_cast<void *>(nullptr);
+    case Operand::Kind::Float64:
+      if (!collect_only) write_double(out, value.float64_value());
+      return static_cast<void *>(nullptr);
+    case Operand::Kind::LongDouble:
+      if (!collect_only) write_long_double(out, value.long_double_value());
+      return static_cast<void *>(nullptr);
+    default:
+      return Error{ErrorCode::InvalidOperand, "unsupported data value operand"};
+    }
+  }
+
+  Result<void *> write_ref_data(std::vector<std::byte> &out, const Data &data,
+                                bool collect_only) {
+    auto result = write_named_item_header(out, "ref", "nref", data.name(), collect_only);
+    MIRNEXT_RESULT_RET(result);
+    const auto &target = data.ref_target();
+    if (target.pointer == nullptr) {
+      return Error{ErrorCode::InvalidOperand, "ref data target is null"};
+    }
+    const auto it = refs_.find(target.pointer);
+    if (it == refs_.end()) return Error{ErrorCode::InvalidOperand, "unknown ref data target"};
+    result = write_name_token(out, it->second, Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    if (!collect_only) write_int(out, target.displacement);
     return static_cast<void *>(nullptr);
   }
 
@@ -672,26 +862,36 @@ private:
       if (instruction->opcode() == Opcode::Label) tables.labels.insert(instruction->label_id());
     }
 
-    MIRNEXT_TRY(auto ignored, write_name_token(out, "func", Tag::NAME1, collect_only));
-    MIRNEXT_TRY(ignored, write_name_token(out, function.name(), Tag::NAME1, collect_only));
-    MIRNEXT_TRY(ignored, write_function_signature(out, function, collect_only));
+    auto result = write_name_token(out, "func", Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    result = write_name_token(out, function.name(), Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
+    result = write_function_signature(out, function, collect_only);
+    MIRNEXT_RESULT_RET(result);
 
     if (!function.local_registers().empty()) {
-      MIRNEXT_TRY(ignored, write_name_token(out, "local", Tag::NAME1, collect_only));
+      result = write_name_token(out, "local", Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
       for (const Register &local : function.local_registers()) {
-        MIRNEXT_TRY(auto type, lower_register_type(local.type()));
+        auto type_result = lower_register_type(local.type());
+        MIRNEXT_RESULT_RET(type_result);
+        auto type = *type_result;
         if (!collect_only) {
-          MIRNEXT_TRY(ignored, write_type(out, type));
+          result = write_type(out, type);
+          MIRNEXT_RESULT_RET(result);
         }
-        MIRNEXT_TRY(ignored, write_name_token(out, local.name(), Tag::NAME1, collect_only));
+        result = write_name_token(out, local.name(), Tag::NAME1, collect_only);
+        MIRNEXT_RESULT_RET(result);
       }
       if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
     }
 
     for (const auto &instruction : function.instructions()) {
-      MIRNEXT_TRY(ignored, write_instruction(out, function, tables, *instruction, collect_only));
+      result = write_instruction(out, function, tables, *instruction, collect_only);
+      MIRNEXT_RESULT_RET(result);
     }
-    MIRNEXT_TRY(ignored, write_name_token(out, "endfunc", Tag::NAME1, collect_only));
+    result = write_name_token(out, "endfunc", Tag::NAME1, collect_only);
+    MIRNEXT_RESULT_RET(result);
     return static_cast<void *>(nullptr);
   }
 
@@ -710,6 +910,8 @@ private:
                                const FunctionTables &tables, const Operand &operand,
                                bool collect_only) {
     switch (operand.kind()) {
+    case Operand::Kind::Poison:
+      return Error{ErrorCode::InvalidOperand, "poison operand cannot be encoded"};
     case Operand::Kind::Int64:
       if (!collect_only) write_int(out, operand.int64_value());
       return static_cast<void *>(nullptr);
@@ -737,6 +939,8 @@ private:
       return write_label(out, operand.label_id(), collect_only);
     case Operand::Kind::Memory:
       return write_memory(out, function, operand, collect_only);
+    case Operand::Kind::ModuleSlot:
+      return Error{ErrorCode::InvalidOperand, "module binding operand is not supported by binary encoding"};
     case Operand::Kind::Reference: {
       const auto it = refs_.find(operand.reference_pointer());
       if (it == refs_.end()) return Error{ErrorCode::InvalidOperand, "unknown reference operand"};
@@ -757,7 +961,9 @@ private:
     if ((has_base && base == nullptr) || (has_index && index == nullptr)) {
       return Error{ErrorCode::InvalidOperand, "unknown memory register operand"};
     }
-    MIRNEXT_TRY(auto type, lower_type(operand.memory_type()));
+    auto type_result = lower_type(operand.memory_type());
+    MIRNEXT_RESULT_RET(type_result);
+    auto type = *type_result;
     if (!collect_only) {
       const bool has_disp = operand.memory_displacement() != 0;
       Tag tag = Tag::MEM_DISP;
@@ -773,14 +979,16 @@ private:
         tag = Tag::MEM_INDEX;
       }
       append_byte(out, static_cast<std::uint8_t>(tag));
-      MIRNEXT_TRY(auto ignored, write_type(out, type));
-      (void) ignored;
+      auto result = write_type(out, type);
+      MIRNEXT_RESULT_RET(result);
       if (has_disp || (!has_base && !has_index)) write_int(out, operand.memory_displacement());
       if (has_base) {
-        MIRNEXT_TRY(ignored, write_name_token(out, base->name(), Tag::REG1, false));
+        result = write_name_token(out, base->name(), Tag::REG1, false);
+        MIRNEXT_RESULT_RET(result);
       }
       if (has_index) {
-        MIRNEXT_TRY(ignored, write_name_token(out, index->name(), Tag::REG1, false));
+        result = write_name_token(out, index->name(), Tag::REG1, false);
+        MIRNEXT_RESULT_RET(result);
         write_uint(out, static_cast<std::uint64_t>(operand.memory_scale()));
       }
     } else {
@@ -796,13 +1004,18 @@ private:
     if (instruction.opcode() == Opcode::Label) {
       return write_label(out, instruction.label_id(), collect_only);
     }
-    MIRNEXT_TRY(auto opcode, lower_opcode(instruction.opcode()));
+    auto opcode_result = instruction.opcode() == Opcode::Addr
+                             ? Result<BinaryOpcode>(BinaryOpcode::Mov)
+                             : lower_opcode(instruction.opcode());
+    MIRNEXT_RESULT_RET(opcode_result);
+    auto opcode = *opcode_result;
     if (!collect_only) write_uint(out, static_cast<std::uint64_t>(opcode));
     for (const Operand &operand : instruction.operands()) {
-      MIRNEXT_TRY(auto ignored, write_operand(out, function, tables, operand, collect_only));
-      (void) ignored;
+      auto operand_result = write_operand(out, function, tables, operand, collect_only);
+      MIRNEXT_RESULT_RET(operand_result);
     }
-    if (instruction.opcode() == Opcode::Ret || instruction.opcode() == Opcode::Call) {
+    if (instruction.opcode() == Opcode::Ret || instruction.opcode() == Opcode::Call
+        || instruction.opcode() == Opcode::Switch) {
       if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
     }
     return static_cast<void *>(nullptr);
@@ -1061,8 +1274,11 @@ private:
 } // namespace
 
 Result<std::vector<std::byte>> encode_binary(const Module &module) {
+  if (module.error()) return *module.error();
   ModuleWriter writer(module);
-  MIRNEXT_TRY(auto raw, writer.write_raw());
+  auto raw_result = writer.write_raw();
+  MIRNEXT_RESULT_RET(raw_result);
+  auto raw = *raw_result;
 #ifdef MIR_NO_BIN_COMPRESSION
   return raw;
 #else

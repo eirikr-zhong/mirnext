@@ -72,7 +72,9 @@ Result<LegacyLoweredFunction> lower_to_legacy(LegacyContext &context, const Modu
   }
   if (!found_requested_function) return Error{ErrorCode::UnknownName, "function is not in module"};
 
-  MIRNEXT_TRY(auto bytes, module.encode_binary());
+  auto bytes_result = module.encode_binary();
+  MIRNEXT_RESULT_RET(bytes_result);
+  auto bytes = *bytes_result;
   BinaryReadState read_state{bytes.data(), bytes.size(), 0};
   current_binary_read = &read_state;
   MIR_read_with_func(ctx, binary_reader);

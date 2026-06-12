@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -18,8 +19,18 @@ template <class T> static T expect(mirnext::Result<T> result, int code) {
     FAIL("error " << code << ": " << result.error().message);
     std::abort();
   }
-  return result.value();
+  return *result;
 }
+
+template <class T> static T expect(T value, int) {
+  return value;
+}
+
+#define expect_ok(expr, code) \
+  do {                        \
+    (void)(code);             \
+    expr;                     \
+  } while (false)
 
 static std::int64_t add7(std::int64_t value) { return value + 7; }
 
@@ -41,7 +52,9 @@ static int binary_reader(MIR_context_t) {
 static mirnext::Result<mirnext::LegacyLoweredFunction>
 read_binary_module(mirnext::LegacyContext &legacy, const mirnext::Module &module,
                    const char *function_name) {
-  MIRNEXT_TRY(auto bytes, module.encode_binary());
+  auto bytes_result = module.encode_binary();
+  MIRNEXT_RESULT_RET(bytes_result);
+  auto bytes = *bytes_result;
   BinaryInput input{bytes.data(), bytes.size(), 0};
   current_binary_input = &input;
   MIR_read_with_func(legacy.raw(), binary_reader);
@@ -73,18 +86,9 @@ read_binary_module(mirnext::LegacyContext &legacy, const mirnext::Module &module
   return mirnext::LegacyLoweredFunction{decoded_module, decoded_function};
 }
 
-static void append(mirnext::Function &function, mirnext::Opcode opcode,
-                   std::vector<mirnext::Operand> operands = {}) {
-  function.append(mirnext::Instruction(opcode, std::move(operands)));
-}
-
-static mirnext::Label new_label(mirnext::IRBuilder &builder, int code) {
-  mirnext::Label label = builder.label();
-  if (!builder.ok()) {
-    FAIL("error " << code << ": " << builder.error().message);
-    std::abort();
-  }
-  return label;
+static mirnext::Label &new_label(mirnext::Function &function, int code) {
+  (void)code;
+  return function.label();
 }
 
 static mirnext::Function &create_loop(mirnext::Context &ctx, mirnext::Module **module_out) {
@@ -92,64 +96,55 @@ static mirnext::Function &create_loop(mirnext::Context &ctx, mirnext::Module **m
   *module_out = &module;
   mirnext::Function &function = module.new_function(
       "loop", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 1);
-  mirnext::Register count = expect(function.create_register(mirnext::Type::i64(), "count"), 2);
+  mirnext::Value arg1 = expect(function.arg("arg1"), 1);
+  mirnext::Var count = expect(function.var(mirnext::Type::i64(), "count"), 2);
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label fin = new_label(builder, 3);
-  mirnext::Label cont = new_label(builder, 4);
+  mirnext::Label &fin = new_label(function, 3);
+  mirnext::Label &cont = new_label(function, 4);
 
-  append(function, mirnext::Opcode::Mov, {count, mirnext::Operand::int64(0)});
-  append(function, mirnext::Opcode::Bge, {fin, count, arg1});
-  function.append_label(cont);
-  append(function, mirnext::Opcode::Add, {count, count, mirnext::Operand::int64(1)});
-  append(function, mirnext::Opcode::Blt, {cont, count, arg1});
-  function.append_label(fin);
-  function.append_ret({count});
+  function[count] = 0;
+  function.if_(function[count] >= arg1, fin);
+  function.jmp(cont);
+  cont[count] = cont[count] + 1;
+  cont.if_(cont[count] < arg1, cont);
+  cont.jmp(fin);
+  fin.ret(fin[count]);
+  function.end();
   return function;
 }
 
-static mirnext::Function &create_sum_to_n(mirnext::Context &ctx, mirnext::Module **module_out) {
+static mirnext::Result<mirnext::Function *> create_sum_to_n(mirnext::Context &ctx,
+                                                            mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_sum");
   *module_out = &module;
   mirnext::Function &function = module.new_function(
       "sum_to_n", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "n"}});
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label entry = builder.entry();
-  mirnext::Label loop = new_label(builder, 306);
-  mirnext::Label body = new_label(builder, 307);
-  mirnext::Label done = new_label(builder, 308);
+  mirnext::Label &loop = function.label();
+  mirnext::Label &body = function.label();
+  mirnext::Label &done = function.label();
 
-  mirnext::Value n = entry.arg("n");
-  mirnext::Var i = entry.local(mirnext::Type::i64(), "i");
-  mirnext::Var sum = entry.local(mirnext::Type::i64(), "sum");
+  mirnext::Value n = expect(function.arg("n"), 3);
+  mirnext::Var i = expect(function.var(mirnext::Type::i64(), "i"), 4);
+  mirnext::Var sum = expect(function.var(mirnext::Type::i64(), "sum"), 5);
 
-  entry.begin();
-  i = 1;
-  sum = 0;
-  entry.jmp(loop);
+  mirnext::Value d = expect(function.convert<mirnext::Type::Kind::D>(n), 6);
+  mirnext::Value limit = expect(function.convert<mirnext::Type::Kind::I64>(d), 7);
+  function[i] = 1;
+  function[sum] = 0;
+  expect_ok(function.jmp(loop), 12);
 
-  loop.begin();
-  loop.if_(i > n, done);
-  loop.jmp(body);
-  loop.end();
+  loop.if_(loop[i] > limit, done);
+  expect_ok(loop.jmp(body), 16);
 
-  body.begin();
-  sum = sum + i;
-  i = i + body.i64(1);
-  body.jmp(loop);
-  body.end();
+  body[sum] = body[sum] + body[i];
+  body[i] = body[i] + 1;
+  expect_ok(body.jmp(loop), 24);
 
-  done.begin();
-  done.ret(sum);
-  done.end();
-  entry.end();
-  if (!builder.ok()) {
-    FAIL("sum_to_n DSL builder error: " << builder.error().message);
-    std::abort();
-  }
-  return function;
+  done.ret(done[sum]);
+  function.end();
+  if (module.error()) return *module.error();
+  return &function;
 }
 
 static mirnext::Function &create_sieve(mirnext::Context &ctx, mirnext::Module **module_out) {
@@ -157,63 +152,74 @@ static mirnext::Function &create_sieve(mirnext::Context &ctx, mirnext::Module **
   *module_out = &module;
   mirnext::Function &function = module.new_function("sieve", {mirnext::Type::i64()}, {});
 
-  mirnext::IRBuilder builder(function);
+  mirnext::Label &loop = new_label(function, 18);
+  mirnext::Label &loop2 = new_label(function, 19);
+  mirnext::Label &loop3 = new_label(function, 20);
+  mirnext::Label &loop4 = new_label(function, 21);
+  mirnext::Label &fin = new_label(function, 22);
+  mirnext::Label &fin2 = new_label(function, 23);
+  mirnext::Label &fin3 = new_label(function, 24);
+  mirnext::Label &fin4 = new_label(function, 25);
+  mirnext::Label &cont3 = new_label(function, 26);
 
-  mirnext::Label entry = builder.entry();
-  mirnext::Label loop = new_label(builder, 18);
-  mirnext::Label loop2 = new_label(builder, 19);
-  mirnext::Label loop3 = new_label(builder, 20);
-  mirnext::Label loop4 = new_label(builder, 21);
-  mirnext::Label fin = new_label(builder, 22);
-  mirnext::Label fin2 = new_label(builder, 23);
-  mirnext::Label fin3 = new_label(builder, 24);
-  mirnext::Label fin4 = new_label(builder, 25);
-  mirnext::Label cont3 = new_label(builder, 26);
+  mirnext::Value flags = expect(function.alloca(8190, "flags"), 27);
+  mirnext::Var iter = expect(function.var(mirnext::Type::i64(), "iter"), 28);
+  mirnext::Var count = expect(function.var(mirnext::Type::i64(), "count"), 29);
+  mirnext::Var i = expect(function.var(mirnext::Type::i64(), "i"), 30);
+  mirnext::Var k = expect(function.var(mirnext::Type::i64(), "k"), 31);
+  mirnext::Var prime = expect(function.var(mirnext::Type::i64(), "prime"), 32);
+  expect_ok(iter.assign(expect(function.i64(0), 33)), 34);
+  expect_ok(function.jmp(loop), 35);
 
-  mirnext::Value flags = entry.alloca(8190, "flags");
-  mirnext::Value iter = entry.local(mirnext::Type::i64(), "iter");
-  mirnext::Value count = entry.local(mirnext::Type::i64(), "count");
-  mirnext::Value i = entry.local(mirnext::Type::i64(), "i");
-  mirnext::Value k = entry.local(mirnext::Type::i64(), "k");
-  mirnext::Value prime = entry.local(mirnext::Type::i64(), "prime");
-  entry.assign(iter, entry.i64(0));
-  entry.jmp(loop);
+  mirnext::Value loop_iter = expect(loop.load(iter), 36);
+  expect_ok(loop.if_(expect(loop_iter >= expect(loop.i64(100), 37), 38), fin), 39);
+  expect_ok(loop.store(count, expect(loop.i64(0), 40)), 41);
+  expect_ok(loop.store(i, expect(loop.i64(0), 42)), 43);
+  expect_ok(loop.jmp(loop2), 44);
 
-  loop.if_(iter >= loop.i64(100), fin);
-  loop.assign(count, loop.i64(0));
-  loop.assign(i, loop.i64(0));
-  loop.jmp(loop2);
+  mirnext::Value loop2_i = expect(loop2.load(i), 45);
+  expect_ok(loop2.if_(expect(loop2_i >= expect(loop2.i64(8190), 46), 47), fin2), 48);
+  expect_ok(loop2.store(expect(loop2.mem(mirnext::Type::u8(), flags, loop2_i), 49),
+                        expect(loop2.u8(1), 50)),
+            51);
+  expect_ok(loop2.store(i, expect(loop2_i + expect(loop2.i64(1), 52), 53)), 54);
+  expect_ok(loop2.jmp(loop2), 55);
 
-  loop2.if_(i >= loop2.i64(8190), fin2);
-  loop2.store(loop2.mem(mirnext::Type::u8(), flags, i), loop2.u8(1));
-  loop2.assign(i, i + loop2.i64(1));
-  loop2.jmp(loop2);
+  expect_ok(fin2.store(i, expect(fin2.i64(1), 56)), 57);
+  expect_ok(fin2.jmp(loop3), 58);
 
-  fin2.assign(i, fin2.i64(1));
-  fin2.jmp(loop3);
+  mirnext::Value loop3_i = expect(loop3.load(i), 59);
+  expect_ok(loop3.if_(expect(loop3_i >= expect(loop3.i64(8190), 60), 61), fin3), 62);
+  mirnext::Value flag = expect(loop3.load(expect(loop3.mem(mirnext::Type::u8(), flags, loop3_i), 63)),
+                               64);
+  expect_ok(loop3.if_(expect(flag == expect(loop3.u8(0), 65), 66), cont3), 67);
+  mirnext::Value next_prime = expect(loop3_i + expect(loop3.i64(1), 68), 69);
+  expect_ok(loop3.store(prime, next_prime), 70);
+  expect_ok(loop3.store(k, expect(loop3_i + next_prime, 71)), 72);
+  expect_ok(loop3.jmp(loop4), 73);
 
-  loop3.if_(i >= loop3.i64(8190), fin3);
-  loop3.if_(loop3.load(loop3.mem(mirnext::Type::u8(), flags, i)) == loop3.u8(0), cont3);
-  loop3.assign(prime, i + loop3.i64(1));
-  loop3.assign(k, i + prime);
-  loop3.jmp(loop4);
+  mirnext::Value loop4_k = expect(loop4.load(k), 74);
+  expect_ok(loop4.if_(expect(loop4_k >= expect(loop4.i64(8190), 75), 76), fin4), 77);
+  expect_ok(loop4.store(expect(loop4.mem(mirnext::Type::u8(), flags, loop4_k), 78),
+                        expect(loop4.u8(0), 79)),
+            80);
+  expect_ok(loop4.store(k, expect(loop4_k + expect(loop4.load(prime), 81), 82)), 83);
+  expect_ok(loop4.jmp(loop4), 84);
 
-  loop4.if_(k >= loop4.i64(8190), fin4);
-  loop4.store(loop4.mem(mirnext::Type::u8(), flags, k), loop4.u8(0));
-  loop4.assign(k, k + prime);
-  loop4.jmp(loop4);
+  mirnext::Value fin4_count = expect(fin4.load(count), 85);
+  expect_ok(fin4.store(count, expect(fin4_count + expect(fin4.i64(1), 86), 87)), 88);
+  expect_ok(fin4.jmp(cont3), 89);
 
-  fin4.assign(count, count + fin4.i64(1));
-  fin4.jmp(cont3);
+  mirnext::Value cont3_i = expect(cont3.load(i), 90);
+  expect_ok(cont3.store(i, expect(cont3_i + expect(cont3.i64(1), 91), 92)), 93);
+  expect_ok(cont3.jmp(loop3), 94);
 
-  cont3.assign(i, i + cont3.i64(1));
-  cont3.jmp(loop3);
+  mirnext::Value fin3_iter = expect(fin3.load(iter), 95);
+  expect_ok(fin3.store(iter, expect(fin3_iter + expect(fin3.i64(1), 96), 97)), 98);
+  expect_ok(fin3.jmp(loop), 99);
 
-  fin3.assign(iter, iter + fin3.i64(1));
-  fin3.jmp(loop);
-
-  fin.ret(count);
-  if (!builder.ok()) std::exit(27);
+  expect_ok(fin.ret(expect(fin.load(count), 100)), 101);
+  expect_ok(function.end(), 102);
   return function;
 }
 
@@ -222,28 +228,23 @@ static mirnext::Function &create_integer_ops(mirnext::Context &ctx, mirnext::Mod
   *module_out = &module;
   mirnext::Function &function = module.new_function(
       "integer_ops", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 72);
-  mirnext::Register a = expect(function.create_register(mirnext::Type::i64(), "a"), 73);
-  mirnext::Register b = expect(function.create_register(mirnext::Type::i64(), "b"), 74);
-  mirnext::Register c = expect(function.create_register(mirnext::Type::i64(), "c"), 75);
-  mirnext::Register cmp = expect(function.create_register(mirnext::Type::i64(), "cmp"), 76);
-  mirnext::Register result = expect(function.create_register(mirnext::Type::i64(), "result"), 77);
-
-  append(function, mirnext::Opcode::Mov, {a, arg1});
-  append(function, mirnext::Opcode::Sub, {a, a, mirnext::Operand::int64(5)});
-  append(function, mirnext::Opcode::Mul, {a, a, mirnext::Operand::int64(3)});
-  append(function, mirnext::Opcode::Div, {a, a, mirnext::Operand::int64(2)});
-  append(function, mirnext::Opcode::Mod, {b, a, mirnext::Operand::int64(6)});
-  append(function, mirnext::Opcode::Or, {c, b, mirnext::Operand::int64(8)});
-  append(function, mirnext::Opcode::Xor, {c, c, mirnext::Operand::int64(3)});
-  append(function, mirnext::Opcode::And, {c, c, mirnext::Operand::int64(14)});
-  append(function, mirnext::Opcode::Lsh, {c, c, mirnext::Operand::int64(1)});
-  append(function, mirnext::Opcode::Rsh, {c, c, mirnext::Operand::int64(2)});
-  append(function, mirnext::Opcode::URsh, {c, c, mirnext::Operand::int64(1)});
-  append(function, mirnext::Opcode::Neg, {b, c});
-  append(function, mirnext::Opcode::Eq, {cmp, c, mirnext::Operand::int64(2)});
-  append(function, mirnext::Opcode::Add, {result, b, cmp});
-  function.append_ret({result});
+  mirnext::Value arg1 = expect(function.arg("arg1"), 72);
+  mirnext::Value arithmetic = expect(expect(expect((arg1 - expect(function.i64(5), 73))
+                                                * expect(function.i64(3), 74),
+                                            75)
+                                         / expect(function.i64(2), 76),
+                                     77)
+                                  % expect(function.i64(6), 78),
+                              79);
+  mirnext::Value masked = expect(arg1 & expect(function.i64(7), 80), 81);
+  mirnext::Value ored = expect(masked | expect(function.i64(8), 82), 83);
+  mirnext::Value xored = expect(ored ^ expect(function.i64(3), 84), 85);
+  mirnext::Value shifted = expect((xored << expect(function.i64(1), 86))
+                                      >> expect(function.i64(2), 87),
+                                  88);
+  mirnext::Value result = expect((-shifted) + arithmetic, 89);
+  expect_ok(function.ret(result), 80);
+  expect_ok(function.end(), 81);
   return function;
 }
 
@@ -251,19 +252,96 @@ static mirnext::Function &create_integer_branch(mirnext::Context &ctx, mirnext::
   mirnext::Module &module = ctx.new_module("m_integer_branch");
   *module_out = &module;
   mirnext::Function &function = module.new_function(
-      "integer_branch", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 93);
+      "integer_branch", {mirnext::Type::i64()}, {{mirnext::Type::u64(), "arg1"}});
+  mirnext::Value arg1 = expect(function.arg("arg1"), 93);
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label signed_gt = new_label(builder, 94);
-  mirnext::Label unsigned_gt = new_label(builder, 95);
-  append(function, mirnext::Opcode::Bgt, {signed_gt, arg1, mirnext::Operand::int64(10)});
-  append(function, mirnext::Opcode::UBgt, {unsigned_gt, arg1, mirnext::Operand::int64(10)});
-  function.append_ret({mirnext::Operand::int64(0)});
-  function.append_label(signed_gt);
-  function.append_ret({mirnext::Operand::int64(1)});
-  function.append_label(unsigned_gt);
-  function.append_ret({mirnext::Operand::int64(9)});
+  mirnext::Label &unsigned_gt = new_label(function, 95);
+  function.if_(arg1 > expect(function.u64(10), 98), unsigned_gt);
+  function.ret(expect(function.i64(0), 99));
+  unsigned_gt.ret(expect(unsigned_gt.i64(9), 101));
+  function.end();
+  return function;
+}
+
+static mirnext::Function &create_is_less(mirnext::Context &ctx, mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_is_less");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "is_less", {mirnext::Type::b()}, {{mirnext::Type::i64(), "a"},
+                                       {mirnext::Type::i64(), "b"}});
+  mirnext::Value a = expect(function.arg("a"), 102);
+  mirnext::Value b = expect(function.arg("b"), 103);
+  expect_ok(function.ret(expect(a < b, 104)), 105);
+  expect_ok(function.end(), 106);
+  return function;
+}
+
+static mirnext::Function &create_branch_on_bool_literal(mirnext::Context &ctx,
+                                                        mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_branch_on_bool_literal");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "branch_on_bool_literal", {mirnext::Type::i64()}, {});
+  mirnext::Label &target = new_label(function, 107);
+  expect_ok(function.if_(expect(function.b(true), 108), target), 109);
+  expect_ok(function.ret(expect(function.i64(0), 110)), 111);
+  expect_ok(target.ret(expect(target.i64(1), 112)), 113);
+  expect_ok(function.end(), 114);
+  return function;
+}
+
+static mirnext::Function &create_checked_add_branch(mirnext::Context &ctx,
+                                                    mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_checked_add");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "checked_add", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "a"},
+                                             {mirnext::Type::i64(), "b"}});
+  mirnext::Value a = expect(function.arg("a"), 346).overflow(true);
+  mirnext::Value b = expect(function.arg("b"), 347);
+  mirnext::Label &overflow = new_label(function, 348);
+  mirnext::Value sum = expect(a + b, 349);
+  expect_ok(function.if_overflow(sum, overflow), 350);
+  expect_ok(function.ret(sum), 351);
+  expect_ok(overflow.ret(expect(overflow.i64(-1), 352)), 353);
+  expect_ok(function.end(), 354);
+  return function;
+}
+
+static mirnext::Function &create_checked_add_i32_branch(mirnext::Context &ctx,
+                                                        mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_checked_add_i32");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "checked_add_i32", {mirnext::Type::i32()}, {{mirnext::Type::i32(), "a"},
+                                                 {mirnext::Type::i32(), "b"}});
+  mirnext::Value a = expect(function.arg("a"), 355).overflow(true);
+  mirnext::Value b = expect(function.arg("b"), 356);
+  mirnext::Label &overflow = new_label(function, 357);
+  mirnext::Value sum = expect(a + b, 358);
+  expect_ok(function.if_overflow(sum, overflow), 359);
+  expect_ok(function.ret(sum), 360);
+  expect_ok(overflow.ret(expect(overflow.i32(-1), 361)), 362);
+  expect_ok(function.end(), 363);
+  return function;
+}
+
+static mirnext::Function &create_checked_chain_branch(mirnext::Context &ctx,
+                                                      mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_checked_chain");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "checked_chain", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "a"},
+                                               {mirnext::Type::i64(), "b"}});
+  mirnext::Value a = expect(function.arg("a"), 364).overflow(true);
+  mirnext::Value b = expect(function.arg("b"), 365);
+  mirnext::Label &overflow = new_label(function, 366);
+  mirnext::Value sum = expect(a + b, 367);
+  mirnext::Value product = expect(sum * b, 368);
+  expect_ok(function.if_overflow(product, overflow), 369);
+  expect_ok(function.ret(product), 370);
+  expect_ok(overflow.ret(expect(overflow.i64(-1), 371)), 372);
+  expect_ok(function.end(), 373);
   return function;
 }
 
@@ -276,14 +354,10 @@ static mirnext::Function &create_import_call(mirnext::Context &ctx, mirnext::Mod
   mirnext::Function &function = module.new_function(
       "import_call", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label entry = builder.entry();
-  mirnext::Value result = entry.call(prototype, import, {entry.arg("arg1")});
-  entry.ret(result);
-  if (!builder.ok()) {
-    FAIL("import call DSL builder error: " << builder.error().message);
-    std::abort();
-  }
+  mirnext::Value arg = expect(function.arg("arg1"), 115);
+  mirnext::Value result = expect(function.call(prototype, import, {arg}), 116);
+  expect_ok(function.ret(result), 117);
+  expect_ok(function.end(), 118);
   return function;
 }
 
@@ -295,22 +369,16 @@ static mirnext::Function &create_internal_call(mirnext::Context &ctx, mirnext::M
 
   mirnext::Function &callee = module.new_function(
       "add11", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Register callee_arg = expect(callee.argument("arg1"), 119);
-  mirnext::Register callee_result
-      = expect(callee.create_register(mirnext::Type::i64(), "result"), 120);
-  append(callee, mirnext::Opcode::Add, {callee_result, callee_arg, mirnext::Operand::int64(11)});
-  callee.append_ret({callee_result});
+  mirnext::Value callee_arg = expect(callee.arg("arg1"), 119);
+  expect_ok(callee.ret(expect(callee_arg + expect(callee.i64(11), 120), 121)), 122);
+  expect_ok(callee.end(), 123);
 
   mirnext::Function &caller = module.new_function(
       "internal_call", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::IRBuilder builder(caller);
-  mirnext::Label entry = builder.entry();
-  mirnext::Value result = entry.call(prototype, callee, {entry.arg("arg1")});
-  entry.ret(result);
-  if (!builder.ok()) {
-    FAIL("internal call DSL builder error: " << builder.error().message);
-    std::abort();
-  }
+  mirnext::Value arg = expect(caller.arg("arg1"), 124);
+  mirnext::Value result = expect(caller.call(prototype, callee, {arg}), 125);
+  expect_ok(caller.ret(result), 126);
+  expect_ok(caller.end(), 127);
   return caller;
 }
 
@@ -325,20 +393,14 @@ static mirnext::Function &create_forward_call(mirnext::Context &ctx, mirnext::Mo
   mirnext::Function &callee = module.new_function(
       "add17", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
-  mirnext::IRBuilder builder(caller);
-  mirnext::Label entry = builder.entry();
-  mirnext::Value result = entry.call(prototype, callee, {entry.arg("arg1")});
-  entry.ret(result);
-  if (!builder.ok()) {
-    FAIL("forward call DSL builder error: " << builder.error().message);
-    std::abort();
-  }
+  mirnext::Value arg = expect(caller.arg("arg1"), 139);
+  mirnext::Value result = expect(caller.call(prototype, callee, {arg}), 140);
+  expect_ok(caller.ret(result), 141);
+  expect_ok(caller.end(), 142);
 
-  mirnext::Register callee_arg = expect(callee.argument("arg1"), 143);
-  mirnext::Register callee_result
-      = expect(callee.create_register(mirnext::Type::i64(), "result"), 144);
-  append(callee, mirnext::Opcode::Add, {callee_result, callee_arg, mirnext::Operand::int64(17)});
-  callee.append_ret({callee_result});
+  mirnext::Value callee_arg = expect(callee.arg("arg1"), 143);
+  expect_ok(callee.ret(expect(callee_arg + expect(callee.i64(17), 144), 145)), 146);
+  expect_ok(callee.end(), 147);
   return caller;
 }
 
@@ -350,22 +412,14 @@ static mirnext::Function &create_self_recursion(mirnext::Context &ctx,
       "countdown_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Function &function = module.new_function(
       "countdown", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 147);
-  mirnext::Register next = expect(function.create_register(mirnext::Type::i64(), "next"), 148);
-  mirnext::Register recursive
-      = expect(function.create_register(mirnext::Type::i64(), "recursive"), 149);
-  mirnext::Register result = expect(function.create_register(mirnext::Type::i64(), "result"), 150);
-
-  mirnext::IRBuilder builder(function);
-  mirnext::Label base = new_label(builder, 151);
-  append(function, mirnext::Opcode::Ble, {base, arg1, mirnext::Operand::int64(0)});
-  append(function, mirnext::Opcode::Sub, {next, arg1, mirnext::Operand::int64(1)});
-  append(function, mirnext::Opcode::Call,
-         {mirnext::Operand::ref(prototype), mirnext::Operand::ref(function), recursive, next});
-  append(function, mirnext::Opcode::Add, {result, recursive, mirnext::Operand::int64(1)});
-  function.append_ret({result});
-  function.append_label(base);
-  function.append_ret({mirnext::Operand::int64(0)});
+  mirnext::Value arg1 = expect(function.arg("arg1"), 147);
+  mirnext::Label &base = new_label(function, 151);
+  function.if_(arg1 <= expect(function.i64(0), 152), base);
+  mirnext::Value next = expect(arg1 - expect(function.i64(1), 153), 154);
+  mirnext::Value recursive = expect(function.call(prototype, function, {next}), 155);
+  function.ret(expect(recursive + expect(function.i64(1), 156), 157));
+  base.ret(expect(base.i64(0), 158));
+  function.end();
   return function;
 }
 
@@ -381,21 +435,13 @@ static mirnext::Function &create_mutual_recursion(mirnext::Context &ctx,
   mirnext::Function &second = module.new_function(
       "mutual_second", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
-  mirnext::Register first_arg = expect(first.argument("arg1"), 159);
-  mirnext::Register first_result
-      = expect(first.create_register(mirnext::Type::i64(), "result"), 160);
-  append(first, mirnext::Opcode::Call,
-         {mirnext::Operand::ref(prototype), mirnext::Operand::ref(second), first_result,
-          first_arg});
-  first.append_ret({first_result});
+  mirnext::Value first_arg = expect(first.arg("arg1"), 159);
+  expect_ok(first.ret(expect(first.call(prototype, second, {first_arg}), 160)), 161);
+  expect_ok(first.end(), 162);
 
-  mirnext::Register second_arg = expect(second.argument("arg1"), 163);
-  mirnext::Register second_result
-      = expect(second.create_register(mirnext::Type::i64(), "result"), 164);
-  append(second, mirnext::Opcode::Call,
-         {mirnext::Operand::ref(prototype), mirnext::Operand::ref(first), second_result,
-          second_arg});
-  second.append_ret({second_result});
+  mirnext::Value second_arg = expect(second.arg("arg1"), 163);
+  expect_ok(second.ret(expect(second.call(prototype, first, {second_arg}), 164)), 165);
+  expect_ok(second.end(), 166);
   return first;
 }
 
@@ -405,16 +451,17 @@ static mirnext::Function &create_double_arithmetic(mirnext::Context &ctx,
   *module_out = &module;
   mirnext::Function &function = module.new_function(
       "double_arithmetic", {mirnext::Type::d()}, {{mirnext::Type::d(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 180);
-  mirnext::Register value = expect(function.create_register(mirnext::Type::d(), "value"), 181);
-
-  append(function, mirnext::Opcode::DMov, {value, arg1});
-  append(function, mirnext::Opcode::DAdd, {value, value, mirnext::Operand::float64(2.0)});
-  append(function, mirnext::Opcode::DMul, {value, value, mirnext::Operand::float64(3.0)});
-  append(function, mirnext::Opcode::DDiv, {value, value, mirnext::Operand::float64(2.0)});
-  append(function, mirnext::Opcode::DSub, {value, value, mirnext::Operand::float64(1.0)});
-  append(function, mirnext::Opcode::DNeg, {value, value});
-  function.append_ret({value});
+  mirnext::Value arg = expect(function.arg("arg1"), 180);
+  mirnext::Value value = expect(
+      expect(expect(expect(arg + expect(function.f64(2.0), 181), 182)
+                   * expect(function.f64(3.0), 183),
+                   184)
+             / expect(function.f64(2.0), 185),
+             186)
+          - expect(function.f64(1.0), 187),
+      188);
+  expect_ok(function.ret(value), 189);
+  expect_ok(function.end(), 190);
   return function;
 }
 
@@ -425,16 +472,17 @@ static mirnext::Function &create_double_dsl_arithmetic(mirnext::Context &ctx,
   mirnext::Function &function = module.new_function(
       "double_dsl_arithmetic", {mirnext::Type::d()}, {{mirnext::Type::d(), "arg1"}});
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label entry = builder.entry();
-  mirnext::Value arg = entry.arg("arg1");
-  mirnext::Value result
-      = (((arg + entry.f64(2.0)) * entry.f64(3.0)) / entry.f64(2.0)) - entry.f64(1.0);
-  entry.ret(result);
-  if (!builder.ok()) {
-    FAIL("double DSL builder error: " << builder.error().message);
-    std::abort();
-  }
+  mirnext::Value arg = expect(function.arg("arg1"), 182);
+  mirnext::Value result = expect(
+      expect(expect(expect(arg + expect(function.f64(2.0), 183), 184)
+                   * expect(function.f64(3.0), 185),
+                   186)
+             / expect(function.f64(2.0), 187),
+             188)
+          - expect(function.f64(1.0), 189),
+      190);
+  expect_ok(function.ret(result), 191);
+  expect_ok(function.end(), 192);
   return function;
 }
 
@@ -444,18 +492,16 @@ static mirnext::Function &create_double_branch(mirnext::Context &ctx,
   *module_out = &module;
   mirnext::Function &function = module.new_function(
       "double_branch", {mirnext::Type::d()}, {{mirnext::Type::d(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 189);
+  mirnext::Value arg1 = expect(function.arg("arg1"), 189);
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label high = new_label(builder, 190);
-  mirnext::Label low = new_label(builder, 191);
-  append(function, mirnext::Opcode::DBgt, {high, arg1, mirnext::Operand::float64(10.0)});
-  append(function, mirnext::Opcode::DBle, {low, arg1, mirnext::Operand::float64(5.0)});
-  function.append_ret({mirnext::Operand::float64(0.25)});
-  function.append_label(high);
-  function.append_ret({mirnext::Operand::float64(1.5)});
-  function.append_label(low);
-  function.append_ret({mirnext::Operand::float64(-2.5)});
+  mirnext::Label &high = new_label(function, 190);
+  mirnext::Label &low = new_label(function, 191);
+  function.if_(arg1 > expect(function.f64(10.0), 192), high);
+  function.if_(arg1 <= expect(function.f64(5.0), 193), low);
+  function.ret(expect(function.f64(0.25), 194));
+  high.ret(expect(high.f64(1.5), 195));
+  low.ret(expect(low.f64(-2.5), 196));
+  function.end();
   return function;
 }
 
@@ -465,13 +511,53 @@ static mirnext::Function &create_int_double_conversion(mirnext::Context &ctx,
   *module_out = &module;
   mirnext::Function &function = module.new_function(
       "int_double_conversion", {mirnext::Type::d()}, {{mirnext::Type::d(), "arg1"}});
-  mirnext::Register arg1 = expect(function.argument("arg1"), 199);
-  mirnext::Register value = expect(function.create_register(mirnext::Type::d(), "value"), 200);
-  mirnext::Register integer = expect(function.create_register(mirnext::Type::i64(), "integer"), 201);
+  mirnext::Value arg1 = expect(function.arg("arg1"), 199);
+  mirnext::Value integer = expect(arg1.convert(mirnext::Type::Kind::I64), 200);
+  mirnext::Value value = expect(integer.convert(mirnext::Type::Kind::D), 201);
+  expect_ok(function.ret(value), 202);
+  expect_ok(function.end(), 203);
+  return function;
+}
 
-  append(function, mirnext::Opcode::D2I, {integer, arg1});
-  append(function, mirnext::Opcode::I2D, {value, integer});
-  function.append_ret({value});
+static mirnext::Function &create_dsl_i64_double_round_trip(mirnext::Context &ctx,
+                                                           mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_dsl_i64_double_round_trip");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "dsl_i64_double_round_trip", {mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "arg1"}});
+
+  mirnext::Value as_double = expect(
+      function.convert<mirnext::Type::Kind::D>(expect(function.arg("arg1"), 213)), 214);
+  mirnext::Value back = expect(function.convert<mirnext::Type::Kind::I64>(as_double), 215);
+  expect_ok(function.ret(back), 216);
+  expect_ok(function.end(), 217);
+  return function;
+}
+
+static mirnext::Function &create_dsl_u64_to_double(mirnext::Context &ctx,
+                                                   mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_dsl_u64_to_double");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function("dsl_u64_to_double", {mirnext::Type::d()}, {});
+
+  mirnext::Value result = expect(
+      function.convert<mirnext::Type::Kind::D>(expect(function.u64(4097), 218)), 219);
+  expect_ok(function.ret(result), 220);
+  expect_ok(function.end(), 221);
+  return function;
+}
+
+static mirnext::Function &create_dsl_f64_to_i64(mirnext::Context &ctx,
+                                                mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_dsl_f64_to_i64");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function("dsl_f64_to_i64", {mirnext::Type::i64()}, {});
+
+  mirnext::Value result = expect(
+      function.convert<mirnext::Type::Kind::I64>(expect(function.f64(41.75), 222)), 223);
+  expect_ok(function.ret(result), 224);
+  expect_ok(function.end(), 225);
   return function;
 }
 
@@ -480,62 +566,32 @@ static mirnext::Function &create_float_long_double_lowering(mirnext::Context &ct
   mirnext::Module &module = ctx.new_module("m_float_long_double_lowering");
   *module_out = &module;
   mirnext::Function &function = module.new_function("float_long_double_lowering", {}, {});
-  mirnext::Register i = expect(function.create_register(mirnext::Type::i64(), "i"), 207);
-  mirnext::Register f = expect(function.create_register(mirnext::Type::f(), "f"), 208);
-  mirnext::Register d = expect(function.create_register(mirnext::Type::d(), "d"), 209);
-  mirnext::Register ld = expect(function.create_register(mirnext::Type::ld(), "ld"), 210);
-  mirnext::Register cmp = expect(function.create_register(mirnext::Type::i64(), "cmp"), 211);
-
-  mirnext::IRBuilder builder(function);
-  mirnext::Label done = new_label(builder, 212);
-  append(function, mirnext::Opcode::Mov, {i, mirnext::Operand::int64(42)});
-  append(function, mirnext::Opcode::Ext8, {i, i});
-  append(function, mirnext::Opcode::Ext16, {i, i});
-  append(function, mirnext::Opcode::Ext32, {i, i});
-  append(function, mirnext::Opcode::UExt8, {i, i});
-  append(function, mirnext::Opcode::UExt16, {i, i});
-  append(function, mirnext::Opcode::UExt32, {i, i});
-  append(function, mirnext::Opcode::I2F, {f, i});
-  append(function, mirnext::Opcode::UI2LD, {ld, i});
-  append(function, mirnext::Opcode::FMov, {f, mirnext::Operand::float32(1.25f)});
-  append(function, mirnext::Opcode::FNeg, {f, f});
-  append(function, mirnext::Opcode::FAdd, {f, f, mirnext::Operand::float32(2.0f)});
-  append(function, mirnext::Opcode::FSub, {f, f, mirnext::Operand::float32(1.0f)});
-  append(function, mirnext::Opcode::FMul, {f, f, mirnext::Operand::float32(3.0f)});
-  append(function, mirnext::Opcode::FDiv, {f, f, mirnext::Operand::float32(2.0f)});
-  append(function, mirnext::Opcode::FEq, {cmp, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FNe, {cmp, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FLt, {cmp, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FLe, {cmp, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FGt, {cmp, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FGe, {cmp, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FBeq, {done, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::FBlt, {done, f, mirnext::Operand::float32(0.0f)});
-  append(function, mirnext::Opcode::I2LD, {ld, i});
-  append(function, mirnext::Opcode::LDMov, {ld, mirnext::Operand::long_double(1.5L)});
-  append(function, mirnext::Opcode::LDNeg, {ld, ld});
-  append(function, mirnext::Opcode::LDAdd, {ld, ld, mirnext::Operand::long_double(2.0L)});
-  append(function, mirnext::Opcode::LDSub, {ld, ld, mirnext::Operand::long_double(1.0L)});
-  append(function, mirnext::Opcode::LDMul, {ld, ld, mirnext::Operand::long_double(3.0L)});
-  append(function, mirnext::Opcode::LDDiv, {ld, ld, mirnext::Operand::long_double(2.0L)});
-  append(function, mirnext::Opcode::LDEq, {cmp, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDNe, {cmp, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDLt, {cmp, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDLe, {cmp, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDGt, {cmp, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDGe, {cmp, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDBeq, {done, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::LDBgt, {done, ld, mirnext::Operand::long_double(0.0L)});
-  append(function, mirnext::Opcode::F2D, {d, f});
-  append(function, mirnext::Opcode::F2LD, {ld, f});
-  append(function, mirnext::Opcode::D2F, {f, d});
-  append(function, mirnext::Opcode::D2LD, {ld, d});
-  append(function, mirnext::Opcode::LD2F, {f, ld});
-  append(function, mirnext::Opcode::LD2D, {d, ld});
-  append(function, mirnext::Opcode::F2I, {i, f});
-  append(function, mirnext::Opcode::LD2I, {i, ld});
-  function.append_label(done);
-  function.append_ret();
+  mirnext::Label &done = new_label(function, 212);
+  mirnext::Value i8 = expect(function.i8(42), 207);
+  mirnext::Value u8 = expect(function.u8(42), 208);
+  mirnext::Value i16 = expect(i8.convert(mirnext::Type::Kind::I64), 209);
+  mirnext::Value u16 = expect(u8.convert(mirnext::Type::Kind::U64), 210);
+  mirnext::Value f = expect(i16.convert(mirnext::Type::Kind::F), 211);
+  mirnext::Value ld = expect(u16.convert(mirnext::Type::Kind::LD), 212);
+  mirnext::Value f_math = expect(
+      expect((f + expect(function.f32(2.0f), 213)) * expect(function.f32(3.0f), 214), 215)
+          / expect(function.f32(2.0f), 216),
+      217);
+  mirnext::Value d = expect(f_math.convert(mirnext::Type::Kind::D), 218);
+  mirnext::Value back_to_f = expect(d.convert(mirnext::Type::Kind::F), 219);
+  mirnext::Value ld_math = expect(
+      expect((ld + expect(function.ld(2.0L), 220)) * expect(function.ld(3.0L), 221), 222)
+          / expect(function.ld(2.0L), 223),
+      224);
+  expect_ok(function.if_(back_to_f < expect(function.f32(0.0f), 225), done), 226);
+  expect_ok(function.if_(ld_math > expect(function.ld(0.0L), 227), done), 228);
+  mirnext::Value ld_to_d = expect(ld_math.convert(mirnext::Type::Kind::D), 229);
+  expect_ok(function.call_void(
+                module.new_prototype("sink", {}, {{mirnext::Type::d(), "arg"}}),
+                module.new_import("float_long_double_sink"), {ld_to_d}),
+            230);
+  expect_ok(done.ret(), 231);
+  expect_ok(function.end(), 232);
   return function;
 }
 
@@ -546,18 +602,26 @@ static mirnext::Function &create_u64_dsl_unsigned_path(mirnext::Context &ctx,
   mirnext::Function &function = module.new_function(
       "u64_dsl_unsigned_path", {mirnext::Type::u64()}, {{mirnext::Type::u64(), "arg1"}});
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label entry = builder.entry();
-  mirnext::Label small = builder.label();
-  mirnext::Value arg = entry.arg("arg1");
-  mirnext::Value half = arg / entry.u64(2);
-  entry.if_(arg < entry.u64(10), small);
-  entry.ret(half);
-  small.ret(small.u64(7));
-  if (!builder.ok()) {
-    FAIL("u64 DSL builder error: " << builder.error().message);
-    std::abort();
-  }
+  mirnext::Label &small = function.label();
+  mirnext::Value arg = expect(function.arg("arg1"), 226);
+  mirnext::Value half = expect(arg >> expect(function.u64(1), 227), 228);
+  expect_ok(function.if_(expect(arg < expect(function.u64(10), 229), 230), small), 231);
+  expect_ok(function.ret(half), 232);
+  expect_ok(small.ret(expect(small.u64(7), 233)), 234);
+  expect_ok(function.end(), 235);
+  return function;
+}
+
+static mirnext::Function &create_double_negation(mirnext::Context &ctx,
+                                                 mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_double_negation");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "double_negation", {mirnext::Type::d()}, {{mirnext::Type::d(), "arg1"}});
+
+  mirnext::Value arg = expect(function.arg("arg1"), 240);
+  expect_ok(function.ret(expect(-arg, 241)), 242);
+  expect_ok(function.end(), 243);
   return function;
 }
 
@@ -571,14 +635,84 @@ static mirnext::Function &create_void_call_lowering(mirnext::Context &ctx,
   mirnext::Function &function = module.new_function(
       "void_call_lowering", {}, {{mirnext::Type::i64(), "arg1"}});
 
-  mirnext::IRBuilder builder(function);
-  mirnext::Label entry = builder.entry();
-  entry.call_void(prototype, import, {entry.arg("arg1")});
-  entry.ret();
-  if (!builder.ok()) {
-    FAIL("void call DSL builder error: " << builder.error().message);
-    std::abort();
-  }
+  expect_ok(function.call_void(prototype, import, {expect(function.arg("arg1"), 236)}), 237);
+  expect_ok(function.ret(), 238);
+  expect_ok(function.end(), 239);
+  return function;
+}
+
+static mirnext::Function &create_raw_switch(mirnext::Context &ctx,
+                                            mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_raw_switch");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "raw_switch", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
+  mirnext::Value arg = expect(function.arg("arg1"), 244);
+  mirnext::Label &zero = function.label();
+  mirnext::Label &one = function.label();
+  mirnext::Label &two = function.label();
+  function.switch_(arg, {&zero, &one, &two});
+  zero.ret(zero.i64(7));
+  one.ret(one.i64(11));
+  two.ret(two.i64(13));
+  function.end();
+  return function;
+}
+
+static mirnext::Function &create_case_switch(mirnext::Context &ctx,
+                                             mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_case_switch");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "case_switch", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
+  mirnext::Value arg = expect(function.arg("arg1"), 245);
+  mirnext::Label &ten = function.label();
+  mirnext::Label &twenty = function.label();
+  mirnext::Label &other = function.label();
+  function.switch_(arg, {{10, &ten}, {20, &twenty}}, other);
+  ten.ret(ten.i64(100));
+  twenty.ret(twenty.i64(200));
+  other.ret(other.i64(-1));
+  function.end();
+  return function;
+}
+
+static mirnext::Function &create_load_first(mirnext::Context &ctx,
+                                            mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_load_first");
+  *module_out = &module;
+  mirnext::Data &nums = module.data("nums", mirnext::Type::i64(),
+                                    std::vector<std::int64_t>{11, 22, 33});
+  mirnext::Function &function = module.new_function("load_first", {mirnext::Type::i64()}, {});
+
+  mirnext::Value nums_ref = expect(module.ref(nums), 246);
+  mirnext::Value nums_ptr = expect(function.addr(nums_ref, "nums_ptr"), 247);
+  mirnext::Value first = expect(function.load(expect(function.mem(mirnext::Type::i64(), nums_ptr),
+                                               248)),
+                                249);
+  expect_ok(function.ret(first), 250);
+  expect_ok(function.end(), 251);
+  return function;
+}
+
+static mirnext::Function &create_load_index(mirnext::Context &ctx,
+                                            mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_load_index");
+  *module_out = &module;
+  mirnext::Data &nums = module.data("nums", mirnext::Type::i64(),
+                                    std::vector<std::int64_t>{11, 22, 33});
+  mirnext::Function &function = module.new_function(
+      "load_index", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
+
+  mirnext::Value nums_ref = expect(module.ref(nums), 252);
+  mirnext::Value nums_ptr = expect(function.addr(nums_ref, "nums_ptr"), 253);
+  mirnext::Value index = expect(function.arg("arg1"), 254);
+  mirnext::Value item = expect(function.load(expect(function.mem(mirnext::Type::i64(), nums_ptr,
+                                                                 index, 8),
+                                             255)),
+                               256);
+  expect_ok(function.ret(item), 257);
+  expect_ok(function.end(), 258);
   return function;
 }
 
@@ -612,28 +746,28 @@ static int check_loop_gen() {
 static int check_sum_to_n_interp() {
   mirnext::Context ctx;
   mirnext::Module *module = nullptr;
-  mirnext::Function &function = create_sum_to_n(ctx, &module);
+  mirnext::Function &function = *expect(create_sum_to_n(ctx, &module), 306);
   mirnext::LegacyContext legacy;
   mirnext::LegacyLoweredFunction lowered
-      = expect(mirnext::lower_to_legacy(legacy, *module, function), 306);
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 307);
   const std::int64_t arg = 100;
   std::int64_t result
-      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1), 307);
-  return result == 5050 ? 0 : 308;
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1), 308);
+  return result == 5050 ? 0 : 309;
 }
 
 static int check_sum_to_n_gen() {
   mirnext::Context ctx;
   mirnext::Module *module = nullptr;
-  mirnext::Function &function = create_sum_to_n(ctx, &module);
+  mirnext::Function &function = *expect(create_sum_to_n(ctx, &module), 310);
   mirnext::LegacyContext legacy;
   mirnext::LegacyLoweredFunction lowered
-      = expect(mirnext::lower_to_legacy(legacy, *module, function), 309);
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 311);
   const std::int64_t arg = 100;
   std::int64_t result
       = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function, &arg, 1),
-               310);
-  return result == 5050 ? 0 : 311;
+               312);
+  return result == 5050 ? 0 : 313;
 }
 
 static int check_sieve_interp() {
@@ -669,7 +803,7 @@ static int check_integer_ops_interp() {
   const std::int64_t arg = 42;
   std::int64_t result
       = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1), 104);
-  return result == -1 ? 0 : 105;
+  return result == -3 ? 0 : 105;
 }
 
 static int check_integer_ops_gen() {
@@ -683,7 +817,7 @@ static int check_integer_ops_gen() {
   std::int64_t result
       = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function, &arg, 1),
                107);
-  return result == -1 ? 0 : 108;
+  return result == -3 ? 0 : 108;
 }
 
 static int check_integer_branch_interp() {
@@ -711,6 +845,145 @@ static int check_integer_branch_gen() {
       = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function, &arg, 1),
                113);
   return result == 9 ? 0 : 114;
+}
+
+static int check_is_less_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_is_less(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 333);
+  const std::int64_t less_args[] = {3, 5};
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, less_args, 2),
+               334);
+  if (result != 1) return 335;
+  const std::int64_t greater_args[] = {5, 3};
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, greater_args, 2),
+                  336);
+  return result == 0 ? 0 : 337;
+}
+
+static int check_is_less_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_is_less(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 338);
+  MIR_load_module(legacy.raw(), lowered.module);
+  MIR_gen_init(legacy.raw());
+  MIR_gen_set_optimize_level(legacy.raw(), 2);
+  MIR_link(legacy.raw(), MIR_set_gen_interface, nullptr);
+  void *addr = MIR_gen(legacy.raw(), lowered.function);
+  auto fn = reinterpret_cast<std::int64_t (*)(std::int64_t, std::int64_t)>(addr);
+  std::int64_t less = fn(3, 5);
+  std::int64_t greater = fn(5, 3);
+  MIR_gen_finish(legacy.raw());
+  if (less != 1) return 339;
+  return greater == 0 ? 0 : 340;
+}
+
+static int check_branch_on_bool_literal_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_branch_on_bool_literal(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 341);
+  std::int64_t result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function),
+                               342);
+  return result == 1 ? 0 : 343;
+}
+
+static int check_branch_on_bool_literal_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_branch_on_bool_literal(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 344);
+  std::int64_t result
+      = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function), 345);
+  return result == 1 ? 0 : 346;
+}
+
+static int check_checked_add_branch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_add_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 346);
+  const std::int64_t ok_args[] = {40, 2};
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, ok_args, 2),
+               347);
+  if (result != 42) return 348;
+  const std::int64_t overflow_args[] = {std::numeric_limits<std::int64_t>::max(), 1};
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, overflow_args,
+                                         2),
+                  349);
+  return result == -1 ? 0 : 350;
+}
+
+static int check_checked_add_branch_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_add_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 351);
+  MIR_load_module(legacy.raw(), lowered.module);
+  MIR_gen_init(legacy.raw());
+  MIR_gen_set_optimize_level(legacy.raw(), 2);
+  MIR_link(legacy.raw(), MIR_set_gen_interface, nullptr);
+  void *addr = MIR_gen(legacy.raw(), lowered.function);
+  auto fn = reinterpret_cast<std::int64_t (*)(std::int64_t, std::int64_t)>(addr);
+  std::int64_t ok = fn(40, 2);
+  std::int64_t overflow = fn(std::numeric_limits<std::int64_t>::max(), 1);
+  MIR_gen_finish(legacy.raw());
+  if (ok != 42) return 352;
+  return overflow == -1 ? 0 : 353;
+}
+
+static int check_checked_add_i32_branch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_add_i32_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 354);
+  const std::int64_t ok_args[] = {100, 23};
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, ok_args, 2),
+               355);
+  if (static_cast<std::int32_t>(result) != 123) return 356;
+  const std::int64_t overflow_args[] = {std::numeric_limits<std::int32_t>::max(), 1};
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, overflow_args,
+                                         2),
+                  357);
+  return static_cast<std::int32_t>(result) == -1 ? 0 : 358;
+}
+
+static int check_checked_chain_branch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_chain_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 359);
+  const std::int64_t ok_args[] = {5, 6};
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, ok_args, 2),
+               360);
+  if (result != 66) return 361;
+  const std::int64_t overflow_args[] = {std::numeric_limits<std::int64_t>::max() - 1, 2};
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, overflow_args,
+                                         2),
+                  362);
+  return result == -1 ? 0 : 363;
 }
 
 static int check_import_call_interp() {
@@ -842,7 +1115,7 @@ static int check_double_arithmetic_interp() {
   const double arg = 8.0;
   double result = expect(mirnext::interpret_double(legacy, lowered.module, lowered.function, &arg, 1),
                          262);
-  return result == doctest::Approx(-14.0) ? 0 : 263;
+  return result == doctest::Approx(14.0) ? 0 : 263;
 }
 
 static int check_double_arithmetic_gen() {
@@ -856,7 +1129,7 @@ static int check_double_arithmetic_gen() {
   double result
       = expect(mirnext::generate_and_call_double(legacy, lowered.module, lowered.function, &arg, 1),
                265);
-  return result == doctest::Approx(-14.0) ? 0 : 266;
+  return result == doctest::Approx(14.0) ? 0 : 266;
 }
 
 static int check_double_dsl_arithmetic_interp() {
@@ -884,6 +1157,33 @@ static int check_double_dsl_arithmetic_gen() {
       = expect(mirnext::generate_and_call_double(legacy, lowered.module, lowered.function, &arg, 1),
                284);
   return result == doctest::Approx(14.0) ? 0 : 285;
+}
+
+static int check_double_negation_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_double_negation(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 332);
+  const double arg = 12.5;
+  double result = expect(mirnext::interpret_double(legacy, lowered.module, lowered.function, &arg, 1),
+                         333);
+  return result == doctest::Approx(-12.5) ? 0 : 334;
+}
+
+static int check_double_negation_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_double_negation(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 335);
+  const double arg = 12.5;
+  double result
+      = expect(mirnext::generate_and_call_double(legacy, lowered.module, lowered.function, &arg, 1),
+               336);
+  return result == doctest::Approx(-12.5) ? 0 : 337;
 }
 
 static int check_double_branch_interp() {
@@ -940,6 +1240,79 @@ static int check_int_double_conversion_gen() {
   return result == doctest::Approx(41.0) ? 0 : 278;
 }
 
+static int check_dsl_i64_double_round_trip_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_dsl_i64_double_round_trip(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 314);
+  const std::int64_t arg = 4097;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1), 315);
+  return result == arg ? 0 : 316;
+}
+
+static int check_dsl_i64_double_round_trip_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_dsl_i64_double_round_trip(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 317);
+  const std::int64_t arg = 4097;
+  std::int64_t result
+      = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function, &arg, 1),
+               318);
+  return result == arg ? 0 : 319;
+}
+
+static int check_dsl_u64_to_double_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_dsl_u64_to_double(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 320);
+  double result = expect(mirnext::interpret_double(legacy, lowered.module, lowered.function), 321);
+  return result == doctest::Approx(4097.0) ? 0 : 322;
+}
+
+static int check_dsl_u64_to_double_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_dsl_u64_to_double(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 323);
+  double result
+      = expect(mirnext::generate_and_call_double(legacy, lowered.module, lowered.function), 324);
+  return result == doctest::Approx(4097.0) ? 0 : 325;
+}
+
+static int check_dsl_f64_to_i64_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_dsl_f64_to_i64(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 326);
+  std::int64_t result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function), 327);
+  return result == 41 ? 0 : 328;
+}
+
+static int check_dsl_f64_to_i64_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_dsl_f64_to_i64(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 329);
+  std::int64_t result
+      = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function), 330);
+  return result == 41 ? 0 : 331;
+}
+
 static int check_float_long_double_lowering() {
   mirnext::Context ctx;
   mirnext::Module *module = nullptr;
@@ -983,6 +1356,86 @@ static int check_void_call_lowering() {
   mirnext::LegacyContext legacy;
   expect(mirnext::lower_to_legacy(legacy, *module, function), 292);
   return 0;
+}
+
+static int check_raw_switch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_raw_switch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 313);
+  const std::int64_t arg = 2;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1), 314);
+  return result == 13 ? 0 : 315;
+}
+
+static int check_case_switch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_case_switch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 316);
+  const std::int64_t twenty = 20;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &twenty, 1), 317);
+  if (result != 200) return 318;
+  const std::int64_t miss = 15;
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &miss, 1), 319);
+  return result == -1 ? 0 : 320;
+}
+
+static int check_load_first_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_load_first(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 321);
+  std::int64_t result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function),
+                               322);
+  return result == 11 ? 0 : 323;
+}
+
+static int check_load_first_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_load_first(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 324);
+  std::int64_t result
+      = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function), 325);
+  return result == 11 ? 0 : 326;
+}
+
+static int check_load_index_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_load_index(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 327);
+  const std::int64_t arg = 2;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1), 328);
+  return result == 33 ? 0 : 329;
+}
+
+static int check_load_index_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_load_index(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 330);
+  const std::int64_t arg = 2;
+  std::int64_t result
+      = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function, &arg, 1),
+               331);
+  return result == 33 ? 0 : 332;
 }
 
 static int check_binary_loop_interp() {
@@ -1035,7 +1488,7 @@ static int check_binary_double_interp() {
   const double arg = 8.0;
   double result = expect(mirnext::interpret_double(legacy, lowered.module, lowered.function, &arg, 1),
                          303);
-  return result == doctest::Approx(-14.0) ? 0 : 304;
+  return result == doctest::Approx(14.0) ? 0 : 304;
 }
 
 static int check_binary_void_call_read() {
@@ -1052,7 +1505,7 @@ TEST_CASE("legacy lowering executes loop") {
   CHECK(check_loop_gen() == 0);
 }
 
-TEST_CASE("legacy lowering executes IRBuilder sum_to_n") {
+TEST_CASE("legacy lowering executes Block tree sum_to_n") {
   CHECK(check_sum_to_n_interp() == 0);
   CHECK(check_sum_to_n_gen() == 0);
 }
@@ -1067,6 +1520,14 @@ TEST_CASE("legacy lowering executes integer operations and branches") {
   CHECK(check_integer_ops_gen() == 0);
   CHECK(check_integer_branch_interp() == 0);
   CHECK(check_integer_branch_gen() == 0);
+  CHECK(check_is_less_interp() == 0);
+  CHECK(check_is_less_gen() == 0);
+  CHECK(check_branch_on_bool_literal_interp() == 0);
+  CHECK(check_branch_on_bool_literal_gen() == 0);
+  CHECK(check_checked_add_branch_interp() == 0);
+  CHECK(check_checked_add_branch_gen() == 0);
+  CHECK(check_checked_add_i32_branch_interp() == 0);
+  CHECK(check_checked_chain_branch_interp() == 0);
 }
 
 TEST_CASE("legacy lowering executes import and earlier internal calls") {
@@ -1093,10 +1554,18 @@ TEST_CASE("legacy lowering executes double operations") {
   CHECK(check_double_arithmetic_gen() == 0);
   CHECK(check_double_dsl_arithmetic_interp() == 0);
   CHECK(check_double_dsl_arithmetic_gen() == 0);
+  CHECK(check_double_negation_interp() == 0);
+  CHECK(check_double_negation_gen() == 0);
   CHECK(check_double_branch_interp() == 0);
   CHECK(check_double_branch_gen() == 0);
   CHECK(check_int_double_conversion_interp() == 0);
   CHECK(check_int_double_conversion_gen() == 0);
+  CHECK(check_dsl_i64_double_round_trip_interp() == 0);
+  CHECK(check_dsl_i64_double_round_trip_gen() == 0);
+  CHECK(check_dsl_u64_to_double_interp() == 0);
+  CHECK(check_dsl_u64_to_double_gen() == 0);
+  CHECK(check_dsl_f64_to_i64_interp() == 0);
+  CHECK(check_dsl_f64_to_i64_gen() == 0);
 }
 
 TEST_CASE("legacy lowering accepts float and long double operations") {
@@ -1106,6 +1575,18 @@ TEST_CASE("legacy lowering accepts float and long double operations") {
 TEST_CASE("legacy lowering executes u64 DSL unsigned path") {
   CHECK(check_u64_dsl_unsigned_path_interp() == 0);
   CHECK(check_u64_dsl_unsigned_path_gen() == 0);
+}
+
+TEST_CASE("legacy lowering executes switch DSL") {
+  CHECK(check_raw_switch_interp() == 0);
+  CHECK(check_case_switch_interp() == 0);
+}
+
+TEST_CASE("legacy lowering executes addr data loads") {
+  CHECK(check_load_first_interp() == 0);
+  CHECK(check_load_first_gen() == 0);
+  CHECK(check_load_index_interp() == 0);
+  CHECK(check_load_index_gen() == 0);
 }
 
 TEST_CASE("binary encode round-trips through MIR-C reader") {

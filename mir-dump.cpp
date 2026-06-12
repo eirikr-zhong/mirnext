@@ -36,6 +36,9 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
   };
 
   switch (operand.kind()) {
+  case Operand::Kind::Poison:
+    out << "<poison>";
+    break;
   case Operand::Kind::Int64:
     out << operand.int64_value();
     break;
@@ -66,6 +69,9 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
     if (operand.memory_displacement() != 0) out << ", " << operand.memory_displacement();
     out << ')';
     break;
+  case Operand::Kind::ModuleSlot:
+    out << "@slot" << operand.module_slot_id();
+    break;
   case Operand::Kind::Reference:
     out << '@';
     switch (operand.reference_kind()) {
@@ -90,6 +96,13 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
         out << "function";
       }
       break;
+    case Operand::ReferenceKind::Data:
+      if (operand.reference_pointer() != nullptr) {
+        out << static_cast<const Data *>(operand.reference_pointer())->name();
+      } else {
+        out << "data";
+      }
+      break;
     case Operand::ReferenceKind::None:
       out << "ref";
       break;
@@ -110,6 +123,70 @@ void Context::dump(std::ostream &out) const {
     }
     for (const auto &import : module->imports()) {
       out << "  import " << import->name() << '\n';
+    }
+    for (const auto &data : module->data_items()) {
+      out << "  ";
+      if (!data->name().empty()) out << data->name() << ": ";
+      switch (data->kind()) {
+      case Data::Kind::Bss:
+        out << "bss " << data->size();
+        break;
+      case Data::Kind::Typed:
+        out << "data " << type_name(data->element_type());
+        for (const Operand &value : data->values()) {
+          out << ' ';
+          switch (value.kind()) {
+          case Operand::Kind::Int64:
+            out << value.int64_value();
+            break;
+          case Operand::Kind::UInt64:
+            out << value.uint64_value();
+            break;
+          case Operand::Kind::Float32:
+            out << std::setprecision(9) << value.float32_value() << 'f';
+            break;
+          case Operand::Kind::Float64:
+            out << std::setprecision(17) << value.float64_value() << 'd';
+            break;
+          case Operand::Kind::LongDouble:
+            out << std::setprecision(21) << value.long_double_value() << "ld";
+            break;
+          default:
+            out << "<invalid>";
+            break;
+          }
+        }
+        break;
+      case Data::Kind::String:
+        out << "string \"" << data->string_value() << '"';
+        break;
+      case Data::Kind::Ref:
+        out << "ref @";
+        if (data->ref_target().pointer != nullptr) {
+          switch (data->ref_target().kind) {
+          case Operand::ReferenceKind::Prototype:
+            out << static_cast<const Prototype *>(data->ref_target().pointer)->name();
+            break;
+          case Operand::ReferenceKind::Import:
+            out << static_cast<const Import *>(data->ref_target().pointer)->name();
+            break;
+          case Operand::ReferenceKind::Function:
+            out << static_cast<const Function *>(data->ref_target().pointer)->name();
+            break;
+          case Operand::ReferenceKind::Data:
+            out << static_cast<const Data *>(data->ref_target().pointer)->name();
+            break;
+          case Operand::ReferenceKind::None:
+            out << "ref";
+            break;
+          }
+        } else {
+          out << "ref";
+        }
+        out << ' ' << data->ref_target().displacement;
+        break;
+      }
+      out << '\n';
     }
     for (const auto &function : module->functions()) {
       out << "  func " << function->name() << '(';
@@ -170,6 +247,7 @@ const char *opcode_name(Opcode opcode) noexcept {
   case Opcode::D2LD: return "d2ld";
   case Opcode::LD2F: return "ld2f";
   case Opcode::LD2D: return "ld2d";
+  case Opcode::Addr: return "addr";
   case Opcode::Alloca: return "alloca";
   case Opcode::Neg: return "neg";
   case Opcode::Negs: return "negs";
@@ -308,12 +386,14 @@ const char *opcode_name(Opcode opcode) noexcept {
   case Opcode::Bno: return "bno";
   case Opcode::UBno: return "ubno";
   case Opcode::Call: return "call";
+  case Opcode::Switch: return "switch";
   }
   return "unknown";
 }
 
 const char *type_name(Type type) noexcept {
   switch (type.kind()) {
+  case Type::Kind::B: return "b";
   case Type::Kind::I8: return "i8";
   case Type::Kind::U8: return "u8";
   case Type::Kind::I16: return "i16";
