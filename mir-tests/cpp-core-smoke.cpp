@@ -365,8 +365,10 @@ static int check_expression_ops() {
                                   129);
   mirnext::Value unsigned_shift = expect(u >> expect(function.u64(3), 130), 131);
   mirnext::Value negated = expect(-shifted, 132);
+  mirnext::Value small_negated = expect(-expect(function.i32(7), 137), 138);
   mirnext::Value dneg = expect(-d, 133);
   (void)unsigned_shift;
+  (void)small_negated;
   expect_ok(function.if_(expect(dneg < expect(function.f64(0.0), 134), 135), function.label()), 136);
   expect_ok(function.ret(negated), 139);
   expect_ok(function.end(), 140);
@@ -383,6 +385,93 @@ static int check_expression_ops() {
   if (!contains(text, "ursh %")) return 147;
   if (!contains(text, "neg %")) return 148;
   if (!contains(text, "dneg %")) return 149;
+  if (!contains(text, "negs %")) return 156;
+
+  mirnext::Function &small_signed_function = module.new_function(
+      "small_signed_ops", {mirnext::Type::i32()}, {{mirnext::Type::i32(), "a"},
+                                                   {mirnext::Type::i32(), "b"}});
+  mirnext::Value signed_a = expect(small_signed_function.arg("a"), 157);
+  mirnext::Value signed_b = expect(small_signed_function.arg("b"), 158);
+  mirnext::Value signed_arithmetic
+      = expect(((signed_a + signed_b) - expect(small_signed_function.i32(1), 159))
+                   * expect(small_signed_function.i32(3), 160),
+               161);
+  signed_arithmetic = expect((signed_arithmetic / expect(small_signed_function.i32(2), 162))
+                                 % expect(small_signed_function.i32(5), 163),
+                             164);
+  mirnext::Value signed_bits = expect(((signed_a & expect(small_signed_function.i32(15), 165))
+                                       | expect(small_signed_function.i32(32), 166))
+                                          ^ signed_b,
+                                      167);
+  mirnext::Value signed_shifted = expect((signed_bits << expect(small_signed_function.i32(1), 168))
+                                             >> expect(small_signed_function.i32(2), 169),
+                                         170);
+  mirnext::Label &signed_less = small_signed_function.label("less");
+  expect_ok(small_signed_function.if_(signed_a < signed_b, signed_less), 171);
+  expect_ok(small_signed_function.if_(signed_a <= signed_b, signed_less), 172);
+  expect_ok(small_signed_function.if_(signed_a > signed_b, signed_less), 173);
+  expect_ok(small_signed_function.if_(signed_a >= signed_b, signed_less), 174);
+  expect_ok(small_signed_function.if_(signed_a == signed_b, signed_less), 175);
+  expect_ok(small_signed_function.if_(signed_a != signed_b, signed_less), 176);
+  expect_ok(small_signed_function.ret(expect(signed_arithmetic + signed_shifted, 177)), 178);
+  expect_ok(signed_less.ret(expect(signed_less.i32(0), 179)), 180);
+  expect_ok(small_signed_function.end(), 181);
+  if (module.error()) return 182;
+
+  mirnext::Function &small_unsigned_function = module.new_function(
+      "small_unsigned_ops", {mirnext::Type::u32()}, {{mirnext::Type::u32(), "a"},
+                                                     {mirnext::Type::u32(), "b"}});
+  mirnext::Value unsigned_a = expect(small_unsigned_function.arg("a"), 183);
+  mirnext::Value unsigned_b = expect(small_unsigned_function.arg("b"), 184);
+  mirnext::Value unsigned_arithmetic
+      = expect(((unsigned_a + unsigned_b) - expect(small_unsigned_function.u32(1), 185))
+                   * expect(small_unsigned_function.u32(3), 186),
+               187);
+  unsigned_arithmetic
+      = expect((unsigned_arithmetic / expect(small_unsigned_function.u32(2), 188))
+                   % expect(small_unsigned_function.u32(5), 189),
+               190);
+  mirnext::Value unsigned_shifted = expect(unsigned_a >> expect(small_unsigned_function.u32(1), 191),
+                                           192);
+  mirnext::Label &unsigned_less = small_unsigned_function.label("less");
+  expect_ok(small_unsigned_function.if_(unsigned_a < unsigned_b, unsigned_less), 193);
+  expect_ok(small_unsigned_function.if_(unsigned_a <= unsigned_b, unsigned_less), 194);
+  expect_ok(small_unsigned_function.if_(unsigned_a > unsigned_b, unsigned_less), 195);
+  expect_ok(small_unsigned_function.if_(unsigned_a >= unsigned_b, unsigned_less), 196);
+  expect_ok(small_unsigned_function.ret(expect(unsigned_arithmetic + unsigned_shifted, 197)),
+            198);
+  expect_ok(unsigned_less.ret(expect(unsigned_less.u32(0), 199)), 200);
+  expect_ok(small_unsigned_function.end(), 201);
+  if (module.error()) return 202;
+
+  std::ostringstream small_out;
+  ctx.dump(small_out);
+  const std::string small_text = small_out.str();
+  if (!contains(small_text, "func small_signed_ops(i32 %a, i32 %b) -> i32")) return 213;
+  if (!contains(small_text, "adds %")) return 214;
+  if (!contains(small_text, "subs %")) return 215;
+  if (!contains(small_text, "muls %")) return 216;
+  if (!contains(small_text, "divs %")) return 217;
+  if (!contains(small_text, "mods %")) return 218;
+  if (!contains(small_text, "ands %")) return 219;
+  if (!contains(small_text, "ors %")) return 220;
+  if (!contains(small_text, "xors %")) return 221;
+  if (!contains(small_text, "lshs %")) return 222;
+  if (!contains(small_text, "rshs %")) return 223;
+  if (!contains(small_text, "eqs %")) return 224;
+  if (!contains(small_text, "nes %")) return 225;
+  if (!contains(small_text, "lts %")) return 226;
+  if (!contains(small_text, "les %")) return 227;
+  if (!contains(small_text, "gts %")) return 228;
+  if (!contains(small_text, "ges %")) return 229;
+  if (!contains(small_text, "func small_unsigned_ops(u32 %a, u32 %b) -> u32")) return 230;
+  if (!contains(small_text, "udivs %")) return 231;
+  if (!contains(small_text, "umods %")) return 232;
+  if (!contains(small_text, "urshs %")) return 233;
+  if (!contains(small_text, "ults %")) return 234;
+  if (!contains(small_text, "ules %")) return 235;
+  if (!contains(small_text, "ugts %")) return 236;
+  if (!contains(small_text, "uges %")) return 237;
 
   mirnext::Context error_ctx;
   mirnext::Module &float_module = error_ctx.new_module("float_bitwise_error");
@@ -525,6 +614,46 @@ static int check_overflow_api() {
   expect_ok(plain_function.end(), 301);
   if (module.error()) return 302;
 
+  mirnext::Function &checked_neg_function = module.new_function(
+      "checked_neg", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value checked_neg_x = expect(checked_neg_function.arg("x"), 394).overflow(true);
+  mirnext::Label &checked_neg_overflow = checked_neg_function.label("overflow");
+  mirnext::Value negated = expect(-checked_neg_x, 395);
+  if (negated.type() != mirnext::Type::i64() || !negated.checks_overflow()
+      || !negated.has_overflow_result()) {
+    return 396;
+  }
+  expect_ok(checked_neg_function.if_overflow(negated, checked_neg_overflow), 397);
+  expect_ok(checked_neg_function.ret(negated), 398);
+  expect_ok(checked_neg_overflow.ret(expect(checked_neg_overflow.i64(0), 399)), 400);
+  expect_ok(checked_neg_function.end(), 401);
+  if (module.error()) return 402;
+
+  mirnext::Function &checked_neg_no_function = module.new_function(
+      "checked_neg_no", {mirnext::Type::i32()}, {{mirnext::Type::i32(), "x"}});
+  mirnext::Value checked_neg_no_x
+      = expect(checked_neg_no_function.arg("x"), 403).overflow(true);
+  mirnext::Label &checked_neg_no_ok = checked_neg_no_function.label("ok");
+  mirnext::Value small_negated = expect(-checked_neg_no_x, 404);
+  if (small_negated.type() != mirnext::Type::i32() || !small_negated.checks_overflow()
+      || !small_negated.has_overflow_result()) {
+    return 405;
+  }
+  expect_ok(checked_neg_no_function.if_no_overflow(small_negated, checked_neg_no_ok), 406);
+  expect_ok(checked_neg_no_function.ret(expect(checked_neg_no_function.i32(0), 407)), 408);
+  expect_ok(checked_neg_no_ok.ret(small_negated), 409);
+  expect_ok(checked_neg_no_function.end(), 410);
+  if (module.error()) return 411;
+
+  mirnext::Function &checked_neg_expr_function = module.new_function(
+      "checked_neg_expr", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value checked_neg_expr_x
+      = expect(checked_neg_expr_function.arg("x"), 431).overflow(true);
+  expect_ok(checked_neg_expr_function.ret(-checked_neg_expr_function.expr(checked_neg_expr_x)),
+            432);
+  expect_ok(checked_neg_expr_function.end(), 433);
+  if (module.error()) return 434;
+
   std::ostringstream out;
   ctx.dump(out);
   const std::string text = out.str();
@@ -539,6 +668,10 @@ static int check_overflow_api() {
   if (!contains(text, "umulos %")) return 391;
   if (!contains(text, "ubo L")) return 392;
   if (!contains(text, "ubno L")) return 393;
+  if (!contains(text, "func checked_neg(i64 %x) -> i64")) return 412;
+  if (!contains(text, "subo %")) return 413;
+  if (!contains(text, "subos %")) return 414;
+  if (!contains(text, "func checked_neg_expr(i64 %x) -> i64")) return 435;
   if (!contains(text, "func overflow_disabled")) return 310;
 
   auto expect_invalid = [](mirnext::Module &m, int code) {
@@ -598,6 +731,36 @@ static int check_overflow_api() {
   if (!float_bad.is_valid() || !float_bad.is_poison()) return 336;
   if (int code = expect_invalid(float_module, 337)) return code;
 
+  mirnext::Module &neg_bool_module = ctx.new_module("overflow_neg_bool_error");
+  mirnext::Function &neg_bool_fn = neg_bool_module.new_function("f", {}, {});
+  mirnext::Value neg_bool_value = expect(neg_bool_fn.b(true), 415).overflow(true);
+  mirnext::Value neg_bool_bad = -neg_bool_value;
+  if (!neg_bool_bad.is_valid() || !neg_bool_bad.is_poison()) return 416;
+  if (int code = expect_invalid(neg_bool_module, 417)) return code;
+
+  mirnext::Module &neg_ptr_module = ctx.new_module("overflow_neg_ptr_error");
+  mirnext::Function &neg_ptr_fn = neg_ptr_module.new_function("f", {}, {});
+  mirnext::Value neg_ptr_value
+      = expect(neg_ptr_fn.value(mirnext::Type::p(), "p"), 418).overflow(true);
+  mirnext::Value neg_ptr_bad = -neg_ptr_value;
+  if (!neg_ptr_bad.is_valid() || !neg_ptr_bad.is_poison()) return 419;
+  if (int code = expect_invalid(neg_ptr_module, 420)) return code;
+
+  mirnext::Module &neg_float_module = ctx.new_module("overflow_neg_float_error");
+  mirnext::Function &neg_float_fn = neg_float_module.new_function("f", {}, {});
+  mirnext::Value neg_float_value = expect(neg_float_fn.f64(1.0), 421).overflow(true);
+  mirnext::Value neg_float_bad = -neg_float_value;
+  if (!neg_float_bad.is_valid() || !neg_float_bad.is_poison()) return 422;
+  if (int code = expect_invalid(neg_float_module, 423)) return code;
+
+  mirnext::Module &neg_unsigned_module = ctx.new_module("overflow_neg_unsigned_error");
+  mirnext::Function &neg_unsigned_fn = neg_unsigned_module.new_function(
+      "f", {}, {{mirnext::Type::u64(), "u"}});
+  mirnext::Value neg_unsigned_value = expect(neg_unsigned_fn.arg("u"), 424).overflow(true);
+  mirnext::Value neg_unsigned_bad = -neg_unsigned_value;
+  if (!neg_unsigned_bad.is_valid() || !neg_unsigned_bad.is_poison()) return 425;
+  if (int code = expect_invalid(neg_unsigned_module, 426)) return code;
+
   mirnext::Module &plain_branch_module = ctx.new_module("overflow_plain_branch_error");
   mirnext::Function &plain_branch_fn = plain_branch_module.new_function(
       "f", {}, {{mirnext::Type::i64(), "a"}});
@@ -607,6 +770,17 @@ static int check_overflow_api() {
             339);
   if (int code = expect_invalid(plain_branch_module, 340)) return code;
   if (plain_branch_fn.instruction_count() != plain_count) return 341;
+
+  mirnext::Module &plain_neg_branch_module
+      = ctx.new_module("overflow_plain_neg_branch_error");
+  mirnext::Function &plain_neg_branch_fn = plain_neg_branch_module.new_function(
+      "f", {}, {{mirnext::Type::i64(), "a"}});
+  mirnext::Label &plain_neg_target = plain_neg_branch_fn.label();
+  mirnext::Value plain_neg = -expect(plain_neg_branch_fn.arg("a"), 427);
+  const std::size_t plain_neg_count = plain_neg_branch_fn.instruction_count();
+  expect_ok(plain_neg_branch_fn.if_overflow(plain_neg, plain_neg_target), 428);
+  if (int code = expect_invalid(plain_neg_branch_module, 429)) return code;
+  if (plain_neg_branch_fn.instruction_count() != plain_neg_count) return 430;
 
   mirnext::Module &stale_module = ctx.new_module("overflow_stale_branch_error");
   mirnext::Function &stale_fn = stale_module.new_function(

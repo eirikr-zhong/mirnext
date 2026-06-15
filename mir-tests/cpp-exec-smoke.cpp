@@ -243,6 +243,50 @@ static mirnext::Function &create_integer_ops(mirnext::Context &ctx, mirnext::Mod
   return function;
 }
 
+static mirnext::Function &create_i32_s_ops(mirnext::Context &ctx, mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_i32_s_ops");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "i32_s_ops", {mirnext::Type::i32()}, {{mirnext::Type::i32(), "arg1"}});
+  mirnext::Value arg = expect(function.arg("arg1"), 419);
+  mirnext::Value arithmetic = expect(arg + expect(function.i32(3), 420), 421);
+  arithmetic = expect(arithmetic - expect(function.i32(1), 422), 423);
+  arithmetic = expect(arithmetic * expect(function.i32(5), 424), 425);
+  arithmetic = expect(arithmetic / expect(function.i32(2), 426), 427);
+  arithmetic = expect(arithmetic % expect(function.i32(17), 428), 429);
+  mirnext::Value bits = expect(arg & expect(function.i32(15), 430), 431);
+  bits = expect(bits | expect(function.i32(32), 432), 433);
+  bits = expect(bits ^ expect(function.i32(7), 434), 435);
+  mirnext::Value shifted = expect(bits << expect(function.i32(1), 436), 437);
+  shifted = expect(shifted >> expect(function.i32(2), 438), 439);
+  mirnext::Label &less = new_label(function, 440);
+  expect_ok(function.if_(expect(arg < expect(function.i32(0), 441), 442), less), 443);
+  expect_ok(function.ret(expect(arithmetic + shifted, 444)), 445);
+  expect_ok(less.ret(expect(less.i32(-1), 446)), 447);
+  expect_ok(function.end(), 448);
+  return function;
+}
+
+static mirnext::Function &create_u32_s_ops(mirnext::Context &ctx, mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_u32_s_ops");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "u32_s_ops", {mirnext::Type::u32()}, {{mirnext::Type::u32(), "arg1"}});
+  mirnext::Value arg = expect(function.arg("arg1"), 443);
+  mirnext::Value arithmetic = expect(arg + expect(function.u32(9), 449), 450);
+  arithmetic = expect(arithmetic - expect(function.u32(2), 451), 452);
+  arithmetic = expect(arithmetic * expect(function.u32(3), 453), 454);
+  arithmetic = expect(arithmetic / expect(function.u32(2), 455), 456);
+  arithmetic = expect(arithmetic % expect(function.u32(19), 457), 458);
+  mirnext::Value shifted = expect(arg >> expect(function.u32(1), 459), 460);
+  mirnext::Label &high = new_label(function, 461);
+  expect_ok(function.if_(expect(arg > expect(function.u32(100), 462), 463), high), 464);
+  expect_ok(function.ret(expect(arithmetic + shifted, 465)), 466);
+  expect_ok(high.ret(expect(high.u32(0), 467)), 468);
+  expect_ok(function.end(), 469);
+  return function;
+}
+
 static mirnext::Function &create_integer_branch(mirnext::Context &ctx, mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_integer_branch");
   *module_out = &module;
@@ -333,6 +377,38 @@ static mirnext::Function &create_checked_add_i32_branch(mirnext::Context &ctx,
   expect_ok(function.ret(sum), 360);
   expect_ok(overflow.ret(expect(overflow.i32(-1), 361)), 362);
   expect_ok(function.end(), 363);
+  return function;
+}
+
+static mirnext::Function &create_checked_neg_branch(mirnext::Context &ctx,
+                                                    mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_checked_neg");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "checked_neg", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value x = expect(function.arg("x"), 403).overflow(true);
+  mirnext::Label &overflow = new_label(function, 404);
+  mirnext::Value negated = expect(-x, 405);
+  expect_ok(function.if_overflow(negated, overflow), 406);
+  expect_ok(function.ret(negated), 407);
+  expect_ok(overflow.ret(expect(overflow.i64(0), 408)), 409);
+  expect_ok(function.end(), 410);
+  return function;
+}
+
+static mirnext::Function &create_checked_neg_i32_branch(mirnext::Context &ctx,
+                                                        mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_checked_neg_i32");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function(
+      "checked_neg_i32", {mirnext::Type::i32()}, {{mirnext::Type::i32(), "x"}});
+  mirnext::Value x = expect(function.arg("x"), 411).overflow(true);
+  mirnext::Label &overflow = new_label(function, 412);
+  mirnext::Value negated = expect(-x, 413);
+  expect_ok(function.if_overflow(negated, overflow), 414);
+  expect_ok(function.ret(negated), 415);
+  expect_ok(overflow.ret(expect(overflow.i32(0), 416)), 417);
+  expect_ok(function.end(), 418);
   return function;
 }
 
@@ -929,6 +1005,62 @@ static int check_integer_ops_gen() {
   return result == -3 ? 0 : 108;
 }
 
+static int check_i32_s_ops_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_i32_s_ops(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 416);
+  const std::int64_t arg = 42;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &arg, 1),
+               417);
+  return static_cast<std::int32_t>(result) == 30 ? 0 : 418;
+}
+
+static int check_i32_s_ops_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_i32_s_ops(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 419);
+  const std::int64_t arg = 42;
+  std::int64_t result
+      = expect(mirnext::generate_and_call_i64(legacy, lowered.module, lowered.function, &arg, 1),
+               420);
+  return static_cast<std::int32_t>(result) == 30 ? 0 : 421;
+}
+
+static int check_u32_s_ops_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_u32_s_ops(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 422);
+  const std::uint64_t arg = 42;
+  std::uint64_t result
+      = expect(mirnext::interpret_u64(legacy, lowered.module, lowered.function, &arg, 1),
+               423);
+  return static_cast<std::uint32_t>(result) == 37 ? 0 : 424;
+}
+
+static int check_u32_s_ops_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_u32_s_ops(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 425);
+  const std::uint64_t arg = 42;
+  std::uint64_t result
+      = expect(mirnext::generate_and_call_u64(legacy, lowered.module, lowered.function, &arg, 1),
+               426);
+  return static_cast<std::uint32_t>(result) == 37 ? 0 : 427;
+}
+
 static int check_integer_branch_interp() {
   mirnext::Context ctx;
   mirnext::Module *module = nullptr;
@@ -1113,6 +1245,64 @@ static int check_checked_add_i32_branch_interp() {
                                          2),
                   357);
   return static_cast<std::int32_t>(result) == -1 ? 0 : 358;
+}
+
+static int check_checked_neg_branch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_neg_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 403);
+  const std::int64_t ok_arg = 42;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &ok_arg, 1),
+               404);
+  if (result != -42) return 405;
+  const std::int64_t overflow_arg = std::numeric_limits<std::int64_t>::min();
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function,
+                                         &overflow_arg, 1),
+                  406);
+  return result == 0 ? 0 : 407;
+}
+
+static int check_checked_neg_branch_gen() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_neg_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 408);
+  MIR_load_module(legacy.raw(), lowered.module);
+  MIR_gen_init(legacy.raw());
+  MIR_gen_set_optimize_level(legacy.raw(), 2);
+  MIR_link(legacy.raw(), MIR_set_gen_interface, nullptr);
+  void *addr = MIR_gen(legacy.raw(), lowered.function);
+  auto fn = reinterpret_cast<std::int64_t (*)(std::int64_t)>(addr);
+  std::int64_t ok = fn(42);
+  std::int64_t overflow = fn(std::numeric_limits<std::int64_t>::min());
+  MIR_gen_finish(legacy.raw());
+  if (ok != -42) return 409;
+  return overflow == 0 ? 0 : 410;
+}
+
+static int check_checked_neg_i32_branch_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_checked_neg_i32_branch(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 411);
+  const std::int64_t ok_arg = 42;
+  std::int64_t result
+      = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function, &ok_arg, 1),
+               412);
+  if (static_cast<std::int32_t>(result) != -42) return 413;
+  const std::int64_t overflow_arg = std::numeric_limits<std::int32_t>::min();
+  result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function,
+                                         &overflow_arg, 1),
+                  414);
+  return static_cast<std::int32_t>(result) == 0 ? 0 : 415;
 }
 
 static int check_checked_chain_branch_interp() {
@@ -1828,6 +2018,10 @@ TEST_CASE("legacy lowering executes sieve") {
 TEST_CASE("legacy lowering executes integer operations and branches") {
   CHECK(check_integer_ops_interp() == 0);
   CHECK(check_integer_ops_gen() == 0);
+  CHECK(check_i32_s_ops_interp() == 0);
+  CHECK(check_i32_s_ops_gen() == 0);
+  CHECK(check_u32_s_ops_interp() == 0);
+  CHECK(check_u32_s_ops_gen() == 0);
   CHECK(check_integer_branch_interp() == 0);
   CHECK(check_integer_branch_gen() == 0);
   CHECK(check_is_less_interp() == 0);
@@ -1839,6 +2033,9 @@ TEST_CASE("legacy lowering executes integer operations and branches") {
   CHECK(check_checked_add_branch_interp() == 0);
   CHECK(check_checked_add_branch_gen() == 0);
   CHECK(check_checked_add_i32_branch_interp() == 0);
+  CHECK(check_checked_neg_branch_interp() == 0);
+  CHECK(check_checked_neg_branch_gen() == 0);
+  CHECK(check_checked_neg_i32_branch_interp() == 0);
   CHECK(check_checked_chain_branch_interp() == 0);
   CHECK(check_checked_unsigned_mul_branch_interp() == 0);
   CHECK(check_checked_unsigned_mul_branch_gen() == 0);

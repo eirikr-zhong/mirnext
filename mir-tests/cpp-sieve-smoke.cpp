@@ -113,7 +113,7 @@ int main() {
   if (!contains(text, "alloca %flags 819000")) return 9;
   if (!contains(text, "u8:(%flags, %i, 1)")) return 10;
   if (!contains(text, "u8:(%flags, %k, 1)")) return 11;
-  if (!contains(text, "eq %")) return 12;
+  if (!contains(text, "eqs %")) return 12;
   if (!contains(text, "bt L")) return 15;
   if (!contains(text, "jmp")) return 13;
   if (!contains(text, "ret %count")) return 14;

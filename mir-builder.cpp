@@ -41,6 +41,27 @@ bool is_integer(Type type) noexcept {
   return false;
 }
 
+bool is_small_integer(Type type) noexcept {
+  switch (type.kind()) {
+  case Type::Kind::I8:
+  case Type::Kind::U8:
+  case Type::Kind::I16:
+  case Type::Kind::U16:
+  case Type::Kind::I32:
+  case Type::Kind::U32:
+    return true;
+  case Type::Kind::B:
+  case Type::Kind::I64:
+  case Type::Kind::U64:
+  case Type::Kind::F:
+  case Type::Kind::D:
+  case Type::Kind::LD:
+  case Type::Kind::P:
+    return false;
+  }
+  return false;
+}
+
 bool is_signed_integer(Type type) noexcept {
   switch (type.kind()) {
   case Type::Kind::B:
@@ -352,6 +373,14 @@ std::optional<Opcode> binary_opcode(BinaryOp op, Type type) noexcept {
   case Type::Kind::I8:
   case Type::Kind::I16:
   case Type::Kind::I32:
+    switch (op) {
+    case BinaryOp::Add: return Opcode::Adds;
+    case BinaryOp::Sub: return Opcode::Subs;
+    case BinaryOp::Mul: return Opcode::Muls;
+    case BinaryOp::Div: return Opcode::Divs;
+    case BinaryOp::Mod: return Opcode::Mods;
+    }
+    break;
   case Type::Kind::I64:
     switch (op) {
     case BinaryOp::Add: return Opcode::Add;
@@ -364,6 +393,14 @@ std::optional<Opcode> binary_opcode(BinaryOp op, Type type) noexcept {
   case Type::Kind::U8:
   case Type::Kind::U16:
   case Type::Kind::U32:
+    switch (op) {
+    case BinaryOp::Add: return Opcode::Adds;
+    case BinaryOp::Sub: return Opcode::Subs;
+    case BinaryOp::Mul: return Opcode::Muls;
+    case BinaryOp::Div: return Opcode::UDivs;
+    case BinaryOp::Mod: return Opcode::UMods;
+    }
+    break;
   case Type::Kind::U64:
     switch (op) {
     case BinaryOp::Add: return Opcode::Add;
@@ -490,6 +527,7 @@ std::optional<Opcode> unary_opcode(UnaryOp op, Type type) noexcept {
     case Type::Kind::U16:
     case Type::Kind::I32:
     case Type::Kind::U32:
+      return Opcode::Negs;
     case Type::Kind::I64:
     case Type::Kind::U64:
       return Opcode::Neg;
@@ -507,19 +545,43 @@ std::optional<Opcode> unary_opcode(UnaryOp op, Type type) noexcept {
   return std::nullopt;
 }
 
+std::optional<Opcode> checked_neg_opcode(UnaryOp op, Type type) noexcept {
+  if (op != UnaryOp::Neg) return std::nullopt;
+  switch (type.kind()) {
+  case Type::Kind::I8:
+  case Type::Kind::I16:
+  case Type::Kind::I32:
+    return Opcode::Subos;
+  case Type::Kind::I64:
+    return Opcode::Subo;
+  case Type::Kind::B:
+  case Type::Kind::U8:
+  case Type::Kind::U16:
+  case Type::Kind::U32:
+  case Type::Kind::U64:
+  case Type::Kind::F:
+  case Type::Kind::D:
+  case Type::Kind::LD:
+  case Type::Kind::P:
+    return std::nullopt;
+  }
+  return std::nullopt;
+}
+
 std::optional<Opcode> integer_binary_opcode(IntegerBinaryOp op, Type type) noexcept {
   if (!is_integer(type)) return std::nullopt;
   switch (op) {
   case IntegerBinaryOp::And:
-    return Opcode::And;
+    return is_small_integer(type) ? Opcode::Ands : Opcode::And;
   case IntegerBinaryOp::Or:
-    return Opcode::Or;
+    return is_small_integer(type) ? Opcode::Ors : Opcode::Or;
   case IntegerBinaryOp::Xor:
-    return Opcode::Xor;
+    return is_small_integer(type) ? Opcode::Xors : Opcode::Xor;
   case IntegerBinaryOp::Lsh:
-    return Opcode::Lsh;
+    return is_small_integer(type) ? Opcode::Lshs : Opcode::Lsh;
   case IntegerBinaryOp::Rsh:
-    return is_signed_integer(type) ? Opcode::Rsh : Opcode::URsh;
+    if (is_signed_integer(type)) return is_small_integer(type) ? Opcode::Rshs : Opcode::Rsh;
+    return is_small_integer(type) ? Opcode::URshs : Opcode::URsh;
   }
   return std::nullopt;
 }
@@ -540,6 +602,15 @@ std::optional<Opcode> compare_opcode(CompareOp op, Type type) noexcept {
   case Type::Kind::I8:
   case Type::Kind::I16:
   case Type::Kind::I32:
+    switch (op) {
+    case CompareOp::Eq: return Opcode::Eqs;
+    case CompareOp::Ne: return Opcode::Nes;
+    case CompareOp::Lt: return Opcode::Lts;
+    case CompareOp::Le: return Opcode::Les;
+    case CompareOp::Gt: return Opcode::Gts;
+    case CompareOp::Ge: return Opcode::Ges;
+    }
+    break;
   case Type::Kind::I64:
     switch (op) {
     case CompareOp::Eq: return Opcode::Eq;
@@ -553,6 +624,15 @@ std::optional<Opcode> compare_opcode(CompareOp op, Type type) noexcept {
   case Type::Kind::U8:
   case Type::Kind::U16:
   case Type::Kind::U32:
+    switch (op) {
+    case CompareOp::Eq: return Opcode::Eqs;
+    case CompareOp::Ne: return Opcode::Nes;
+    case CompareOp::Lt: return Opcode::ULts;
+    case CompareOp::Le: return Opcode::ULes;
+    case CompareOp::Gt: return Opcode::UGts;
+    case CompareOp::Ge: return Opcode::UGes;
+    }
+    break;
   case Type::Kind::U64:
     switch (op) {
     case CompareOp::Eq: return Opcode::Eq;
@@ -765,6 +845,15 @@ Expr Expr::unary(int op_value, Expr value) {
   if (block->error()) return Expr(*block, block->poison_value(type));
   if (!value.is_valid()) {
     return invalid(block, type, invalid_operand("invalid expression operand"));
+  }
+  if (value.value().checks_overflow()) {
+    const std::optional<Opcode> opcode = checked_neg_opcode(op, type);
+    if (!opcode) {
+      return invalid(block, type,
+                     invalid_operand("checked unary negation requires signed integer operand"));
+    }
+    return Expr(*block, block->append_binary_in_current(*opcode, block->integer_literal(type, 0),
+                                                        value.value()));
   }
   const std::optional<Opcode> opcode = unary_opcode(op, type);
   if (!opcode) {
@@ -2039,6 +2128,16 @@ Value value_unary(int op_value, Value value) {
   UnaryOp op = static_cast<UnaryOp>(op_value);
   if (!value.is_valid()) return Value();
   if (value.block().error()) return Value::poison(value.block(), value.type_);
+  if (value.checks_overflow()) {
+    const std::optional<Opcode> opcode = checked_neg_opcode(op, value.type_);
+    if (!opcode) {
+      value.block().fail(
+          invalid_operand("checked unary negation requires signed integer operand"));
+      return Value::poison(value.block(), value.type_);
+    }
+    return value.block().append_binary(*opcode, value.block().integer_literal(value.type_, 0),
+                                       std::move(value));
+  }
   const std::optional<Opcode> opcode = unary_opcode(op, value.type_);
   if (!opcode) {
     value.block().fail(invalid_operand("unsupported operand type for unary negation"));
