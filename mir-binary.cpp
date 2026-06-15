@@ -50,6 +50,13 @@ enum class Tag : std::uint8_t {
   TI8 = 43,
   EOI = 61,
   EOFILE = 62,
+  ALIAS_MEM_DISP = 63,
+  ALIAS_MEM_BASE = 64,
+  ALIAS_MEM_INDEX = 65,
+  ALIAS_MEM_DISP_BASE = 66,
+  ALIAS_MEM_DISP_INDEX = 67,
+  ALIAS_MEM_BASE_INDEX = 68,
+  ALIAS_MEM_DISP_BASE_INDEX = 69,
 };
 
 enum class BinaryOpcode : std::uint64_t {
@@ -215,10 +222,21 @@ enum class BinaryOpcode : std::uint64_t {
   UBo = 162,
   Bno = 163,
   UBno = 164,
+  LAddr = 165,
+  JmpIndirect = 166,
   Call = 167,
+  Inline = 168,
+  JCall = 169,
   Switch = 170,
   Ret = 171,
+  JRet = 172,
   Alloca = 173,
+  BStart = 174,
+  BEnd = 175,
+  VaArg = 176,
+  VaBlockArg = 177,
+  VaStart = 178,
+  VaEnd = 179,
 };
 
 class StringTable {
@@ -453,6 +471,7 @@ Result<BinaryOpcode> lower_opcode(Opcode opcode) {
   case Opcode::LD2F: return BinaryOpcode::LD2F;
   case Opcode::LD2D: return BinaryOpcode::LD2D;
   case Opcode::Addr: return BinaryOpcode::Addr;
+  case Opcode::LAddr: return BinaryOpcode::LAddr;
   case Opcode::Alloca: return BinaryOpcode::Alloca;
   case Opcode::Neg: return BinaryOpcode::Neg;
   case Opcode::Negs: return BinaryOpcode::Negs;
@@ -590,9 +609,19 @@ Result<BinaryOpcode> lower_opcode(Opcode opcode) {
   case Opcode::UBo: return BinaryOpcode::UBo;
   case Opcode::Bno: return BinaryOpcode::Bno;
   case Opcode::UBno: return BinaryOpcode::UBno;
+  case Opcode::JmpIndirect: return BinaryOpcode::JmpIndirect;
   case Opcode::Ret: return BinaryOpcode::Ret;
+  case Opcode::JRet: return BinaryOpcode::JRet;
   case Opcode::Call: return BinaryOpcode::Call;
+  case Opcode::Inline: return BinaryOpcode::Inline;
+  case Opcode::JCall: return BinaryOpcode::JCall;
   case Opcode::Switch: return BinaryOpcode::Switch;
+  case Opcode::VaArg: return BinaryOpcode::VaArg;
+  case Opcode::VaBlockArg: return BinaryOpcode::VaBlockArg;
+  case Opcode::VaStart: return BinaryOpcode::VaStart;
+  case Opcode::VaEnd: return BinaryOpcode::VaEnd;
+  case Opcode::BStart: return BinaryOpcode::BStart;
+  case Opcode::BEnd: return BinaryOpcode::BEnd;
   case Opcode::Nop:
   case Opcode::Label:
     break;
@@ -607,14 +636,13 @@ struct FunctionTables {
 class ModuleWriter {
 public:
   explicit ModuleWriter(const Module &module) : module_(module) {
-    for (const auto &prototype : module_.prototypes()) {
-      refs_.emplace(prototype.get(), std::string(prototype->name()));
-    }
-    for (const auto &import : module_.imports()) {
-      refs_.emplace(import.get(), std::string(import->name()));
-    }
     for (const auto &function : module_.functions()) {
       refs_.emplace(function.get(), std::string(function->name()));
+      if (function->is_signature()) {
+        signature_refs_.emplace(function.get(), std::string(function->name()));
+      } else {
+        signature_refs_.emplace(function.get(), internal_proto_name(*function));
+      }
     }
     for (const auto &data : module_.data_items()) {
       if (!data->name().empty()) refs_.emplace(data.get(), std::string(data->name()));
@@ -639,6 +667,10 @@ public:
   }
 
 private:
+  std::string internal_proto_name(const Function &function) const {
+    return ".mirnext.proto." + std::string(function.name());
+  }
+
   Result<void *> collect_strings() {
     std::vector<std::byte> sink;
     return write_module(sink, true);
@@ -667,17 +699,23 @@ private:
     MIRNEXT_RESULT_RET(result);
     result = write_name_token(out, module_.name(), Tag::NAME1, collect_only);
     MIRNEXT_RESULT_RET(result);
-    for (const auto &prototype : module_.prototypes()) {
-      result = write_prototype(out, *prototype, collect_only);
-      MIRNEXT_RESULT_RET(result);
-    }
-    for (const auto &import : module_.imports()) {
-      result = write_name_token(out, "import", Tag::NAME1, collect_only);
-      MIRNEXT_RESULT_RET(result);
-      result = write_name_token(out, import->name(), Tag::NAME1, collect_only);
+    for (const auto &function : module_.functions()) {
+      if (function->is_signature()) {
+        result = write_prototype(out, *function, std::string(function->name()), collect_only);
+      } else {
+        result = write_prototype(out, *function, internal_proto_name(*function), collect_only);
+      }
       MIRNEXT_RESULT_RET(result);
     }
     for (const auto &function : module_.functions()) {
+      if (!function->is_import()) continue;
+      result = write_name_token(out, "import", Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
+      result = write_name_token(out, function->name(), Tag::NAME1, collect_only);
+      MIRNEXT_RESULT_RET(result);
+    }
+    for (const auto &function : module_.functions()) {
+      if (!function->is_local()) continue;
       result = write_name_token(out, "forward", Tag::NAME1, collect_only);
       MIRNEXT_RESULT_RET(result);
       result = write_name_token(out, function->name(), Tag::NAME1, collect_only);
@@ -688,6 +726,7 @@ private:
       MIRNEXT_RESULT_RET(result);
     }
     for (const auto &function : module_.functions()) {
+      if (!function->is_local()) continue;
       result = write_function(out, *function, collect_only);
       MIRNEXT_RESULT_RET(result);
     }
@@ -698,10 +737,11 @@ private:
 
   Result<void *> write_signature(std::vector<std::byte> &out,
                                  const std::vector<Type> &return_types,
-                                 const std::vector<Prototype::Parameter> &parameters,
+                                 const std::vector<Register> &parameters,
+                                 bool vararg,
                                  bool collect_only) {
     if (!collect_only) {
-      write_uint(out, 0);
+      write_uint(out, vararg ? 1 : 0);
       write_uint(out, return_types.size());
       for (Type type : return_types) {
         auto lowered_result = lower_type(type);
@@ -715,14 +755,14 @@ private:
         MIRNEXT_RESULT_RET(lowered_result);
       }
     }
-    for (const Prototype::Parameter &parameter : parameters) {
-      auto lowered_result = lower_type(parameter.type);
+    for (const Register &parameter : parameters) {
+      auto lowered_result = lower_type(parameter.type());
       MIRNEXT_RESULT_RET(lowered_result);
       if (!collect_only) {
         auto write_result = write_type(out, *lowered_result);
         MIRNEXT_RESULT_RET(write_result);
       }
-      auto name_result = write_name_token(out, parameter.name, Tag::NAME1, collect_only);
+      auto name_result = write_name_token(out, parameter.name(), Tag::NAME1, collect_only);
       MIRNEXT_RESULT_RET(name_result);
     }
     if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
@@ -731,21 +771,17 @@ private:
 
   Result<void *> write_function_signature(std::vector<std::byte> &out,
                                           const Function &function, bool collect_only) {
-    std::vector<Prototype::Parameter> parameters;
-    parameters.reserve(function.arguments().size());
-    for (const Register &argument : function.arguments()) {
-      parameters.push_back(Prototype::Parameter{argument.type(), std::string(argument.name())});
-    }
-    return write_signature(out, function.return_types(), parameters, collect_only);
+    return write_signature(out, function.return_types(), function.arguments(), function.is_vararg(),
+                           collect_only);
   }
 
-  Result<void *> write_prototype(std::vector<std::byte> &out, const Prototype &prototype,
-                                 bool collect_only) {
+  Result<void *> write_prototype(std::vector<std::byte> &out, const Function &function,
+                                 std::string_view name, bool collect_only) {
     auto result = write_name_token(out, "proto", Tag::NAME1, collect_only);
     MIRNEXT_RESULT_RET(result);
-    result = write_name_token(out, prototype.name(), Tag::NAME1, collect_only);
+    result = write_name_token(out, name, Tag::NAME1, collect_only);
     MIRNEXT_RESULT_RET(result);
-    result = write_signature(out, prototype.return_types(), prototype.parameters(), collect_only);
+    result = write_function_signature(out, function, collect_only);
     MIRNEXT_RESULT_RET(result);
     return static_cast<void *>(nullptr);
   }
@@ -908,7 +944,7 @@ private:
 
   Result<void *> write_operand(std::vector<std::byte> &out, const Function &function,
                                const FunctionTables &tables, const Operand &operand,
-                               bool collect_only) {
+                               bool collect_only, bool signature_ref = false) {
     switch (operand.kind()) {
     case Operand::Kind::Poison:
       return Error{ErrorCode::InvalidOperand, "poison operand cannot be encoded"};
@@ -942,8 +978,9 @@ private:
     case Operand::Kind::ModuleSlot:
       return Error{ErrorCode::InvalidOperand, "module binding operand is not supported by binary encoding"};
     case Operand::Kind::Reference: {
-      const auto it = refs_.find(operand.reference_pointer());
-      if (it == refs_.end()) return Error{ErrorCode::InvalidOperand, "unknown reference operand"};
+      const auto &refs = signature_ref ? signature_refs_ : refs_;
+      const auto it = refs.find(operand.reference_pointer());
+      if (it == refs.end()) return Error{ErrorCode::InvalidOperand, "unknown reference operand"};
       return write_name_token(out, it->second, Tag::NAME1, collect_only);
     }
     }
@@ -964,6 +1001,7 @@ private:
     auto type_result = lower_type(operand.memory_type());
     MIRNEXT_RESULT_RET(type_result);
     auto type = *type_result;
+    const bool has_alias_metadata = operand.has_memory_alias_metadata();
     if (!collect_only) {
       const bool has_disp = operand.memory_displacement() != 0;
       Tag tag = Tag::MEM_DISP;
@@ -978,6 +1016,33 @@ private:
       } else if (has_index) {
         tag = Tag::MEM_INDEX;
       }
+      if (has_alias_metadata) {
+        switch (tag) {
+        case Tag::MEM_DISP:
+          tag = Tag::ALIAS_MEM_DISP;
+          break;
+        case Tag::MEM_BASE:
+          tag = Tag::ALIAS_MEM_BASE;
+          break;
+        case Tag::MEM_INDEX:
+          tag = Tag::ALIAS_MEM_INDEX;
+          break;
+        case Tag::MEM_DISP_BASE:
+          tag = Tag::ALIAS_MEM_DISP_BASE;
+          break;
+        case Tag::MEM_DISP_INDEX:
+          tag = Tag::ALIAS_MEM_DISP_INDEX;
+          break;
+        case Tag::MEM_BASE_INDEX:
+          tag = Tag::ALIAS_MEM_BASE_INDEX;
+          break;
+        case Tag::MEM_DISP_BASE_INDEX:
+          tag = Tag::ALIAS_MEM_DISP_BASE_INDEX;
+          break;
+        default:
+          break;
+        }
+      }
       append_byte(out, static_cast<std::uint8_t>(tag));
       auto result = write_type(out, type);
       MIRNEXT_RESULT_RET(result);
@@ -991,9 +1056,19 @@ private:
         MIRNEXT_RESULT_RET(result);
         write_uint(out, static_cast<std::uint64_t>(operand.memory_scale()));
       }
+      if (has_alias_metadata) {
+        result = write_name_token(out, operand.memory_alias(), Tag::NAME1, false);
+        MIRNEXT_RESULT_RET(result);
+        result = write_name_token(out, operand.memory_nonalias(), Tag::NAME1, false);
+        MIRNEXT_RESULT_RET(result);
+      }
     } else {
       if (has_base) strings_.add_name(base->name());
       if (has_index) strings_.add_name(index->name());
+      if (has_alias_metadata) {
+        strings_.add_name(operand.memory_alias());
+        strings_.add_name(operand.memory_nonalias());
+      }
     }
     return static_cast<void *>(nullptr);
   }
@@ -1010,11 +1085,17 @@ private:
     MIRNEXT_RESULT_RET(opcode_result);
     auto opcode = *opcode_result;
     if (!collect_only) write_uint(out, static_cast<std::uint64_t>(opcode));
-    for (const Operand &operand : instruction.operands()) {
-      auto operand_result = write_operand(out, function, tables, operand, collect_only);
+    const auto &operands = instruction.operands();
+    for (std::size_t i = 0; i < operands.size(); ++i) {
+      const bool signature_ref = (instruction.opcode() == Opcode::Call
+                                  || instruction.opcode() == Opcode::Inline
+                                  || instruction.opcode() == Opcode::JCall) && i == 0;
+      auto operand_result = write_operand(out, function, tables, operands[i], collect_only,
+                                          signature_ref);
       MIRNEXT_RESULT_RET(operand_result);
     }
     if (instruction.opcode() == Opcode::Ret || instruction.opcode() == Opcode::Call
+        || instruction.opcode() == Opcode::Inline || instruction.opcode() == Opcode::JCall
         || instruction.opcode() == Opcode::Switch) {
       if (!collect_only) append_byte(out, static_cast<std::uint8_t>(Tag::EOI));
     }
@@ -1024,6 +1105,7 @@ private:
   const Module &module_;
   StringTable strings_;
   std::unordered_map<const void *, std::string> refs_;
+  std::unordered_map<const void *, std::string> signature_refs_;
 };
 
 std::uint64_t hash_mum(std::uint64_t value, std::uint64_t constant) {

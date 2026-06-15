@@ -80,6 +80,15 @@ struct SwitchCase {
   Label *target;
 };
 
+struct MemoryOptions {
+  std::string_view alias = {};
+  std::string_view nonalias = {};
+};
+
+struct LabelOptions {
+  bool stack_scope = false;
+};
+
 class Block {
 public:
   enum class Kind { Module, Function, Label };
@@ -116,12 +125,18 @@ public:
   Var var(Type type, std::string_view name);
   Value value(Type type, std::string_view name);
   Value addr(Value ref, std::string_view name = {});
+  Value label_addr(Label &target, std::string_view name = {});
   Memory alloca(std::int64_t size, std::string_view name);
   Memory alloca(Type element_type, std::string_view name);
   Memory alloca(Type element_type, std::int64_t count, std::string_view name);
   Memory mem(Type type, Value base, std::int64_t displacement = 0);
+  Memory mem(Type type, Value base, MemoryOptions options);
+  Memory mem(Type type, Value base, std::int64_t displacement, MemoryOptions options);
+  Memory mem(Type type, Value base, Value index, MemoryOptions options);
   Memory mem(Type type, Value base, Value index, int scale = 1,
              std::int64_t displacement = 0);
+  Memory mem(Type type, Value base, Value index, int scale,
+             std::int64_t displacement, MemoryOptions options);
   Value load(Memory memory);
   Value load(Var var);
   void store(Memory memory, Value value);
@@ -132,19 +147,19 @@ public:
   template <Type::Kind To> Value convert(Value value) {
     return convert(std::move(value), To);
   }
-  Value call(const Prototype &prototype, const Import &callee, std::vector<Value> args);
-  Value call(const Prototype &prototype, const Function &callee, std::vector<Value> args);
-  CallResult call_multi(const Prototype &prototype, const Import &callee,
-                        std::vector<Value> args);
-  CallResult call_multi(const Prototype &prototype, const Function &callee,
-                        std::vector<Value> args);
-  void call_void(const Prototype &prototype, const Import &callee, std::vector<Value> args);
-  void call_void(const Prototype &prototype, const Function &callee, std::vector<Value> args);
+  CallResult call(const Function &callee, std::vector<Value> args);
+  CallResult call_indirect(const Function &signature, Value callee, std::vector<Value> args);
+  void va_start(Value va_list);
+  Value va_arg(Type result_type, Value va_list);
+  void va_block_arg(Value dst, Value va_list, std::int64_t size);
+  void va_end(Value va_list);
+  CallableRef operator[](const Function &callee);
   VarRef operator[](Var var);
   MemoryRef operator[](Memory memory);
   Expr expr(Value value);
   Expr expr(std::int64_t value);
   void jmp(Label &target);
+  void jmp(Value target_addr);
   // Keep compare-and-branch opcodes (beq/blt/ublt/dbge, etc.) IR-only for now.
   // The Builder DSL uses value-producing comparisons plus bool branches instead.
   void if_(Value cond, Label &target);
@@ -159,6 +174,7 @@ public:
   void ret(Expr value);
   void ret(std::vector<Value> values);
   void ret();
+  void ret_to(Value target_addr);
 
 protected:
   Block(Kind kind, Block *parent) noexcept;
@@ -167,7 +183,7 @@ protected:
   void set_function(Function *function) noexcept;
   void fail(Error error);
   Instruction &append_operation(Instruction instruction);
-  Label &create_child_label(std::string_view name);
+  Label &create_child_label(std::string_view name, LabelOptions options = {});
   const std::vector<std::unique_ptr<Instruction>> &operations() const noexcept;
   const std::vector<std::unique_ptr<Label>> &child_labels() const noexcept;
 
@@ -204,9 +220,8 @@ private:
   Value append_integer_binary_in_current(Opcode opcode, Value lhs, Value rhs);
   Value compare(Opcode opcode, Value lhs, Value rhs);
   Value compare_in_current(Opcode opcode, Value lhs, Value rhs);
-  CallResult append_call(const Prototype &prototype, Operand callee,
-                         std::vector<Value> args,
-                         std::optional<std::size_t> return_count);
+  CallResult append_call(Opcode opcode, const Function &signature, Operand callee,
+                         std::vector<Value> args);
   Result<Register> temp(Type type);
   bool validate_value(const Value &value, std::string_view description);
   bool validate_register_value(const Value &value, std::string_view description);
@@ -218,13 +233,18 @@ private:
   bool validate_target(const Label &target);
   bool validate_overflow_branch_value(const Value &value);
   bool validate_switch_index(const Value &index);
-  bool validate_call_args(const Prototype &prototype, const std::vector<Value> &args);
+  bool validate_pointer_register_value(const Value &value, std::string_view description);
+  bool validate_va_list(Value &va_list, std::string_view description);
+  bool validate_callee_function(const Function &callee);
+  bool validate_signature_function(const Function &signature);
+  bool validate_indirect_callee(const Value &callee);
+  bool validate_call_args(const Function &signature, const std::vector<Value> &args);
   Block *binary_emit_block(Value lhs, Value rhs);
   std::size_t mark_overflow_pending() noexcept;
   Value poison_value(Type type) noexcept;
   Var poison_var(Type type) noexcept;
   Memory poison_memory(Type type) noexcept;
-  CallResult poison_call_result(const Prototype &prototype) noexcept;
+  CallResult poison_call_result(const Function &signature) noexcept;
 
   Kind kind_;
   Block *parent_;
@@ -242,7 +262,8 @@ public:
   std::size_t id() const noexcept;
   std::string_view name() const noexcept;
   bool is_valid() const noexcept;
-  Label &label(std::string_view name = {});
+  bool is_stack_scoped() const noexcept;
+  Label &label(std::string_view name = {}, LabelOptions options = {});
   void end();
 
 private:
@@ -250,10 +271,13 @@ private:
   friend class Function;
   friend class Operand;
 
-  Label(Function &function, Block &parent, std::size_t id, std::string name);
+  Label(Function &function, Block &parent, std::size_t id, std::string name,
+        LabelOptions options);
 
   std::size_t id_;
   std::string name_;
+  LabelOptions options_;
+  std::optional<Register> stack_scope_token_;
   bool appended_as_instruction_ = false;
 };
 
@@ -264,9 +288,12 @@ public:
     std::string name;
   };
 
+  enum class Linkage { Local, Import, Signature };
+
   explicit Function(Module &module, std::string name);
   Function(Module &module, std::string name, std::vector<Type> return_types,
-           std::vector<Parameter> parameters);
+           std::vector<Parameter> parameters, Linkage linkage = Linkage::Local,
+           bool vararg = false);
 
   Function(const Function &) = delete;
   Function &operator=(const Function &) = delete;
@@ -275,12 +302,19 @@ public:
 
   std::string_view name() const noexcept;
   const std::vector<Type> &return_types() const noexcept;
+  Linkage linkage() const noexcept;
+  bool is_local() const noexcept;
+  bool is_import() const noexcept;
+  bool is_signature() const noexcept;
+  bool is_vararg() const noexcept;
+  bool is_inline() const noexcept;
+  Function &set_inline(bool enabled = true) noexcept;
   const std::vector<Register> &arguments() const noexcept;
   Value arg(std::string_view name);
   const std::vector<Register> &local_registers() const noexcept;
   const Register *find_register(std::string_view name) const noexcept;
   const Register *find_register(std::size_t id) const noexcept;
-  Label &label(std::string_view name = {});
+  Label &label(std::string_view name = {}, LabelOptions options = {});
   void end();
 
   std::size_t instruction_count() const noexcept;
@@ -299,12 +333,23 @@ private:
 
   std::string name_;
   std::vector<Type> return_types_;
+  Linkage linkage_ = Linkage::Local;
+  bool vararg_ = false;
+  bool inline_hint_ = false;
   std::vector<Register> arguments_;
   std::vector<Register> local_registers_;
   mutable std::vector<std::unique_ptr<Instruction>> flattened_instructions_;
   mutable bool flattened_dirty_ = true;
   std::size_t next_register_id_ = 1;
   std::size_t next_label_id_ = 1;
+};
+
+enum class FunctionLinkage { Local, Import, Signature };
+
+struct FunctionOptions {
+  FunctionLinkage linkage = FunctionLinkage::Local;
+  bool vararg = false;
+  bool inline_hint = false;
 };
 
 class Module final : public Block {
@@ -319,10 +364,10 @@ public:
   std::string_view name() const noexcept;
   Function &new_function(std::string_view name);
   Function &new_function(std::string_view name, std::vector<Type> return_types,
-                         std::vector<Function::Parameter> parameters);
-  Prototype &new_prototype(std::string_view name, std::vector<Type> return_types,
-                           std::vector<Prototype::Parameter> parameters);
-  Import &new_import(std::string_view name);
+                         std::vector<Function::Parameter> parameters,
+                         FunctionOptions options = {});
+  Function &new_vararg_function(std::string_view name, std::vector<Type> return_types,
+                                std::vector<Function::Parameter> parameters);
   Data &bss(std::string_view name, std::size_t size);
   Data &data(std::string_view name, Type element_type, std::vector<std::int64_t> values);
   Data &data(std::string_view name, Type element_type, std::vector<std::uint64_t> values);
@@ -330,20 +375,12 @@ public:
   Data &data(std::string_view name, Type element_type, std::vector<double> values);
   Data &data(std::string_view name, Type element_type, std::vector<long double> values);
   Data &string_data(std::string_view name, std::string_view value);
-  Data &ref_data(std::string_view name, const Import &target,
-                 std::int64_t displacement = 0);
   Data &ref_data(std::string_view name, const Function &target,
                  std::int64_t displacement = 0);
-  Data &ref_data(std::string_view name, const Prototype &target,
-                 std::int64_t displacement = 0);
-  Result<Value> ref(const Import &import);
   Result<Value> ref(const Function &function);
-  Result<Value> ref(const Prototype &prototype);
   Result<Value> ref(const Data &data);
   Result<std::vector<std::byte>> encode_binary() const;
   const std::optional<Error> &error() const noexcept;
-  const std::vector<std::unique_ptr<Prototype>> &prototypes() const noexcept;
-  const std::vector<std::unique_ptr<Import>> &imports() const noexcept;
   const std::vector<std::unique_ptr<Data>> &data_items() const noexcept;
   const std::vector<std::unique_ptr<Function>> &functions() const noexcept;
 
@@ -354,8 +391,6 @@ private:
 
   std::string name_;
   std::optional<Error> error_;
-  std::vector<std::unique_ptr<Prototype>> prototypes_;
-  std::vector<std::unique_ptr<Import>> imports_;
   std::vector<std::unique_ptr<Data>> data_items_;
   std::vector<std::unique_ptr<Function>> functions_;
 };
@@ -478,6 +513,14 @@ public:
 
   bool empty() const noexcept { return values_.empty(); }
   std::size_t size() const noexcept { return values_.size(); }
+  const Value &value() const noexcept {
+    if (values_.size() != 1) std::abort();
+    return values_[0];
+  }
+  Value &value() noexcept {
+    if (values_.size() != 1) std::abort();
+    return values_[0];
+  }
   const Value &operator[](std::size_t index) const noexcept {
     if (index >= values_.size()) std::abort();
     return values_[index];
@@ -549,6 +592,24 @@ private:
 
   Block *block_;
   Var var_;
+};
+
+class CallableRef {
+public:
+  CallableRef() noexcept;
+
+  CallResult operator()(std::vector<Value> args) const;
+  CallResult operator()(std::initializer_list<Value> args) const;
+  CallResult operator()(Value callee, std::vector<Value> args) const;
+  CallResult operator()(Value callee, std::initializer_list<Value> args) const;
+
+private:
+  friend class Block;
+
+  CallableRef(Block &block, const Function &function) noexcept;
+
+  Block *block_ = nullptr;
+  const Function *function_ = nullptr;
 };
 
 class MemoryRef {

@@ -19,11 +19,24 @@ static void dump_type_list(std::ostream &out, const std::vector<Type> &types) {
   }
 }
 
-static void dump_parameters(std::ostream &out, const std::vector<Prototype::Parameter> &parameters) {
+static void dump_parameters(std::ostream &out, const std::vector<Register> &parameters) {
   for (std::size_t i = 0; i < parameters.size(); ++i) {
     if (i != 0) out << ", ";
-    out << type_name(parameters[i].type) << " %" << parameters[i].name;
+    out << type_name(parameters[i].type()) << " %" << parameters[i].name();
   }
+}
+
+static void dump_function_header(std::ostream &out, const Function &function,
+                                 std::string_view keyword) {
+  out << "  " << keyword << ' ' << function.name() << '(';
+  dump_parameters(out, function.arguments());
+  if (function.is_vararg()) {
+    if (!function.arguments().empty()) out << ", ";
+    out << "...";
+  }
+  out << ") -> ";
+  dump_type_list(out, function.return_types());
+  out << '\n';
 }
 
 static void dump_operand(std::ostream &out, const Function &function, const Operand &operand) {
@@ -68,6 +81,11 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
     out << ", " << operand.memory_scale();
     if (operand.memory_displacement() != 0) out << ", " << operand.memory_displacement();
     out << ')';
+    if (operand.has_memory_alias_metadata()) {
+      out << ':';
+      if (!operand.memory_alias().empty()) out << operand.memory_alias();
+      if (!operand.memory_nonalias().empty()) out << ':' << operand.memory_nonalias();
+    }
     break;
   case Operand::Kind::ModuleSlot:
     out << "@slot" << operand.module_slot_id();
@@ -75,20 +93,6 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
   case Operand::Kind::Reference:
     out << '@';
     switch (operand.reference_kind()) {
-    case Operand::ReferenceKind::Prototype:
-      if (operand.reference_pointer() != nullptr) {
-        out << static_cast<const Prototype *>(operand.reference_pointer())->name();
-      } else {
-        out << "prototype";
-      }
-      break;
-    case Operand::ReferenceKind::Import:
-      if (operand.reference_pointer() != nullptr) {
-        out << static_cast<const Import *>(operand.reference_pointer())->name();
-      } else {
-        out << "import";
-      }
-      break;
     case Operand::ReferenceKind::Function:
       if (operand.reference_pointer() != nullptr) {
         out << static_cast<const Function *>(operand.reference_pointer())->name();
@@ -114,15 +118,11 @@ static void dump_operand(std::ostream &out, const Function &function, const Oper
 void Context::dump(std::ostream &out) const {
   for (const auto &module : modules_) {
     out << "module " << module->name() << '\n';
-    for (const auto &prototype : module->prototypes()) {
-      out << "  proto " << prototype->name() << '(';
-      dump_parameters(out, prototype->parameters());
-      out << ") -> ";
-      dump_type_list(out, prototype->return_types());
-      out << '\n';
+    for (const auto &function : module->functions()) {
+      if (function->is_signature()) dump_function_header(out, *function, "proto");
     }
-    for (const auto &import : module->imports()) {
-      out << "  import " << import->name() << '\n';
+    for (const auto &function : module->functions()) {
+      if (function->is_import()) dump_function_header(out, *function, "import");
     }
     for (const auto &data : module->data_items()) {
       out << "  ";
@@ -164,12 +164,6 @@ void Context::dump(std::ostream &out) const {
         out << "ref @";
         if (data->ref_target().pointer != nullptr) {
           switch (data->ref_target().kind) {
-          case Operand::ReferenceKind::Prototype:
-            out << static_cast<const Prototype *>(data->ref_target().pointer)->name();
-            break;
-          case Operand::ReferenceKind::Import:
-            out << static_cast<const Import *>(data->ref_target().pointer)->name();
-            break;
           case Operand::ReferenceKind::Function:
             out << static_cast<const Function *>(data->ref_target().pointer)->name();
             break;
@@ -189,15 +183,8 @@ void Context::dump(std::ostream &out) const {
       out << '\n';
     }
     for (const auto &function : module->functions()) {
-      out << "  func " << function->name() << '(';
-      for (std::size_t i = 0; i < function->arguments().size(); ++i) {
-        if (i != 0) out << ", ";
-        const Register &arg = function->arguments()[i];
-        out << type_name(arg.type()) << " %" << arg.name();
-      }
-      out << ") -> ";
-      dump_type_list(out, function->return_types());
-      out << '\n';
+      if (!function->is_local()) continue;
+      dump_function_header(out, *function, "func");
       for (const Register &reg : function->local_registers()) {
         out << "    reg " << type_name(reg.type()) << " %" << reg.name() << '\n';
       }
@@ -248,6 +235,7 @@ const char *opcode_name(Opcode opcode) noexcept {
   case Opcode::LD2F: return "ld2f";
   case Opcode::LD2D: return "ld2d";
   case Opcode::Addr: return "addr";
+  case Opcode::LAddr: return "laddr";
   case Opcode::Alloca: return "alloca";
   case Opcode::Neg: return "neg";
   case Opcode::Negs: return "negs";
@@ -385,8 +373,18 @@ const char *opcode_name(Opcode opcode) noexcept {
   case Opcode::UBo: return "ubo";
   case Opcode::Bno: return "bno";
   case Opcode::UBno: return "ubno";
+  case Opcode::JmpIndirect: return "jmpi";
   case Opcode::Call: return "call";
+  case Opcode::Inline: return "inline";
+  case Opcode::JCall: return "jcall";
   case Opcode::Switch: return "switch";
+  case Opcode::VaArg: return "va_arg";
+  case Opcode::VaBlockArg: return "va_block_arg";
+  case Opcode::VaStart: return "va_start";
+  case Opcode::VaEnd: return "va_end";
+  case Opcode::JRet: return "jret";
+  case Opcode::BStart: return "bstart";
+  case Opcode::BEnd: return "bend";
   }
   return "unknown";
 }

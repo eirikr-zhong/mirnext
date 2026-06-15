@@ -19,8 +19,6 @@ class Module;
 class Function;
 class Label;
 class Data;
-class Prototype;
-class Import;
 class Instruction;
 class Value;
 class Var;
@@ -29,6 +27,7 @@ class Expr;
 class VarRef;
 class MemoryRef;
 class CallResult;
+class CallableRef;
 
 class Type {
 public:
@@ -80,35 +79,6 @@ private:
   std::string name_;
 };
 
-class Prototype {
-public:
-  struct Parameter {
-    Type type;
-    std::string name;
-  };
-
-  Prototype(std::string name, std::vector<Type> return_types, std::vector<Parameter> parameters);
-
-  std::string_view name() const noexcept;
-  const std::vector<Type> &return_types() const noexcept;
-  const std::vector<Parameter> &parameters() const noexcept;
-
-private:
-  std::string name_;
-  std::vector<Type> return_types_;
-  std::vector<Parameter> parameters_;
-};
-
-class Import {
-public:
-  explicit Import(std::string name);
-
-  std::string_view name() const noexcept;
-
-private:
-  std::string name_;
-};
-
 class Operand {
 public:
   enum class Kind {
@@ -124,7 +94,7 @@ public:
     ModuleSlot,
     Reference
   };
-  enum class ReferenceKind { None, Prototype, Import, Function, Data };
+  enum class ReferenceKind { None, Function, Data };
 
   Operand(Register reg);
   Operand(const Label &label);
@@ -144,9 +114,10 @@ public:
                      int scale = 1);
   static Operand mem(Type type, std::size_t base_register, std::size_t index_register,
                      std::int64_t displacement = 0, int scale = 1);
+  static Operand mem(Type type, std::size_t base_register, std::size_t index_register,
+                     std::int64_t displacement, int scale, std::string_view alias,
+                     std::string_view nonalias);
   static Operand module_slot(std::size_t id);
-  static Operand ref(const Prototype &prototype);
-  static Operand ref(const Import &import);
   static Operand ref(const Function &function);
   static Operand ref(const Data &data);
 
@@ -164,6 +135,9 @@ public:
   std::size_t memory_base_register_id() const noexcept;
   std::size_t memory_index_register_id() const noexcept;
   int memory_scale() const noexcept;
+  std::string_view memory_alias() const noexcept;
+  std::string_view memory_nonalias() const noexcept;
+  bool has_memory_alias_metadata() const noexcept;
   ReferenceKind reference_kind() const noexcept;
   const void *reference_pointer() const noexcept;
 
@@ -172,7 +146,8 @@ private:
 
   Operand(Kind kind, std::int64_t int_value, std::size_t reg, std::size_t label);
   Operand(Type memory_type, std::size_t base_register, std::size_t index_register,
-          std::int64_t displacement, int scale);
+          std::int64_t displacement, int scale, std::string_view alias,
+          std::string_view nonalias);
   Operand(ReferenceKind reference_kind, const void *reference);
 
   Kind kind_;
@@ -188,6 +163,8 @@ private:
   std::size_t memory_base_register_id_ = 0;
   std::size_t memory_index_register_id_ = 0;
   int memory_scale_ = 1;
+  std::string memory_alias_;
+  std::string memory_nonalias_;
   ReferenceKind reference_kind_ = ReferenceKind::None;
   const void *reference_ = nullptr;
 };
@@ -222,6 +199,7 @@ enum class Opcode {
   LD2F,
   LD2D,
   Addr,
+  LAddr,
   Alloca,
   Neg,
   Negs,
@@ -359,8 +337,18 @@ enum class Opcode {
   UBo,
   Bno,
   UBno,
+  JmpIndirect,
   Call,
+  Inline,
+  JCall,
   Switch,
+  VaArg,
+  VaBlockArg,
+  VaStart,
+  VaEnd,
+  JRet,
+  BStart,
+  BEnd,
 };
 
 class Data {

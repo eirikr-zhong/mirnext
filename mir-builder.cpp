@@ -147,6 +147,10 @@ bool is_memory_type(Type type) noexcept {
   return is_numeric_scalar(type) || type == Type::p();
 }
 
+bool is_va_arg_type(Type type) noexcept {
+  return is_memory_type(type);
+}
+
 bool is_signed_data_type(Type type) noexcept {
   switch (type.kind()) {
   case Type::Kind::B:
@@ -219,16 +223,6 @@ bool module_contains_reference(const Module &module, const Operand &operand) noe
   const void *pointer = operand.reference_pointer();
   if (pointer == nullptr) return false;
   switch (operand.reference_kind()) {
-  case Operand::ReferenceKind::Prototype:
-    for (const auto &prototype : module.prototypes()) {
-      if (prototype.get() == pointer) return true;
-    }
-    return false;
-  case Operand::ReferenceKind::Import:
-    for (const auto &import : module.imports()) {
-      if (import.get() == pointer) return true;
-    }
-    return false;
   case Operand::ReferenceKind::Function:
     for (const auto &function : module.functions()) {
       if (function.get() == pointer) return true;
@@ -679,9 +673,15 @@ std::optional<Opcode> compare_opcode(CompareOp op, Type type) noexcept {
   return std::nullopt;
 }
 
+bool has_embedded_nul(std::string_view value) noexcept {
+  return value.find('\0') != std::string_view::npos;
+}
+
 Operand memory_operand(Type type, const Value &base, std::size_t index_register,
-                       std::int64_t displacement, int scale) {
-  return Operand::mem(type, base.operand().register_id(), index_register, displacement, scale);
+                       std::int64_t displacement, int scale,
+                       MemoryOptions options = {}) {
+  return Operand::mem(type, base.operand().register_id(), index_register, displacement, scale,
+                      options.alias, options.nonalias);
 }
 
 bool valid_memory_scale(std::int64_t scale) noexcept {
@@ -1054,27 +1054,11 @@ Data &Module::string_data(std::string_view name, std::string_view value) {
   return *data_items_.back();
 }
 
-Data &Module::ref_data(std::string_view name, const Import &target,
-                       std::int64_t displacement) {
-  data_items_.push_back(std::make_unique<Data>(
-      std::string(name),
-      Data::RefTarget{Operand::ReferenceKind::Import, &target, displacement}));
-  return *data_items_.back();
-}
-
 Data &Module::ref_data(std::string_view name, const Function &target,
                        std::int64_t displacement) {
   data_items_.push_back(std::make_unique<Data>(
       std::string(name),
       Data::RefTarget{Operand::ReferenceKind::Function, &target, displacement}));
-  return *data_items_.back();
-}
-
-Data &Module::ref_data(std::string_view name, const Prototype &target,
-                       std::int64_t displacement) {
-  data_items_.push_back(std::make_unique<Data>(
-      std::string(name),
-      Data::RefTarget{Operand::ReferenceKind::Prototype, &target, displacement}));
   return *data_items_.back();
 }
 
@@ -1125,6 +1109,28 @@ void MemoryRef::operator=(Value rhs) const {
   block_->store(memory_, std::move(rhs));
 }
 
+CallableRef::CallableRef() noexcept : block_(nullptr), function_(nullptr) {}
+CallableRef::CallableRef(Block &block, const Function &function) noexcept
+    : block_(&block), function_(&function) {}
+
+CallResult CallableRef::operator()(std::vector<Value> args) const {
+  if (block_ == nullptr || function_ == nullptr) return CallResult();
+  return block_->call(*function_, std::move(args));
+}
+
+CallResult CallableRef::operator()(std::initializer_list<Value> args) const {
+  return (*this)(std::vector<Value>(args));
+}
+
+CallResult CallableRef::operator()(Value callee, std::vector<Value> args) const {
+  if (block_ == nullptr || function_ == nullptr) return CallResult();
+  return block_->call_indirect(*function_, std::move(callee), std::move(args));
+}
+
+CallResult CallableRef::operator()(Value callee, std::initializer_list<Value> args) const {
+  return (*this)(std::move(callee), std::vector<Value>(args));
+}
+
 Value Block::i8(std::int8_t value) { return integer_literal(Type::i8(), value); }
 Value Block::u8(std::uint8_t value) { return integer_literal(Type::u8(), value); }
 Value Block::i16(std::int16_t value) { return integer_literal(Type::i16(), value); }
@@ -1156,6 +1162,8 @@ Value Block::ld(long double value) {
 VarRef Block::operator[](Var var) { return VarRef(*this, std::move(var)); }
 
 MemoryRef Block::operator[](Memory memory) { return MemoryRef(*this, std::move(memory)); }
+
+CallableRef Block::operator[](const Function &callee) { return CallableRef(*this, callee); }
 
 Expr Block::expr(Value value) {
   if (error()) return Expr(*this, poison_value(value.is_valid() ? value.type() : Type::i64()));
@@ -1223,6 +1231,26 @@ Value Block::addr(Value ref, std::string_view name) {
   }
   Register dst_value = *dst;
   append_operation(Instruction(Opcode::Addr, {Operand(dst_value), ref.operand_}));
+  return Value(*this, Type::p(), Operand(dst_value));
+}
+
+Value Block::label_addr(Label &target, std::string_view name) {
+  if (error()) return poison_value(Type::p());
+  if (function_ == nullptr) {
+    fail(invalid_operand("label_addr requires a function block"));
+    return poison_value(Type::p());
+  }
+  if (!validate_target(target)) return poison_value(Type::p());
+
+  Result<Register> dst = name.empty()
+                              ? temp(Type::p())
+                              : function_->create_register_internal(Type::p(), name, false);
+  if (!dst) {
+    fail(std::move(dst).error());
+    return poison_value(Type::p());
+  }
+  Register dst_value = *dst;
+  append_operation(Instruction(Opcode::LAddr, {Operand(dst_value), Operand(target)}));
   return Value(*this, Type::p(), Operand(dst_value));
 }
 
@@ -1324,20 +1352,46 @@ Memory Block::alloca(Type element_type, std::int64_t count, std::string_view nam
 }
 
 Memory Block::mem(Type type, Value base, std::int64_t displacement) {
+  return mem(type, std::move(base), displacement, {});
+}
+
+Memory Block::mem(Type type, Value base, MemoryOptions options) {
+  return mem(type, std::move(base), 0, options);
+}
+
+Memory Block::mem(Type type, Value base, std::int64_t displacement,
+                  MemoryOptions options) {
   if (error()) return poison_memory(type);
   if (!is_memory_type(type)) {
     fail(invalid_operand("memory type is not supported"));
     return poison_memory(type);
   }
+  if (has_embedded_nul(options.alias) || has_embedded_nul(options.nonalias)) {
+    fail(Error{ErrorCode::InvalidArgument, "memory alias metadata must not contain embedded NUL"});
+    return poison_memory(type);
+  }
   if (!validate_register_value(base, "memory base")) return poison_memory(type);
-  return Memory(*this, type, memory_operand(type, base, 0, displacement, 1));
+  return Memory(*this, type, memory_operand(type, base, 0, displacement, 1, options));
+}
+
+Memory Block::mem(Type type, Value base, Value index, MemoryOptions options) {
+  return mem(type, std::move(base), std::move(index), 1, 0, options);
 }
 
 Memory Block::mem(Type type, Value base, Value index, int scale,
                   std::int64_t displacement) {
+  return mem(type, std::move(base), std::move(index), scale, displacement, {});
+}
+
+Memory Block::mem(Type type, Value base, Value index, int scale,
+                  std::int64_t displacement, MemoryOptions options) {
   if (error()) return poison_memory(type);
   if (!is_memory_type(type)) {
     fail(invalid_operand("memory type is not supported"));
+    return poison_memory(type);
+  }
+  if (has_embedded_nul(options.alias) || has_embedded_nul(options.nonalias)) {
+    fail(Error{ErrorCode::InvalidArgument, "memory alias metadata must not contain embedded NUL"});
     return poison_memory(type);
   }
   if (!valid_memory_scale(scale)) {
@@ -1349,7 +1403,7 @@ Memory Block::mem(Type type, Value base, Value index, int scale,
     return poison_memory(type);
   }
   return Memory(*this, type, memory_operand(type, base, index.operand_.register_id(),
-                                            displacement, scale));
+                                            displacement, scale, options));
 }
 
 Value Block::load(Memory memory) {
@@ -1458,50 +1512,96 @@ Value Block::convert(Value value, Type to) {
   return Value(*this, to, Operand(dst_value));
 }
 
-Value Block::call(const Prototype &prototype, const Import &callee,
-                  std::vector<Value> args) {
-  CallResult values = append_call(prototype, Operand::ref(callee), std::move(args), 1);
-  if (values.size() != 1) {
-    if (!error()) fail(invalid_operand("call return count does not match requested shape"));
-    return poison_value(Type::i64());
+CallResult Block::call(const Function &callee, std::vector<Value> args) {
+  return append_call(callee.is_inline() ? Opcode::Inline : Opcode::Call, callee,
+                     Operand::ref(callee), std::move(args));
+}
+
+CallResult Block::call_indirect(const Function &signature, Value callee, std::vector<Value> args) {
+  if (error()) return poison_call_result(signature);
+  if (!validate_indirect_callee(callee)) return poison_call_result(signature);
+  return append_call(Opcode::JCall, signature, callee.operand_, std::move(args));
+}
+
+void Block::va_start(Value va_list) {
+  if (error()) return;
+  if (function_ == nullptr) {
+    fail(invalid_operand("va_start requires a function block"));
+    return;
   }
-  return values[0];
-}
-
-Value Block::call(const Prototype &prototype, const Function &callee,
-                  std::vector<Value> args) {
-  CallResult values = append_call(prototype, Operand::ref(callee), std::move(args), 1);
-  if (values.size() != 1) {
-    if (!error()) fail(invalid_operand("call return count does not match requested shape"));
-    return poison_value(Type::i64());
+  if (!function_->is_vararg()) {
+    fail(invalid_operand("va_start requires a vararg function"));
+    return;
   }
-  return values[0];
+  if (!validate_va_list(va_list, "va_list")) return;
+  append_operation(Instruction(Opcode::VaStart, {va_list.operand_}));
 }
 
-CallResult Block::call_multi(const Prototype &prototype, const Import &callee,
-                             std::vector<Value> args) {
-  return append_call(prototype, Operand::ref(callee), std::move(args), std::nullopt);
+Value Block::va_arg(Type result_type, Value va_list) {
+  if (error()) return poison_value(result_type);
+  if (function_ == nullptr) {
+    fail(invalid_operand("va_arg requires a function block"));
+    return poison_value(result_type);
+  }
+  if (!is_va_arg_type(result_type)) {
+    fail(invalid_operand("va_arg result type is not supported"));
+    return poison_value(result_type);
+  }
+  if (!validate_va_list(va_list, "va_list")) return poison_value(result_type);
+
+  Result<Register> address = temp(Type::p());
+  if (!address) {
+    fail(std::move(address).error());
+    return poison_value(result_type);
+  }
+  Register address_value = *address;
+  append_operation(Instruction(Opcode::VaArg,
+                               {Operand(address_value), va_list.operand_,
+                                Operand::mem(result_type, 0, 0, 0, 1)}));
+  return load(Memory(*this, result_type, Operand::mem(result_type, address_value, Register())));
 }
 
-CallResult Block::call_multi(const Prototype &prototype, const Function &callee,
-                             std::vector<Value> args) {
-  return append_call(prototype, Operand::ref(callee), std::move(args), std::nullopt);
+void Block::va_block_arg(Value dst, Value va_list, std::int64_t size) {
+  if (error()) return;
+  if (function_ == nullptr) {
+    fail(invalid_operand("va_block_arg requires a function block"));
+    return;
+  }
+  if (size < 0) {
+    fail(Error{ErrorCode::InvalidArgument, "va_block_arg size must be non-negative"});
+    return;
+  }
+  if (!validate_register_value(dst, "va_block_arg destination")) return;
+  if (dst.type_ != Type::p()) {
+    fail(invalid_operand("va_block_arg destination must be a pointer value"));
+    return;
+  }
+  if (!validate_va_list(va_list, "va_list")) return;
+  append_operation(Instruction(Opcode::VaBlockArg,
+                               {dst.operand_, va_list.operand_, Operand::int64(size),
+                                Operand::int64(0)}));
 }
 
-void Block::call_void(const Prototype &prototype, const Import &callee,
-                      std::vector<Value> args) {
-  append_call(prototype, Operand::ref(callee), std::move(args), 0);
-}
-
-void Block::call_void(const Prototype &prototype, const Function &callee,
-                      std::vector<Value> args) {
-  append_call(prototype, Operand::ref(callee), std::move(args), 0);
+void Block::va_end(Value va_list) {
+  if (error()) return;
+  if (function_ == nullptr) {
+    fail(invalid_operand("va_end requires a function block"));
+    return;
+  }
+  if (!validate_va_list(va_list, "va_list")) return;
+  append_operation(Instruction(Opcode::VaEnd, {va_list.operand_}));
 }
 
 void Block::jmp(Label &target) {
   if (error()) return;
   if (!validate_target(target)) return;
   append_operation(Instruction(Opcode::Jmp, {Operand(target)}));
+}
+
+void Block::jmp(Value target_addr) {
+  if (error()) return;
+  if (!validate_pointer_register_value(target_addr, "indirect jump target")) return;
+  append_operation(Instruction(Opcode::JmpIndirect, {target_addr.operand_}));
 }
 
 void Block::if_(Value cond, Label &target) {
@@ -1634,6 +1734,12 @@ void Block::ret() {
   append_operation(Instruction(Opcode::Ret));
 }
 
+void Block::ret_to(Value target_addr) {
+  if (error()) return;
+  if (!validate_pointer_register_value(target_addr, "jump return target")) return;
+  append_operation(Instruction(Opcode::JRet, {target_addr.operand_}));
+}
+
 Result<Register> Block::temp(Type type) {
   if (error()) return Error{ErrorCode::InvalidOperand, "module is already in error state"};
   if (function_ == nullptr) return invalid_operand("temporary register requires a function block");
@@ -1684,8 +1790,6 @@ bool Block::validate_reference_value(const Value &value, std::string_view descri
   switch (value.operand_.reference_kind()) {
   case Operand::ReferenceKind::Data:
   case Operand::ReferenceKind::Function:
-  case Operand::ReferenceKind::Import:
-  case Operand::ReferenceKind::Prototype:
     if (module_contains_reference(module(), value.operand_)) return true;
     fail(invalid_operand(std::string(description) + " does not belong to this module"));
     return false;
@@ -1727,7 +1831,8 @@ Memory Block::cast_memory(Memory memory, Type element_type) {
   return Memory(*this, element_type,
                 Operand::mem(element_type, operand.memory_base_register_id(),
                              operand.memory_index_register_id(),
-                             operand.memory_displacement(), operand.memory_scale()));
+                             operand.memory_displacement(), operand.memory_scale(),
+                             operand.memory_alias(), operand.memory_nonalias()));
 }
 
 Memory Block::index_memory(Memory memory, std::int64_t index) {
@@ -1753,7 +1858,8 @@ Memory Block::index_memory(Memory memory, std::int64_t index) {
   return Memory(*this, memory.type_,
                 Operand::mem(memory.type_, operand.memory_base_register_id(),
                              operand.memory_index_register_id(), displacement + offset,
-                             operand.memory_scale()));
+                             operand.memory_scale(), operand.memory_alias(),
+                             operand.memory_nonalias()));
 }
 
 Memory Block::index_memory(Memory memory, Value index) {
@@ -1774,7 +1880,8 @@ Memory Block::index_memory(Memory memory, Value index) {
   return Memory(owner, memory.type_,
                 Operand::mem(memory.type_, operand.memory_base_register_id(),
                              index.operand_.register_id(), operand.memory_displacement(),
-                             static_cast<int>(scale64)));
+                             static_cast<int>(scale64), operand.memory_alias(),
+                             operand.memory_nonalias()));
 }
 
 bool Block::validate_target(const Label &target) {
@@ -1812,9 +1919,52 @@ bool Block::validate_switch_index(const Value &index) {
   return true;
 }
 
-bool Block::validate_call_args(const Prototype &prototype, const std::vector<Value> &args) {
-  if (args.size() != prototype.parameters().size()) {
-    fail(invalid_operand("call argument count does not match prototype"));
+bool Block::validate_pointer_register_value(const Value &value, std::string_view description) {
+  if (!validate_register_value(value, description)) return false;
+  if (value.type_ != Type::p()) {
+    fail(invalid_operand(std::string(description) + " must be a pointer value"));
+    return false;
+  }
+  return true;
+}
+
+bool Block::validate_va_list(Value &va_list, std::string_view description) {
+  return validate_pointer_register_value(va_list, description);
+}
+
+bool Block::validate_callee_function(const Function &callee) {
+  if (&callee.module() != &module()) {
+    fail(invalid_operand("callee function does not belong to this module"));
+    return false;
+  }
+  if (callee.is_signature()) {
+    fail(invalid_operand("direct call callee must be a local or import function"));
+    return false;
+  }
+  return true;
+}
+
+bool Block::validate_signature_function(const Function &signature) {
+  if (&signature.module() != &module()) {
+    fail(invalid_operand("call signature does not belong to this module"));
+    return false;
+  }
+  if (!signature.is_signature()) {
+    fail(invalid_operand("indirect call requires a signature function"));
+    return false;
+  }
+  return true;
+}
+
+bool Block::validate_indirect_callee(const Value &callee) {
+  return validate_pointer_register_value(callee, "indirect callee");
+}
+
+bool Block::validate_call_args(const Function &signature, const std::vector<Value> &args) {
+  const std::size_t fixed_count = signature.arguments().size();
+  if ((!signature.is_vararg() && args.size() != fixed_count)
+      || (signature.is_vararg() && args.size() < fixed_count)) {
+    fail(invalid_operand("call argument count does not match signature"));
     return false;
   }
   for (std::size_t i = 0; i < args.size(); ++i) {
@@ -1824,8 +1974,8 @@ bool Block::validate_call_args(const Prototype &prototype, const std::vector<Val
       fail(invalid_operand("call literal argument does not belong to this block"));
       return false;
     }
-    if (arg.type_ != prototype.parameters()[i].type) {
-      fail(invalid_operand("call argument type does not match prototype"));
+    if (i < fixed_count && arg.type_ != signature.arguments()[i].type()) {
+      fail(invalid_operand("call argument type does not match signature"));
       return false;
     }
   }
@@ -1844,10 +1994,10 @@ Memory Block::poison_memory(Type type) noexcept {
   return Memory::poison(*this, type);
 }
 
-CallResult Block::poison_call_result(const Prototype &prototype) noexcept {
+CallResult Block::poison_call_result(const Function &signature) noexcept {
   std::vector<Value> values;
-  values.reserve(prototype.return_types().size());
-  for (Type type : prototype.return_types()) values.push_back(poison_value(type));
+  values.reserve(signature.return_types().size());
+  for (Type type : signature.return_types()) values.push_back(poison_value(type));
   return CallResult(std::move(values));
 }
 
@@ -1878,28 +2028,31 @@ std::size_t Block::mark_overflow_pending() noexcept {
   return pending_overflow_sequence_;
 }
 
-CallResult Block::append_call(const Prototype &prototype, Operand callee,
-                              std::vector<Value> args,
-                              std::optional<std::size_t> return_count) {
-  if (error()) return poison_call_result(prototype);
-  if (return_count && prototype.return_types().size() != *return_count) {
-    fail(invalid_operand("call return count does not match requested shape"));
-    return poison_call_result(prototype);
+CallResult Block::append_call(Opcode opcode, const Function &signature, Operand callee,
+                              std::vector<Value> args) {
+  if (error()) return poison_call_result(signature);
+  if (opcode == Opcode::Call || opcode == Opcode::Inline) {
+    if (!validate_callee_function(signature)) return poison_call_result(signature);
+  } else if (opcode == Opcode::JCall) {
+    if (!validate_signature_function(signature)) return poison_call_result(signature);
+  } else {
+    fail(invalid_operand("unsupported call opcode"));
+    return poison_call_result(signature);
   }
-  if (!validate_call_args(prototype, args)) return poison_call_result(prototype);
+  if (!validate_call_args(signature, args)) return poison_call_result(signature);
 
   std::vector<Value> results;
-  results.reserve(prototype.return_types().size());
+  results.reserve(signature.return_types().size());
   std::vector<Operand> operands;
-  operands.reserve(2 + prototype.return_types().size() + args.size());
-  operands.push_back(Operand::ref(prototype));
+  operands.reserve(2 + signature.return_types().size() + args.size());
+  operands.push_back(Operand::ref(signature));
   operands.push_back(std::move(callee));
 
-  for (Type type : prototype.return_types()) {
+  for (Type type : signature.return_types()) {
     Result<Register> reg = temp(type);
     if (!reg) {
       fail(std::move(reg).error());
-      return poison_call_result(prototype);
+      return poison_call_result(signature);
     }
     Register reg_value = *reg;
     operands.push_back(Operand(reg_value));
@@ -1907,7 +2060,7 @@ CallResult Block::append_call(const Prototype &prototype, Operand callee,
   }
   for (const Value &arg : args) operands.push_back(arg.operand_);
 
-  append_operation(Instruction(Opcode::Call, std::move(operands)));
+  append_operation(Instruction(opcode, std::move(operands)));
   return CallResult(std::move(results));
 }
 

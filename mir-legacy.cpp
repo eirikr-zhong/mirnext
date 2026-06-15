@@ -46,6 +46,27 @@ MIR_item_t find_function_item(MIR_context_t ctx, MIR_module_t module, std::strin
   return nullptr;
 }
 
+bool module_has_linked_functions(MIR_module_t module) {
+  if (module == nullptr) return false;
+  for (MIR_item_t item = DLIST_HEAD(MIR_item_t, module->items); item != nullptr;
+       item = DLIST_NEXT(MIR_item_t, item)) {
+    if (item->item_type == MIR_func_item && item->data != nullptr) return true;
+  }
+  return false;
+}
+
+void load_and_link_once(MIR_context_t ctx, MIR_module_t module,
+                        void (*set_interface)(MIR_context_t, MIR_item_t),
+                        void *import_resolver(const char *)) {
+  if (module_has_linked_functions(module)) return;
+  MIR_load_module(ctx, module);
+  MIR_link(ctx, set_interface, import_resolver);
+}
+
+bool module_needs_link(MIR_module_t module) {
+  return !module_has_linked_functions(module);
+}
+
 } // namespace
 
 LegacyContext::LegacyContext() : ctx_(MIR_init()) {}
@@ -96,8 +117,7 @@ Result<std::int64_t> interpret_i64(LegacyContext &context, MIR_module_t module, 
   }
   std::vector<MIR_val_t> values(arg_count);
   for (std::size_t i = 0; i < arg_count; ++i) values[i].i = args[i];
-  MIR_load_module(context.raw(), module);
-  MIR_link(context.raw(), MIR_set_interp_interface, nullptr);
+  load_and_link_once(context.raw(), module, MIR_set_interp_interface, nullptr);
   MIR_val_t result;
   MIR_interp_arr(context.raw(), function, &result, arg_count, values.data());
   return result.i;
@@ -109,10 +129,11 @@ Result<std::int64_t> generate_and_call_i64(LegacyContext &context, MIR_module_t 
   if (context.raw() == nullptr || module == nullptr || function == nullptr || arg_count > 1) {
     return Error{ErrorCode::InvalidArgument, "invalid legacy generation input"};
   }
-  MIR_load_module(context.raw(), module);
+  const bool needs_link = module_needs_link(module);
+  if (needs_link) MIR_load_module(context.raw(), module);
   MIR_gen_init(context.raw());
   MIR_gen_set_optimize_level(context.raw(), 2);
-  MIR_link(context.raw(), MIR_set_gen_interface, nullptr);
+  if (needs_link) MIR_link(context.raw(), MIR_set_gen_interface, nullptr);
   void *addr = MIR_gen(context.raw(), function);
   std::int64_t result = 0;
   if (arg_count == 0) {
@@ -131,8 +152,7 @@ Result<std::uint64_t> interpret_u64(LegacyContext &context, MIR_module_t module,
   }
   std::vector<MIR_val_t> values(arg_count);
   for (std::size_t i = 0; i < arg_count; ++i) values[i].u = args[i];
-  MIR_load_module(context.raw(), module);
-  MIR_link(context.raw(), MIR_set_interp_interface, nullptr);
+  load_and_link_once(context.raw(), module, MIR_set_interp_interface, nullptr);
   MIR_val_t result;
   MIR_interp_arr(context.raw(), function, &result, arg_count, values.data());
   return result.u;
@@ -144,10 +164,11 @@ Result<std::uint64_t> generate_and_call_u64(LegacyContext &context, MIR_module_t
   if (context.raw() == nullptr || module == nullptr || function == nullptr || arg_count > 1) {
     return Error{ErrorCode::InvalidArgument, "invalid legacy generation input"};
   }
-  MIR_load_module(context.raw(), module);
+  const bool needs_link = module_needs_link(module);
+  if (needs_link) MIR_load_module(context.raw(), module);
   MIR_gen_init(context.raw());
   MIR_gen_set_optimize_level(context.raw(), 2);
-  MIR_link(context.raw(), MIR_set_gen_interface, nullptr);
+  if (needs_link) MIR_link(context.raw(), MIR_set_gen_interface, nullptr);
   void *addr = MIR_gen(context.raw(), function);
   std::uint64_t result = 0;
   if (arg_count == 0) {
@@ -166,8 +187,7 @@ Result<double> interpret_double(LegacyContext &context, MIR_module_t module, MIR
   }
   std::vector<MIR_val_t> values(arg_count);
   for (std::size_t i = 0; i < arg_count; ++i) values[i].d = args[i];
-  MIR_load_module(context.raw(), module);
-  MIR_link(context.raw(), MIR_set_interp_interface, nullptr);
+  load_and_link_once(context.raw(), module, MIR_set_interp_interface, nullptr);
   MIR_val_t result;
   MIR_interp_arr(context.raw(), function, &result, arg_count, values.data());
   return result.d;
@@ -179,10 +199,11 @@ Result<double> generate_and_call_double(LegacyContext &context, MIR_module_t mod
   if (context.raw() == nullptr || module == nullptr || function == nullptr || arg_count > 1) {
     return Error{ErrorCode::InvalidArgument, "invalid legacy generation input"};
   }
-  MIR_load_module(context.raw(), module);
+  const bool needs_link = module_needs_link(module);
+  if (needs_link) MIR_load_module(context.raw(), module);
   MIR_gen_init(context.raw());
   MIR_gen_set_optimize_level(context.raw(), 2);
-  MIR_link(context.raw(), MIR_set_gen_interface, nullptr);
+  if (needs_link) MIR_link(context.raw(), MIR_set_gen_interface, nullptr);
   void *addr = MIR_gen(context.raw(), function);
   double result = 0.0;
   if (arg_count == 0) {

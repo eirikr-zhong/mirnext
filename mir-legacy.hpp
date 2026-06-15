@@ -13,6 +13,16 @@ extern "C" {
 #include "mir-gen.h"
 }
 
+#ifdef va_start
+#undef va_start
+#endif
+#ifdef va_arg
+#undef va_arg
+#endif
+#ifdef va_end
+#undef va_end
+#endif
+
 namespace mirnext {
 
 class LegacyContext {

@@ -2,6 +2,7 @@
    Licensed under the MIT License. */
 
 #include "mir.hpp"
+#include "mir-legacy.hpp"
 
 #include <cstdlib>
 #include <limits>
@@ -61,6 +62,22 @@ template <class T>
 concept HasPublicDbge = requires(T &block, mirnext::Value lhs, mirnext::Value rhs,
                                  mirnext::Label &target) { block.dbge(lhs, rhs, target); };
 
+template <class T>
+concept HasPublicAppendOperation = requires(T &block, mirnext::Instruction instruction) {
+  block.append_operation(instruction);
+};
+
+template <class T>
+concept HasPublicInlineCall = requires(T &block, const mirnext::Function &callee,
+                                       std::vector<mirnext::Value> args) {
+  block.inline_call(callee, args);
+};
+
+template <class T>
+concept HasCallableInlined = requires(T &callable, std::vector<mirnext::Value> args) {
+  callable.inlined(args);
+};
+
 // Public branch DSL stays at value-producing comparisons plus bool branches.
 static_assert(!HasPublicNop<mirnext::Block>);
 static_assert(!HasPublicBts<mirnext::Block>);
@@ -70,6 +87,9 @@ static_assert(!HasPublicBne<mirnext::Block>);
 static_assert(!HasPublicBlt<mirnext::Block>);
 static_assert(!HasPublicUble<mirnext::Block>);
 static_assert(!HasPublicDbge<mirnext::Block>);
+static_assert(!HasPublicAppendOperation<mirnext::Block>);
+static_assert(!HasPublicInlineCall<mirnext::Block>);
+static_assert(!HasCallableInlined<mirnext::CallableRef>);
 
 static int check_result_api() {
   mirnext::Result<int> ok = 7;
@@ -982,13 +1002,11 @@ static int check_binary_encode_errors() {
 
   mirnext::Module &left = ctx.new_module("binary_left");
   mirnext::Module &right = ctx.new_module("binary_right");
-  mirnext::Prototype &prototype = left.new_prototype(
-      "p", {}, {{mirnext::Type::i64(), "arg"}});
   mirnext::Function &foreign = right.new_function(
       "foreign", {}, {{mirnext::Type::i64(), "arg"}});
   mirnext::Function &caller = left.new_function(
       "caller", {}, {{mirnext::Type::i64(), "arg"}});
-  expect_ok(caller.call_void(prototype, foreign, {expect(caller.arg("arg"), 91)}), 92);
+  caller[foreign]({expect(caller.arg("arg"), 91)});
   expect_ok(caller.ret(), 93);
   expect_ok(caller.end(), 94);
   mirnext::Result<std::vector<std::byte>> cross_bytes = left.encode_binary();
@@ -1016,6 +1034,90 @@ static int check_memory_displacement_api() {
 
   mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
   if (!bytes) return 441;
+  return 0;
+}
+
+static int check_memory_alias_metadata_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("memory_alias_metadata");
+  mirnext::Function &function = module.new_function(
+      "memory_alias_metadata", {mirnext::Type::i64()},
+      {{mirnext::Type::p(), "base"}, {mirnext::Type::i64(), "index"}});
+
+  mirnext::Value base = expect(function.arg("base"), 442);
+  mirnext::Value index = expect(function.arg("index"), 443);
+  mirnext::Memory alias_only = function.mem(mirnext::Type::i64(), base,
+                                            {.alias = "items"});
+  if (alias_only.operand().memory_alias() != "items") return 444;
+  if (!alias_only.operand().memory_nonalias().empty()) return 445;
+  if (!alias_only.operand().has_memory_alias_metadata()) return 446;
+
+  std::string scratch = "scratch";
+  mirnext::Memory nonalias_only = function.mem(mirnext::Type::i64(), base, 16,
+                                               {.nonalias = scratch.substr(0, 7)});
+  if (!nonalias_only.operand().memory_alias().empty()) return 447;
+  if (nonalias_only.operand().memory_nonalias() != "scratch") return 448;
+
+  mirnext::Memory both = function.mem(mirnext::Type::i64(), base, index, 8, 24,
+                                      {.alias = "items", .nonalias = "scratch"});
+  if (both.operand().memory_alias() != "items") return 449;
+  if (both.operand().memory_nonalias() != "scratch") return 476;
+  mirnext::Memory cast = both.cast_ptr(mirnext::Type::u8());
+  if (cast.operand().memory_alias() != "items"
+      || cast.operand().memory_nonalias() != "scratch") {
+    return 477;
+  }
+  mirnext::Memory offset = alias_only[2];
+  if (offset.operand().memory_alias() != "items"
+      || offset.operand().memory_displacement() != 16) {
+    return 478;
+  }
+  mirnext::Memory indexed = alias_only[index];
+  if (indexed.operand().memory_alias() != "items"
+      || indexed.operand().memory_index_register_id() != index.operand().register_id()) {
+    return 479;
+  }
+
+  function.store(alias_only, function.i64(1));
+  function.store(nonalias_only, function.i64(2));
+  function[cast] = function.u8(3);
+  function.ret(function.load(both));
+  function.end();
+  if (module.error()) return 493;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "i64:(%base, %r0, 1):items")) return 494;
+  if (!contains(text, "i64:(%base, %r0, 1, 16)::scratch")) return 495;
+  if (!contains(text, "i64:(%base, %index, 8, 24):items:scratch")) return 496;
+  if (!contains(text, "u8:(%base, %index, 8, 24):items:scratch")) return 497;
+
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 498;
+
+  mirnext::Module &plain_module = ctx.new_module("plain_memory_metadata_regression");
+  mirnext::Function &plain = plain_module.new_function(
+      "plain", {}, {{mirnext::Type::p(), "base"}});
+  mirnext::Memory plain_mem = plain.mem(mirnext::Type::i64(), plain.arg("base"));
+  if (plain_mem.operand().has_memory_alias_metadata()) return 499;
+  plain.store(plain_mem, plain.i64(0));
+  plain.ret();
+  plain.end();
+  std::ostringstream plain_out;
+  ctx.dump(plain_out);
+  if (!contains(plain_out.str(), "i64:(%base, %r0, 1) 0")) return 501;
+
+  mirnext::Module &bad_module = ctx.new_module("bad_memory_alias_metadata");
+  mirnext::Function &bad = bad_module.new_function(
+      "bad", {}, {{mirnext::Type::p(), "base"}});
+  (void)bad.mem(mirnext::Type::i64(), bad.arg("base"),
+                mirnext::MemoryOptions{std::string_view("a\0b", 3), {}});
+  if (!bad_module.error()
+      || bad_module.error()->code != mirnext::ErrorCode::InvalidArgument) {
+    return 502;
+  }
+
   return 0;
 }
 
@@ -1125,11 +1227,6 @@ static int check_memory_pointer_dsl_errors() {
 static int check_call_result_api() {
   mirnext::Context ctx;
   mirnext::Module &module = ctx.new_module("call_result_api");
-  mirnext::Prototype &prototype = module.new_prototype(
-      "pair_p",
-      {mirnext::Type::i64(), mirnext::Type::i64()},
-      {{mirnext::Type::i64(), "arg"}});
-
   mirnext::Function &callee = module.new_function(
       "pair",
       {mirnext::Type::i64(), mirnext::Type::i64()},
@@ -1143,7 +1240,7 @@ static int check_call_result_api() {
       {mirnext::Type::i64(), mirnext::Type::i64()},
       {{mirnext::Type::i64(), "arg"}});
   mirnext::Value arg = expect(caller.arg("arg"), 406);
-  mirnext::CallResult result = caller.call_multi(prototype, callee, {arg});
+  mirnext::CallResult result = caller[callee]({arg});
   if (result.empty()) return 407;
   if (result.size() != 2) return 408;
   if (result.values().size() != 2) return 409;
@@ -1166,7 +1263,7 @@ static int check_call_result_api() {
       {mirnext::Type::i64(), mirnext::Type::i64()},
       {{mirnext::Type::i64(), "arg"}});
   mirnext::Value take_arg = expect(take_caller.arg("arg"), 415);
-  mirnext::CallResult take_result = take_caller.call_multi(prototype, callee, {take_arg});
+  mirnext::CallResult take_result = take_caller[callee]({take_arg});
   std::vector<mirnext::Value> taken = take_result.take_values();
   if (taken.size() != 2) return 417;
   if (taken[first].type() != mirnext::Type::i64()
@@ -1181,14 +1278,493 @@ static int check_call_result_api() {
   std::ostringstream out;
   ctx.dump(out);
   const std::string text = out.str();
-  if (!contains(text, "proto pair_p(i64 %arg) -> i64, i64")) return 422;
   if (!contains(text, "func pair(i64 %arg) -> i64, i64")) return 423;
   if (!contains(text, "func call_pair(i64 %arg) -> i64, i64")) return 424;
-  if (!contains(text, "call @pair_p @pair %.t0 %.t1 %arg")) return 425;
+  if (!contains(text, "call @pair @pair %.t0 %.t1 %arg")) return 425;
   if (!contains(text, "ret %.t0 %.t1")) return 426;
 
   mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
   if (!bytes) return 427;
+
+  mirnext::Module &jcall_module = ctx.new_module("jcall_api");
+  mirnext::Function &signature = jcall_module.new_function(
+      "i64_to_i64", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}},
+      {.linkage = mirnext::FunctionLinkage::Signature});
+  mirnext::Function &target = jcall_module.new_function(
+      "add2", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}});
+  mirnext::Value target_arg = expect(target.arg("arg"), 428);
+  target.ret(target_arg + target.i64(2));
+  target.end();
+  mirnext::Function &jcaller = jcall_module.new_function(
+      "call_ptr", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}});
+  mirnext::Value target_ref = expect(jcall_module.ref(target), 429);
+  mirnext::Value target_ptr = jcaller.addr(target_ref);
+  mirnext::Value indirect = expect(jcaller[signature](target_ptr, {jcaller.arg("arg")}).value(), 430);
+  jcaller.ret(indirect);
+  jcaller.end();
+  if (jcall_module.error()) return 431;
+
+  std::ostringstream jout;
+  ctx.dump(jout);
+  const std::string jtext = jout.str();
+  if (!contains(jtext, "proto i64_to_i64(i64 %arg) -> i64")) return 432;
+  if (!contains(jtext, "jcall @i64_to_i64 %.t0 %.t1 %arg")) return 433;
+  mirnext::Result<std::vector<std::byte>> jbytes = jcall_module.encode_binary();
+  if (!jbytes) return 434;
+  return 0;
+}
+
+static int check_function_inline_tag_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("inline_api");
+  mirnext::Function &inline_callee = module.new_function(
+      "add1", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}},
+      {.inline_hint = true});
+  if (!inline_callee.is_inline()) return 435;
+  mirnext::Value inline_arg = expect(inline_callee.arg("x"), 436);
+  inline_callee.ret(inline_arg + inline_callee.i64(1));
+  inline_callee.end();
+
+  mirnext::Function &caller = module.new_function(
+      "use_inline_option", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value caller_arg = expect(caller.arg("x"), 437);
+  mirnext::CallResult inline_result = caller[inline_callee]({caller_arg});
+  if (inline_result.size() != 1 || inline_result.value().type() != mirnext::Type::i64()) {
+    return 438;
+  }
+  caller.ret(inline_result.value());
+  caller.end();
+
+  mirnext::Function &setter_callee = module.new_function(
+      "setter_add", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  if (setter_callee.is_inline()) return 439;
+  if (&setter_callee.set_inline() != &setter_callee || !setter_callee.is_inline()) return 440;
+  mirnext::Value setter_arg = expect(setter_callee.arg("x"), 441);
+  setter_callee.ret(setter_arg + setter_callee.i64(2));
+  setter_callee.end();
+
+  mirnext::Function &setter_caller = module.new_function(
+      "use_inline_setter", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value setter_caller_arg = expect(setter_caller.arg("x"), 442);
+  mirnext::Value setter_value = setter_caller[setter_callee]({setter_caller_arg}).value();
+  setter_caller.ret(setter_value);
+  setter_caller.end();
+
+  if (&setter_callee.set_inline(false) != &setter_callee || setter_callee.is_inline()) return 443;
+  mirnext::Function &plain_caller = module.new_function(
+      "use_plain_after_disable", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value plain_arg = expect(plain_caller.arg("x"), 444);
+  mirnext::Value plain_value = plain_caller[setter_callee]({plain_arg}).value();
+  plain_caller.ret(plain_value);
+  plain_caller.end();
+
+  mirnext::Function &multi = module.new_function(
+      "inline_pair",
+      {mirnext::Type::i64(), mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "x"}},
+      {.inline_hint = true});
+  mirnext::Value multi_arg = expect(multi.arg("x"), 445);
+  multi.ret({multi_arg, multi_arg + multi.i64(3)});
+  multi.end();
+
+  mirnext::Function &multi_caller = module.new_function(
+      "use_inline_pair",
+      {mirnext::Type::i64(), mirnext::Type::i64()},
+      {{mirnext::Type::i64(), "x"}});
+  mirnext::CallResult pair = multi_caller[multi]({multi_caller.arg("x")});
+  if (pair.size() != 2 || pair[0].type() != mirnext::Type::i64()
+      || pair[1].type() != mirnext::Type::i64()) {
+    return 446;
+  }
+  multi_caller.ret({pair[0], pair[1]});
+  multi_caller.end();
+
+  mirnext::Function &vararg = module.new_function(
+      "inline_vararg", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "first"}},
+      {.vararg = true, .inline_hint = true});
+  vararg.ret(vararg.arg("first"));
+  vararg.end();
+  mirnext::Function &vararg_caller = module.new_function("use_inline_vararg",
+                                                         {mirnext::Type::i64()}, {});
+  mirnext::Value vararg_value
+      = vararg_caller[vararg]({vararg_caller.i64(1), vararg_caller.i64(2)}).value();
+  vararg_caller.ret(vararg_value);
+  vararg_caller.end();
+
+  mirnext::Function &signature = module.new_function(
+      "inline_sig", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}},
+      {.linkage = mirnext::FunctionLinkage::Signature, .inline_hint = true});
+  if (!signature.is_inline()) return 447;
+  mirnext::Function &indirect_caller = module.new_function(
+      "indirect_inline_sig", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value callee_ref = expect(module.ref(inline_callee), 448);
+  mirnext::Value callee_ptr = indirect_caller.addr(callee_ref);
+  mirnext::Value indirect_value
+      = indirect_caller[signature](callee_ptr, {indirect_caller.arg("x")}).value();
+  indirect_caller.ret(indirect_value);
+  indirect_caller.end();
+
+  if (module.error()) return 449;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "inline @add1 @add1")) return 450;
+  if (!contains(text, "inline @setter_add @setter_add")) return 451;
+  if (!contains(text, "call @setter_add @setter_add")) return 452;
+  if (!contains(text, "inline @inline_pair @inline_pair")) return 453;
+  if (!contains(text, "inline @inline_vararg @inline_vararg")) return 454;
+  if (!contains(text, "jcall @inline_sig")) return 455;
+
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 456;
+
+  mirnext::Context error_ctx;
+  mirnext::Module &bad_module = error_ctx.new_module("bad_inline_signature_call");
+  mirnext::Function &bad_sig = bad_module.new_function(
+      "bad_sig", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}},
+      {.linkage = mirnext::FunctionLinkage::Signature, .inline_hint = true});
+  mirnext::Function &bad_caller = bad_module.new_function(
+      "bad_caller", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Value bad = bad_caller[bad_sig]({bad_caller.arg("x")}).value();
+  if (!bad.is_valid() || !bad.is_poison()) return 457;
+  if (!bad_module.error()
+      || bad_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 458;
+  }
+
+  return 0;
+}
+
+static int check_vararg_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("m_vararg");
+  mirnext::Function &signature = module.new_function(
+      "sum_i64_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "count"}},
+      {.linkage = mirnext::FunctionLinkage::Signature, .vararg = true});
+  mirnext::Function &function = module.new_vararg_function(
+      "sum_i64", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "count"}});
+
+  if (!signature.is_vararg()) return 480;
+  if (!function.is_vararg()) return 481;
+
+  mirnext::Var ap = function.var(mirnext::Type::p(), "ap");
+  mirnext::Var block_dst = function.var(mirnext::Type::p(), "block_dst");
+  mirnext::Var total = function.var(mirnext::Type::i64(), "total");
+  mirnext::Var i = function.var(mirnext::Type::i64(), "i");
+  mirnext::Label &loop = function.label("loop");
+  mirnext::Label &done = function.label("done");
+
+  function[total] = 0;
+  function[i] = 0;
+  function.va_start(ap.value());
+  function.va_block_arg(block_dst.value(), ap.value(), 16);
+  function.jmp(loop);
+
+  loop.if_(loop[i] >= function.arg("count"), done);
+  mirnext::Value next = loop.va_arg(mirnext::Type::i64(), ap.value());
+  loop[total] = loop[total] + next;
+  loop[i] = loop[i] + 1;
+  loop.jmp(loop);
+
+  done.va_end(ap.value());
+  done.ret(done[total]);
+  function.end();
+
+  if (module.error()) return 482;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "proto sum_i64_p(i64 %count, ...) -> i64")) return 483;
+  if (!contains(text, "func sum_i64(i64 %count, ...) -> i64")) return 484;
+  if (!contains(text, "va_start %ap")) return 485;
+  if (!contains(text, "va_arg %")) return 486;
+  if (!contains(text, "va_block_arg %")) return 487;
+  if (!contains(text, "va_end %ap")) return 488;
+
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 489;
+
+  mirnext::Module &bad_start_module = ctx.new_module("bad_start");
+  mirnext::Function &bad_start = bad_start_module.new_function("bad", {}, {});
+  mirnext::Var bad_ap = bad_start.var(mirnext::Type::p(), "ap");
+  bad_start.va_start(bad_ap.value());
+  bad_start.end();
+  if (!bad_start_module.error()) return 490;
+
+  mirnext::Module &bad_type_module = ctx.new_module("bad_type");
+  mirnext::Function &bad_type = bad_type_module.new_vararg_function("bad_type", {}, {});
+  mirnext::Var bad_type_ap = bad_type.var(mirnext::Type::p(), "ap");
+  (void)bad_type.va_arg(mirnext::Type::b(), bad_type_ap.value());
+  bad_type.end();
+  if (!bad_type_module.error()) return 491;
+
+  mirnext::Module &bad_ap_module = ctx.new_module("bad_ap");
+  mirnext::Function &bad_ap_fn = bad_ap_module.new_vararg_function("bad_ap", {}, {});
+  mirnext::Var not_ap = bad_ap_fn.var(mirnext::Type::i64(), "not_ap");
+  bad_ap_fn.va_start(not_ap.value());
+  bad_ap_fn.end();
+  if (!bad_ap_module.error()) return 492;
+
+  mirnext::Module &call_module = ctx.new_module("vararg_call");
+  mirnext::Function &printf_like_import = call_module.new_function(
+      "printf_like", {mirnext::Type::i64()}, {{mirnext::Type::p(), "fmt"}},
+      {.linkage = mirnext::FunctionLinkage::Import, .vararg = true});
+  mirnext::Function &caller = call_module.new_function("caller", {mirnext::Type::i64()}, {});
+  mirnext::Data &fmt_data = call_module.string_data("fmt", "%d");
+  mirnext::Value fmt_ref = expect(call_module.ref(fmt_data), 493);
+  mirnext::Value fmt = caller.addr(fmt_ref);
+  mirnext::Value result = caller[printf_like_import]({fmt, caller.i64(10), caller.i64(20)}).value();
+  caller.ret(result);
+  caller.end();
+  if (call_module.error()) return 494;
+  mirnext::Result<std::vector<std::byte>> call_bytes = call_module.encode_binary();
+  if (!call_bytes) return 495;
+
+  return 0;
+}
+
+static int check_indirect_control_flow_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("indirect_control");
+  mirnext::Function &function = module.new_function(
+      "jump_by_label_addr", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Label &target = function.label("target");
+
+  mirnext::Value target_addr = expect(function.label_addr(target), 500);
+  if (target_addr.type() != mirnext::Type::p()
+      || target_addr.operand().kind() != mirnext::Operand::Kind::Register) {
+    return 501;
+  }
+  function.jmp(target_addr);
+  function.ret(function.i64(0));
+  target.ret(target.i64(42));
+  function.end();
+  if (module.error()) return 502;
+
+  mirnext::Function &named = module.new_function("named_label_addr", {mirnext::Type::i64()}, {});
+  mirnext::Label &done = named.label("done");
+  mirnext::Value done_addr = expect(named.label_addr(done, "done_addr"), 503);
+  named.jmp(done_addr);
+  done.ret(done.i64(7));
+  named.end();
+  if (module.error()) return 504;
+
+  mirnext::Function &return_to = module.new_function("return_to_label_addr", {}, {});
+  mirnext::Label &exit = return_to.label("exit");
+  mirnext::Value exit_addr = expect(return_to.label_addr(exit), 505);
+  return_to.ret_to(exit_addr);
+  exit.ret();
+  return_to.end();
+  if (module.error()) return 506;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "reg p %")) return 507;
+  if (!contains(text, "laddr %")) return 508;
+  if (!contains(text, "jmpi %")) return 509;
+  if (!contains(text, "ret 42")) return 510;
+  if (!contains(text, "reg p %done_addr")) return 511;
+  if (!contains(text, "laddr %done_addr")) return 512;
+  if (!contains(text, "jret %")) return 513;
+
+  mirnext::Context error_ctx;
+  mirnext::Module &target_error_module = error_ctx.new_module("target_error");
+  mirnext::Function &left = target_error_module.new_function("left", {}, {});
+  mirnext::Function &right = target_error_module.new_function("right", {}, {});
+  mirnext::Label &right_label = right.label();
+  const std::size_t left_local_count = left.local_registers().size();
+  mirnext::Value bad_addr = left.label_addr(right_label);
+  if (!bad_addr.is_valid() || !bad_addr.is_poison()) return 514;
+  if (!target_error_module.error()
+      || target_error_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 515;
+  }
+  if (left.local_registers().size() != left_local_count) return 516;
+
+  mirnext::Module &jmp_error_module = error_ctx.new_module("jmpi_error");
+  mirnext::Function &bad_jmp = jmp_error_module.new_function("bad_jmpi", {}, {});
+  const std::size_t bad_jmp_instruction_count = bad_jmp.instruction_count();
+  bad_jmp.jmp(bad_jmp.i64(1));
+  if (!jmp_error_module.error()
+      || jmp_error_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 517;
+  }
+  if (bad_jmp.instruction_count() != bad_jmp_instruction_count) return 518;
+
+  mirnext::Module &ret_error_module = error_ctx.new_module("jret_error");
+  mirnext::Function &bad_ret = ret_error_module.new_function("bad_jret", {}, {});
+  mirnext::Value literal_pointer = bad_ret.value(mirnext::Type::p(), "literal_pointer");
+  (void)literal_pointer;
+  const std::size_t bad_ret_instruction_count = bad_ret.instruction_count();
+  bad_ret.ret_to(bad_ret.i64(1));
+  if (!ret_error_module.error()
+      || ret_error_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 519;
+  }
+  if (bad_ret.instruction_count() != bad_ret_instruction_count) return 520;
+
+  mirnext::Module &cross_value_module = error_ctx.new_module("cross_value_error");
+  mirnext::Function &cross_left = cross_value_module.new_function("cross_left", {}, {});
+  mirnext::Function &cross_right = cross_value_module.new_function("cross_right", {}, {});
+  mirnext::Value foreign_pointer = cross_right.value(mirnext::Type::p(), "foreign_pointer");
+  cross_left.ret_to(foreign_pointer);
+  if (!cross_value_module.error()
+      || cross_value_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 521;
+  }
+
+  mirnext::Module &ref_error_module = error_ctx.new_module("ref_error");
+  mirnext::Function &ref_fn = ref_error_module.new_function("ref_fn", {}, {});
+  mirnext::Data &data = ref_error_module.string_data("data", "x");
+  mirnext::Value ref = expect(ref_error_module.ref(data), 522);
+  ref_fn.ret_to(ref);
+  if (!ref_error_module.error()
+      || ref_error_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
+    return 523;
+  }
+
+  return 0;
+}
+
+static int check_label_stack_scope_api() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("label_stack_scope");
+  mirnext::Function &function = module.new_function("example", {}, {});
+  mirnext::Label &work = function.label("work", {.stack_scope = true});
+  mirnext::Label &done = function.label("done");
+
+  if (!work.is_stack_scoped()) return 524;
+  if (done.is_stack_scoped()) return 525;
+
+  function.jmp(work);
+  mirnext::Memory tmp = work.alloca(mirnext::Type::i64(), "tmp");
+  work.store(tmp, work.i64(42));
+  work.jmp(done);
+  done.ret();
+  function.end();
+  if (module.error()) return 526;
+
+  const auto &instructions = function.instructions();
+  bool saw_bstart = false;
+  bool saw_bend_before_jmp = false;
+  bool saw_plain_done_label = false;
+  for (std::size_t i = 0; i + 1 < instructions.size(); ++i) {
+    if (instructions[i]->opcode() == mirnext::Opcode::BStart) saw_bstart = true;
+    if (instructions[i]->opcode() == mirnext::Opcode::BEnd
+        && instructions[i + 1]->opcode() == mirnext::Opcode::Jmp) {
+      saw_bend_before_jmp = true;
+    }
+    if (instructions[i]->opcode() == mirnext::Opcode::Label
+        && instructions[i]->label_id() == done.id()
+        && instructions[i + 1]->opcode() != mirnext::Opcode::BStart) {
+      saw_plain_done_label = true;
+    }
+  }
+  if (!saw_bstart) return 527;
+  if (!saw_bend_before_jmp) return 528;
+  if (!saw_plain_done_label) return 529;
+
+  std::ostringstream out;
+  ctx.dump(out);
+  const std::string text = out.str();
+  if (!contains(text, "reg p %.scope0")) return 530;
+  if (!contains(text, "bstart %.scope0")) return 531;
+  if (!contains(text, "alloca %tmp 8")) return 532;
+  if (!contains(text, "bend %.scope0")) return 533;
+  if (!contains(text, "jmp L")) return 534;
+
+  mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
+  if (!bytes) return 535;
+  mirnext::LegacyContext legacy;
+  mirnext::Result<mirnext::LegacyLoweredFunction> lowered
+      = mirnext::lower_to_legacy(legacy, module, function);
+  if (!lowered || lowered->function == nullptr) return 536;
+
+  mirnext::Module &ret_module = ctx.new_module("label_stack_ret");
+  mirnext::Function &ret_fn = ret_module.new_function("ret_scoped", {}, {});
+  mirnext::Label &ret_label = ret_fn.label("ret_label", {.stack_scope = true});
+  ret_fn.jmp(ret_label);
+  ret_label.ret();
+  ret_fn.end();
+  if (ret_module.error()) return 537;
+  const auto &ret_instructions = ret_fn.instructions();
+  bool saw_bend_before_ret = false;
+  for (std::size_t i = 0; i + 1 < ret_instructions.size(); ++i) {
+    if (ret_instructions[i]->opcode() == mirnext::Opcode::BEnd
+        && ret_instructions[i + 1]->opcode() == mirnext::Opcode::Ret) {
+      saw_bend_before_ret = true;
+    }
+  }
+  if (!saw_bend_before_ret) return 538;
+
+  mirnext::Module &branch_module = ctx.new_module("label_stack_branch");
+  mirnext::Function &branch_fn = branch_module.new_function(
+      "branch_scoped", {}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Label &branch_work = branch_fn.label("branch_work", {.stack_scope = true});
+  mirnext::Label &branch_done = branch_fn.label("branch_done");
+  mirnext::Value branch_x = expect(branch_fn.arg("x"), 546);
+  branch_fn.jmp(branch_work);
+  branch_work.if_(branch_x == branch_work.i64(0), branch_done);
+  branch_work.jmp(branch_work);
+  branch_done.ret();
+  branch_fn.end();
+  if (branch_module.error()) return 539;
+  const auto &branch_instructions = branch_fn.instructions();
+  bool saw_bend_before_bt = false;
+  bool saw_bend_before_self_loop = false;
+  for (std::size_t i = 0; i + 1 < branch_instructions.size(); ++i) {
+    if (branch_instructions[i]->opcode() == mirnext::Opcode::BEnd
+        && branch_instructions[i + 1]->opcode() == mirnext::Opcode::Bt) {
+      saw_bend_before_bt = true;
+    }
+    if (branch_instructions[i]->opcode() == mirnext::Opcode::BEnd
+        && branch_instructions[i + 1]->opcode() == mirnext::Opcode::Jmp
+        && branch_instructions[i + 1]->operands()[0].label_id() == branch_work.id()) {
+      saw_bend_before_self_loop = true;
+    }
+  }
+  if (!saw_bend_before_bt) return 540;
+  if (!saw_bend_before_self_loop) return 541;
+
+  mirnext::Module &switch_module = ctx.new_module("label_stack_switch");
+  mirnext::Function &switch_fn = switch_module.new_function(
+      "switch_scoped", {}, {{mirnext::Type::i64(), "x"}});
+  mirnext::Label &switch_work = switch_fn.label("switch_work", {.stack_scope = true});
+  mirnext::Label &case0 = switch_fn.label("case0");
+  mirnext::Label &case1 = switch_fn.label("case1");
+  mirnext::Value switch_x = expect(switch_fn.arg("x"), 547);
+  switch_fn.jmp(switch_work);
+  switch_work.switch_(switch_x, {&case0, &case1});
+  case0.ret();
+  case1.ret();
+  switch_fn.end();
+  if (switch_module.error()) return 542;
+  const auto &switch_instructions = switch_fn.instructions();
+  bool saw_bend_before_switch = false;
+  for (std::size_t i = 0; i + 1 < switch_instructions.size(); ++i) {
+    if (switch_instructions[i]->opcode() == mirnext::Opcode::BEnd
+        && switch_instructions[i + 1]->opcode() == mirnext::Opcode::Switch) {
+      saw_bend_before_switch = true;
+    }
+  }
+  if (!saw_bend_before_switch) return 543;
+
+  mirnext::Module &fallthrough_module = ctx.new_module("label_stack_fallthrough");
+  mirnext::Function &fallthrough_fn = fallthrough_module.new_function("fallthrough_scoped", {}, {});
+  mirnext::Label &fallthrough_work = fallthrough_fn.label("fallthrough_work", {.stack_scope = true});
+  fallthrough_fn.jmp(fallthrough_work);
+  (void)fallthrough_work.alloca(mirnext::Type::i64(), "slot");
+  fallthrough_fn.end();
+  if (fallthrough_module.error()) return 544;
+  const auto &fallthrough_instructions = fallthrough_fn.instructions();
+  if (fallthrough_instructions.empty()
+      || fallthrough_instructions.back()->opcode() != mirnext::Opcode::BEnd) {
+    return 545;
+  }
+
   return 0;
 }
 
@@ -1203,15 +1779,20 @@ int main() {
   if (int code = check_switch_and_data_api()) return code;
   if (int code = check_binary_encode_errors()) return code;
   if (int code = check_memory_displacement_api()) return code;
+  if (int code = check_memory_alias_metadata_api()) return code;
   if (int code = check_memory_pointer_dsl_api()) return code;
   if (int code = check_memory_pointer_dsl_errors()) return code;
   if (int code = check_call_result_api()) return code;
+  if (int code = check_function_inline_tag_api()) return code;
+  if (int code = check_vararg_api()) return code;
+  if (int code = check_indirect_control_flow_api()) return code;
+  if (int code = check_label_stack_scope_api()) return code;
 
   mirnext::Context ctx;
   mirnext::Module &module = ctx.new_module("m");
-  mirnext::Prototype &prototype = module.new_prototype(
-      "add1_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}});
-  mirnext::Import &import = module.new_import("add1");
+  mirnext::Function &import = module.new_function(
+      "add1", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}},
+      {.linkage = mirnext::FunctionLinkage::Import});
   mirnext::Function &function = module.new_function(
       "loop", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
@@ -1227,12 +1808,12 @@ int main() {
   mirnext::Value next = expect(count.value() + expect(cont.i64(1), 112), 113);
   mirnext::Value cont_cond = expect(next < expect(cont.i64(42), 114), 115);
   expect_ok(cont.if_(cont_cond, cont), 116);
-  mirnext::Value call_result = expect(function.call(prototype, import, {count.value()}), 117);
+  mirnext::Value call_result = expect(function[import]({count.value()}).value(), 117);
   expect_ok(fin.ret(multiplied), 118);
   expect_ok(function.end(), 119);
 
   if (module.name() != "m") return 1;
-  if (module.prototypes().size() != 1 || module.imports().size() != 1) return 2;
+  if (module.functions().size() != 2) return 2;
   if (function.name() != "loop" || function.arguments().size() != 1) return 3;
   if (!call_result.is_valid() || call_result.operand().kind() != mirnext::Operand::Kind::Register) {
     return 4;
@@ -1242,8 +1823,7 @@ int main() {
   ctx.dump(out);
   const std::string text = out.str();
   if (!contains(text, "module m")) return 5;
-  if (!contains(text, "proto add1_p(i64 %arg) -> i64")) return 6;
-  if (!contains(text, "import add1")) return 7;
+  if (!contains(text, "import add1(i64 %arg) -> i64")) return 7;
   if (!contains(text, "func loop(i64 %arg1) -> i64")) return 8;
   if (!contains(text, "add %")) return 9;
   if (!contains(text, "mul %")) return 14;
@@ -1251,7 +1831,7 @@ int main() {
   if (!contains(text, "label L2")) return 16;
   if (!contains(text, "lt %")) return 17;
   if (!contains(text, "bt L")) return 20;
-  if (!contains(text, "call @add1_p @add1 %")) return 18;
+  if (!contains(text, "call @add1 @add1 %")) return 18;
   if (!contains(text, "ret %")) return 19;
 
   return 0;

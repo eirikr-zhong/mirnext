@@ -33,20 +33,6 @@ Type Register::type() const noexcept { return type_; }
 std::string_view Register::name() const noexcept { return name_; }
 bool Register::is_valid() const noexcept { return function_ != nullptr && id_ != 0; }
 
-Prototype::Prototype(std::string name, std::vector<Type> return_types,
-                     std::vector<Parameter> parameters)
-    : name_(std::move(name)), return_types_(std::move(return_types)),
-      parameters_(std::move(parameters)) {}
-
-std::string_view Prototype::name() const noexcept { return name_; }
-const std::vector<Type> &Prototype::return_types() const noexcept { return return_types_; }
-const std::vector<Prototype::Parameter> &Prototype::parameters() const noexcept {
-  return parameters_;
-}
-
-Import::Import(std::string name) : name_(std::move(name)) {}
-std::string_view Import::name() const noexcept { return name_; }
-
 Data::Data(std::string name, std::size_t size)
     : name_(std::move(name)), kind_(Kind::Bss), size_(size) {}
 
@@ -82,11 +68,12 @@ Operand::Operand(Kind kind, std::int64_t int_value, std::size_t reg, std::size_t
     : kind_(kind), int_value_(int_value), register_id_(reg), label_id_(label) {}
 
 Operand::Operand(Type memory_type, std::size_t base_register, std::size_t index_register,
-                 std::int64_t displacement, int scale)
+                 std::int64_t displacement, int scale, std::string_view alias,
+                 std::string_view nonalias)
     : kind_(Kind::Memory), int_value_(0), register_id_(0), label_id_(0),
       memory_type_(memory_type), memory_displacement_(displacement),
       memory_base_register_id_(base_register), memory_index_register_id_(index_register),
-      memory_scale_(scale) {}
+      memory_scale_(scale), memory_alias_(alias), memory_nonalias_(nonalias) {}
 
 Operand::Operand(ReferenceKind reference_kind, const void *reference)
     : kind_(Kind::Reference), int_value_(0), register_id_(0), label_id_(0),
@@ -119,12 +106,18 @@ Operand Operand::label_ref(std::size_t label_id) { return Operand(Kind::LabelRef
 
 Operand Operand::mem(Type type, Register base, Register index, std::int64_t displacement,
                      int scale) {
-  return Operand(type, base.id(), index.id(), displacement, scale);
+  return Operand::mem(type, base.id(), index.id(), displacement, scale, {}, {});
 }
 
 Operand Operand::mem(Type type, std::size_t base_register, std::size_t index_register,
                      std::int64_t displacement, int scale) {
-  return Operand(type, base_register, index_register, displacement, scale);
+  return Operand::mem(type, base_register, index_register, displacement, scale, {}, {});
+}
+
+Operand Operand::mem(Type type, std::size_t base_register, std::size_t index_register,
+                     std::int64_t displacement, int scale, std::string_view alias,
+                     std::string_view nonalias) {
+  return Operand(type, base_register, index_register, displacement, scale, alias, nonalias);
 }
 
 Operand Operand::module_slot(std::size_t id) {
@@ -132,12 +125,6 @@ Operand Operand::module_slot(std::size_t id) {
   operand.module_slot_id_ = id;
   return operand;
 }
-
-Operand Operand::ref(const Prototype &prototype) {
-  return Operand(ReferenceKind::Prototype, &prototype);
-}
-
-Operand Operand::ref(const Import &import) { return Operand(ReferenceKind::Import, &import); }
 
 Operand Operand::ref(const Function &function) {
   return Operand(ReferenceKind::Function, &function);
@@ -163,6 +150,11 @@ std::int64_t Operand::memory_displacement() const noexcept { return memory_displ
 std::size_t Operand::memory_base_register_id() const noexcept { return memory_base_register_id_; }
 std::size_t Operand::memory_index_register_id() const noexcept { return memory_index_register_id_; }
 int Operand::memory_scale() const noexcept { return memory_scale_; }
+std::string_view Operand::memory_alias() const noexcept { return memory_alias_; }
+std::string_view Operand::memory_nonalias() const noexcept { return memory_nonalias_; }
+bool Operand::has_memory_alias_metadata() const noexcept {
+  return !memory_alias_.empty() || !memory_nonalias_.empty();
+}
 Operand::ReferenceKind Operand::reference_kind() const noexcept { return reference_kind_; }
 const void *Operand::reference_pointer() const noexcept { return reference_; }
 
@@ -200,16 +192,50 @@ Instruction &Block::append_operation(Instruction instruction) {
   static Instruction dummy(Opcode::Nop);
   if (error()) return dummy;
   Function *owner = function();
+  if (owner != nullptr && !owner->is_local()) {
+    fail(Error{ErrorCode::InvalidOperand, "only local functions can contain instructions"});
+    return dummy;
+  }
   if (owner != nullptr) owner->invalidate_flattened();
   pending_overflow_sequence_ = 0;
   operations_.push_back(std::make_unique<Instruction>(std::move(instruction)));
   return *operations_.back();
 }
 
-Label &Block::create_child_label(std::string_view name) {
+Label &Block::create_child_label(std::string_view name, LabelOptions options) {
+  static Module dummy_module(".invalid");
+  static Function dummy_function(dummy_module, ".invalid");
+  static Label dummy(dummy_function, dummy_function, 0, "", {});
+  if (error()) return dummy;
   Function *owner = function();
+  if (owner == nullptr) {
+    fail(Error{ErrorCode::InvalidOperand, "label requires a function block"});
+    return dummy;
+  }
+  if (owner != nullptr && !owner->is_local()) {
+    fail(Error{ErrorCode::InvalidOperand, "only local functions can contain labels"});
+    return dummy;
+  }
+  std::optional<Register> stack_scope_token;
+  if (options.stack_scope) {
+    std::size_t attempt = 0;
+    while (true) {
+      const std::string token_name = ".scope" + std::to_string(attempt++);
+      Result<Register> token = owner->create_register_internal(Type::p(), token_name, false);
+      if (token) {
+        stack_scope_token = *token;
+        break;
+      }
+      if (token.error().code != ErrorCode::DuplicateName) {
+        fail(std::move(token).error());
+        return dummy;
+      }
+    }
+  }
   const std::size_t id = owner->next_label_id_++;
-  child_labels_.push_back(std::unique_ptr<Label>(new Label(*owner, *this, id, std::string(name))));
+  child_labels_.push_back(std::unique_ptr<Label>(
+      new Label(*owner, *this, id, std::string(name), options)));
+  child_labels_.back()->stack_scope_token_ = stack_scope_token;
   owner->invalidate_flattened();
   return *child_labels_.back();
 }
@@ -222,8 +248,10 @@ const std::vector<std::unique_ptr<Label>> &Block::child_labels() const noexcept 
   return child_labels_;
 }
 
-Label::Label(Function &function, Block &parent, std::size_t id, std::string name)
-    : Block(Kind::Label, &parent), id_(id), name_(std::move(name)) {
+Label::Label(Function &function, Block &parent, std::size_t id, std::string name,
+             LabelOptions options)
+    : Block(Kind::Label, &parent), id_(id), name_(std::move(name)),
+      options_(options) {
   set_module(&function.module());
   set_function(&function);
 }
@@ -231,7 +259,10 @@ Label::Label(Function &function, Block &parent, std::size_t id, std::string name
 std::size_t Label::id() const noexcept { return id_; }
 std::string_view Label::name() const noexcept { return name_; }
 bool Label::is_valid() const noexcept { return id_ != 0 && function() != nullptr; }
-Label &Label::label(std::string_view name) { return create_child_label(name); }
+bool Label::is_stack_scoped() const noexcept { return options_.stack_scope; }
+Label &Label::label(std::string_view name, LabelOptions options) {
+  return create_child_label(name, options);
+}
 void Label::end() {}
 
 Function::Function(Module &module, std::string name)
@@ -241,9 +272,9 @@ Function::Function(Module &module, std::string name)
 }
 
 Function::Function(Module &module, std::string name, std::vector<Type> return_types,
-                   std::vector<Parameter> parameters)
+                   std::vector<Parameter> parameters, Linkage linkage, bool vararg)
     : Block(Kind::Function, &module), name_(std::move(name)),
-      return_types_(std::move(return_types)) {
+      return_types_(std::move(return_types)), linkage_(linkage), vararg_(vararg) {
   set_module(&module);
   set_function(this);
   for (const Parameter &parameter : parameters) {
@@ -253,6 +284,16 @@ Function::Function(Module &module, std::string name, std::vector<Type> return_ty
 
 std::string_view Function::name() const noexcept { return name_; }
 const std::vector<Type> &Function::return_types() const noexcept { return return_types_; }
+Function::Linkage Function::linkage() const noexcept { return linkage_; }
+bool Function::is_local() const noexcept { return linkage_ == Linkage::Local; }
+bool Function::is_import() const noexcept { return linkage_ == Linkage::Import; }
+bool Function::is_signature() const noexcept { return linkage_ == Linkage::Signature; }
+bool Function::is_vararg() const noexcept { return vararg_; }
+bool Function::is_inline() const noexcept { return inline_hint_; }
+Function &Function::set_inline(bool enabled) noexcept {
+  inline_hint_ = enabled;
+  return *this;
+}
 const std::vector<Register> &Function::arguments() const noexcept { return arguments_; }
 
 Value Function::arg(std::string_view name) {
@@ -295,7 +336,9 @@ const Register *Function::find_register(std::size_t id) const noexcept {
   return nullptr;
 }
 
-Label &Function::label(std::string_view name) { return create_child_label(name); }
+Label &Function::label(std::string_view name, LabelOptions options) {
+  return create_child_label(name, options);
+}
 
 void Function::end() {}
 
@@ -312,6 +355,9 @@ const std::vector<std::unique_ptr<Instruction>> &Function::instructions() const 
 
 Result<Register> Function::create_register_internal(Type type, std::string_view name, bool argument) {
   if (error()) return Error{ErrorCode::InvalidOperand, "module is already in error state"};
+  if (!argument && !is_local()) {
+    return Error{ErrorCode::InvalidOperand, "only local functions can create local registers"};
+  }
   if (name.empty()) return Error{ErrorCode::InvalidArgument, "register name must not be empty"};
   if (has_register_name(name)) return Error{ErrorCode::DuplicateName, "duplicate register name"};
 
@@ -328,13 +374,85 @@ void Function::invalidate_flattened() const noexcept { flattened_dirty_ = true; 
 
 void Function::flatten_into(std::vector<std::unique_ptr<Instruction>> &out, const Block &block,
                             bool emit_label) const {
+  auto is_terminator = [](Opcode opcode) noexcept {
+    switch (opcode) {
+    case Opcode::Jmp:
+    case Opcode::JmpIndirect:
+    case Opcode::Bt:
+    case Opcode::Bts:
+    case Opcode::Bf:
+    case Opcode::Bfs:
+    case Opcode::Beq:
+    case Opcode::Beqs:
+    case Opcode::FBeq:
+    case Opcode::DBeq:
+    case Opcode::LDBeq:
+    case Opcode::Bne:
+    case Opcode::Bnes:
+    case Opcode::FBne:
+    case Opcode::DBne:
+    case Opcode::LDBne:
+    case Opcode::Blt:
+    case Opcode::Blts:
+    case Opcode::UBlt:
+    case Opcode::UBlts:
+    case Opcode::FBlt:
+    case Opcode::DBlt:
+    case Opcode::LDBlt:
+    case Opcode::Ble:
+    case Opcode::Bles:
+    case Opcode::UBle:
+    case Opcode::UBles:
+    case Opcode::FBle:
+    case Opcode::DBle:
+    case Opcode::LDBle:
+    case Opcode::Bgt:
+    case Opcode::Bgts:
+    case Opcode::UBgt:
+    case Opcode::UBgts:
+    case Opcode::FBgt:
+    case Opcode::DBgt:
+    case Opcode::LDBgt:
+    case Opcode::Bge:
+    case Opcode::Bges:
+    case Opcode::UBge:
+    case Opcode::UBges:
+    case Opcode::FBge:
+    case Opcode::DBge:
+    case Opcode::LDBge:
+    case Opcode::Bo:
+    case Opcode::UBo:
+    case Opcode::Bno:
+    case Opcode::UBno:
+    case Opcode::Switch:
+    case Opcode::Ret:
+    case Opcode::JRet:
+      return true;
+    default:
+      return false;
+    }
+  };
+  const Label *scoped_label = nullptr;
   if (emit_label) {
     const Label &label = static_cast<const Label &>(block);
     auto instruction = std::make_unique<Instruction>(Opcode::Label);
     instruction->set_label_id(label.id());
     out.push_back(std::move(instruction));
+    if (label.is_stack_scoped() && label.stack_scope_token_) {
+      scoped_label = &label;
+      out.push_back(std::make_unique<Instruction>(
+          Opcode::BStart, std::vector<Operand>{Operand(*label.stack_scope_token_)}));
+    }
   }
+  bool emitted_any_bend = false;
+  auto emit_bend = [&out, &emitted_any_bend, scoped_label]() {
+    if (scoped_label == nullptr) return;
+    out.push_back(std::make_unique<Instruction>(
+        Opcode::BEnd, std::vector<Operand>{Operand(*scoped_label->stack_scope_token_)}));
+    emitted_any_bend = true;
+  };
   for (const std::unique_ptr<Instruction> &instruction : block.operations_) {
+    if (is_terminator(instruction->opcode())) emit_bend();
     out.push_back(std::make_unique<Instruction>(*instruction));
     if (instruction->opcode() == Opcode::Label) {
       const std::size_t label_id = instruction->label_id();
@@ -346,6 +464,7 @@ void Function::flatten_into(std::vector<std::unique_ptr<Instruction>> &out, cons
       }
     }
   }
+  if (!emitted_any_bend) emit_bend();
   for (const std::unique_ptr<Label> &label : block.child_labels_) {
     if (label->appended_as_instruction_) continue;
     flatten_into(out, *label, true);
@@ -369,46 +488,41 @@ Function &Module::new_function(std::string_view name) {
 }
 
 Function &Module::new_function(std::string_view name, std::vector<Type> return_types,
-                               std::vector<Function::Parameter> parameters) {
+                               std::vector<Function::Parameter> parameters,
+                               FunctionOptions options) {
+  Function::Linkage linkage = Function::Linkage::Local;
+  switch (options.linkage) {
+  case FunctionLinkage::Local:
+    linkage = Function::Linkage::Local;
+    break;
+  case FunctionLinkage::Import:
+    linkage = Function::Linkage::Import;
+    break;
+  case FunctionLinkage::Signature:
+    linkage = Function::Linkage::Signature;
+    break;
+  }
   functions_.push_back(std::make_unique<Function>(*this, std::string(name),
                                                   std::move(return_types),
-                                                  std::move(parameters)));
+                                                  std::move(parameters), linkage,
+                                                  options.vararg));
+  functions_.back()->set_inline(options.inline_hint);
   return *functions_.back();
 }
 
-Prototype &Module::new_prototype(std::string_view name, std::vector<Type> return_types,
-                                 std::vector<Prototype::Parameter> parameters) {
-  prototypes_.push_back(std::make_unique<Prototype>(std::string(name), std::move(return_types),
-                                                    std::move(parameters)));
-  return *prototypes_.back();
-}
-
-Import &Module::new_import(std::string_view name) {
-  imports_.push_back(std::make_unique<Import>(std::string(name)));
-  return *imports_.back();
-}
-
-Result<Value> Module::ref(const Import &import) {
-  return Value(*this, Type::p(), Operand::ref(import));
+Function &Module::new_vararg_function(std::string_view name, std::vector<Type> return_types,
+                                      std::vector<Function::Parameter> parameters) {
+  return new_function(name, std::move(return_types), std::move(parameters),
+                      FunctionOptions{FunctionLinkage::Local, true});
 }
 
 Result<Value> Module::ref(const Function &function) {
   return Value(*this, Type::p(), Operand::ref(function));
 }
 
-Result<Value> Module::ref(const Prototype &prototype) {
-  return Value(*this, Type::p(), Operand::ref(prototype));
-}
-
 Result<Value> Module::ref(const Data &data) {
   return Value(*this, Type::p(), Operand::ref(data));
 }
-
-const std::vector<std::unique_ptr<Prototype>> &Module::prototypes() const noexcept {
-  return prototypes_;
-}
-
-const std::vector<std::unique_ptr<Import>> &Module::imports() const noexcept { return imports_; }
 
 const std::vector<std::unique_ptr<Data>> &Module::data_items() const noexcept {
   return data_items_;

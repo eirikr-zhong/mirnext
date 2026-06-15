@@ -6,6 +6,16 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#ifdef va_start
+#undef va_start
+#endif
+#ifdef va_arg
+#undef va_arg
+#endif
+#ifdef va_end
+#undef va_end
+#endif
+
 #include <cstdlib>
 #include <cstddef>
 #include <cstdint>
@@ -452,14 +462,14 @@ static mirnext::Function &create_checked_unsigned_mul_branch(mirnext::Context &c
 static mirnext::Function &create_import_call(mirnext::Context &ctx, mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_import_call");
   *module_out = &module;
-  mirnext::Prototype &prototype = module.new_prototype(
-      "add7_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Import &import = module.new_import("add7");
+  mirnext::Function &import = module.new_function(
+      "add7", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}},
+      {.linkage = mirnext::FunctionLinkage::Import});
   mirnext::Function &function = module.new_function(
       "import_call", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
   mirnext::Value arg = expect(function.arg("arg1"), 115);
-  mirnext::Value result = expect(function.call(prototype, import, {arg}), 116);
+  mirnext::Value result = expect(function[import]({arg}).value(), 116);
   expect_ok(function.ret(result), 117);
   expect_ok(function.end(), 118);
   return function;
@@ -468,9 +478,6 @@ static mirnext::Function &create_import_call(mirnext::Context &ctx, mirnext::Mod
 static mirnext::Function &create_internal_call(mirnext::Context &ctx, mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_internal_call");
   *module_out = &module;
-  mirnext::Prototype &prototype = module.new_prototype(
-      "add11_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-
   mirnext::Function &callee = module.new_function(
       "add11", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Value callee_arg = expect(callee.arg("arg1"), 119);
@@ -480,7 +487,7 @@ static mirnext::Function &create_internal_call(mirnext::Context &ctx, mirnext::M
   mirnext::Function &caller = module.new_function(
       "internal_call", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Value arg = expect(caller.arg("arg1"), 124);
-  mirnext::Value result = expect(caller.call(prototype, callee, {arg}), 125);
+  mirnext::Value result = expect(caller[callee]({arg}).value(), 125);
   expect_ok(caller.ret(result), 126);
   expect_ok(caller.end(), 127);
   return caller;
@@ -489,16 +496,13 @@ static mirnext::Function &create_internal_call(mirnext::Context &ctx, mirnext::M
 static mirnext::Function &create_forward_call(mirnext::Context &ctx, mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_forward_call");
   *module_out = &module;
-  mirnext::Prototype &prototype = module.new_prototype(
-      "add17_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-
   mirnext::Function &caller = module.new_function(
       "forward_call", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Function &callee = module.new_function(
       "add17", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
   mirnext::Value arg = expect(caller.arg("arg1"), 139);
-  mirnext::Value result = expect(caller.call(prototype, callee, {arg}), 140);
+  mirnext::Value result = expect(caller[callee]({arg}).value(), 140);
   expect_ok(caller.ret(result), 141);
   expect_ok(caller.end(), 142);
 
@@ -512,15 +516,13 @@ static mirnext::Function &create_self_recursion(mirnext::Context &ctx,
                                                 mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_self_recursion");
   *module_out = &module;
-  mirnext::Prototype &prototype = module.new_prototype(
-      "countdown_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Function &function = module.new_function(
       "countdown", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Value arg1 = expect(function.arg("arg1"), 147);
   mirnext::Label &base = new_label(function, 151);
   function.if_(arg1 <= expect(function.i64(0), 152), base);
   mirnext::Value next = expect(arg1 - expect(function.i64(1), 153), 154);
-  mirnext::Value recursive = expect(function.call(prototype, function, {next}), 155);
+  mirnext::Value recursive = expect(function[function]({next}).value(), 155);
   function.ret(expect(recursive + expect(function.i64(1), 156), 157));
   base.ret(expect(base.i64(0), 158));
   function.end();
@@ -531,20 +533,17 @@ static mirnext::Function &create_mutual_recursion(mirnext::Context &ctx,
                                                   mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_mutual_recursion");
   *module_out = &module;
-  mirnext::Prototype &prototype = module.new_prototype(
-      "mutual_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
-
   mirnext::Function &first = module.new_function(
       "mutual_first", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
   mirnext::Function &second = module.new_function(
       "mutual_second", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg1"}});
 
   mirnext::Value first_arg = expect(first.arg("arg1"), 159);
-  expect_ok(first.ret(expect(first.call(prototype, second, {first_arg}), 160)), 161);
+  expect_ok(first.ret(expect(first[second]({first_arg}).value(), 160)), 161);
   expect_ok(first.end(), 162);
 
   mirnext::Value second_arg = expect(second.arg("arg1"), 163);
-  expect_ok(second.ret(expect(second.call(prototype, first, {second_arg}), 164)), 165);
+  expect_ok(second.ret(expect(second[first]({second_arg}).value(), 164)), 165);
   expect_ok(second.end(), 166);
   return first;
 }
@@ -690,10 +689,10 @@ static mirnext::Function &create_float_long_double_lowering(mirnext::Context &ct
   expect_ok(function.if_(back_to_f < expect(function.f32(0.0f), 225), done), 226);
   expect_ok(function.if_(ld_math > expect(function.ld(0.0L), 227), done), 228);
   mirnext::Value ld_to_d = expect(ld_math.convert(mirnext::Type::Kind::D), 229);
-  expect_ok(function.call_void(
-                module.new_prototype("sink", {}, {{mirnext::Type::d(), "arg"}}),
-                module.new_import("float_long_double_sink"), {ld_to_d}),
-            230);
+  mirnext::Function &sink = module.new_function(
+      "float_long_double_sink", {}, {{mirnext::Type::d(), "arg"}},
+      {.linkage = mirnext::FunctionLinkage::Import});
+  function[sink]({ld_to_d});
   expect_ok(done.ret(), 231);
   expect_ok(function.end(), 232);
   return function;
@@ -733,13 +732,13 @@ static mirnext::Function &create_void_call_lowering(mirnext::Context &ctx,
                                                     mirnext::Module **module_out) {
   mirnext::Module &module = ctx.new_module("m_void_call_lowering");
   *module_out = &module;
-  mirnext::Prototype &prototype = module.new_prototype(
-      "void_p", {}, {{mirnext::Type::i64(), "arg1"}});
-  mirnext::Import &import = module.new_import("void_sink");
+  mirnext::Function &import = module.new_function(
+      "void_sink", {}, {{mirnext::Type::i64(), "arg1"}},
+      {.linkage = mirnext::FunctionLinkage::Import});
   mirnext::Function &function = module.new_function(
       "void_call_lowering", {}, {{mirnext::Type::i64(), "arg1"}});
 
-  expect_ok(function.call_void(prototype, import, {expect(function.arg("arg1"), 236)}), 237);
+  function[import]({expect(function.arg("arg1"), 236)});
   expect_ok(function.ret(), 238);
   expect_ok(function.end(), 239);
   return function;
@@ -897,6 +896,35 @@ static mirnext::Function &create_compare_bytes(mirnext::Context &ctx,
   less.ret(less.i64(-1));
   greater.ret(greater.i64(1));
   equal.ret(equal.i64(0));
+  function.end();
+  return function;
+}
+
+static mirnext::Function &create_indirect_label_jump(mirnext::Context &ctx,
+                                                     mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_indirect_label_jump");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function("indirect_label_jump",
+                                                    {mirnext::Type::i64()}, {});
+  mirnext::Label &target = new_label(function, 401);
+  mirnext::Value target_addr = function.label_addr(target);
+  function.jmp(target_addr);
+  function.ret(function.i64(0));
+  target.ret(target.i64(42));
+  function.end();
+  return function;
+}
+
+static mirnext::Function &create_jret_binary_smoke(mirnext::Context &ctx,
+                                                   mirnext::Module **module_out) {
+  mirnext::Module &module = ctx.new_module("m_jret_binary");
+  *module_out = &module;
+  mirnext::Function &function = module.new_function("jret_binary", {}, {});
+  mirnext::Label &exit = new_label(function, 402);
+  mirnext::Value exit_addr = function.label_addr(exit);
+  function.ret_to(exit_addr);
+  function.jmp(exit);
+  exit.ret_to(exit_addr);
   function.end();
   return function;
 }
@@ -1938,6 +1966,18 @@ static int check_compare_bytes_gen() {
   return ok ? 0 : 400;
 }
 
+static int check_indirect_label_jump_interp() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_indirect_label_jump(ctx, &module);
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(mirnext::lower_to_legacy(legacy, *module, function), 401);
+  std::int64_t result = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function),
+                               402);
+  return result == 42 ? 0 : 403;
+}
+
 static int check_binary_loop_interp() {
   mirnext::Context ctx;
   mirnext::Module *module = nullptr;
@@ -1997,6 +2037,142 @@ static int check_binary_void_call_read() {
   mirnext::Function &function = create_void_call_lowering(ctx, &module);
   mirnext::LegacyContext legacy;
   expect(read_binary_module(legacy, *module, std::string(function.name()).c_str()), 305);
+  return 0;
+}
+
+static int check_binary_inline_call_read() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("m_binary_inline_call");
+  mirnext::Function &callee = module.new_function(
+      "add1", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}},
+      {.inline_hint = true});
+  mirnext::Value callee_arg = expect(callee.arg("arg"), 416);
+  callee.ret(callee_arg + callee.i64(1));
+  callee.end();
+
+  mirnext::Function &caller = module.new_function(
+      "inline_call", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}});
+  mirnext::Value result = caller[callee]({caller.arg("arg")}).value();
+  caller.ret(result);
+  caller.end();
+  if (module.error()) return 417;
+
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered = expect(read_binary_module(legacy, module, "inline_call"),
+                                                  418);
+  if (lowered.function == nullptr || lowered.function->item_type != MIR_func_item) return 419;
+
+  bool saw_inline = false;
+  MIR_func_t decoded = lowered.function->u.func;
+  for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, decoded->insns); insn != nullptr;
+       insn = DLIST_NEXT(MIR_insn_t, insn)) {
+    if (insn->code == MIR_INLINE) saw_inline = true;
+  }
+  if (!saw_inline) return 420;
+
+  const std::int64_t arg = 41;
+  std::int64_t value = expect(mirnext::interpret_i64(legacy, lowered.module, lowered.function,
+                                                     &arg, 1),
+                              421);
+  return value == 42 ? 0 : 422;
+}
+
+static int check_binary_vararg_read() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("m_binary_vararg");
+  module.new_function(
+      "sum_i64_p", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "count"}},
+      {.linkage = mirnext::FunctionLinkage::Signature, .vararg = true});
+  mirnext::Function &function = module.new_vararg_function(
+      "sum_i64", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "count"}});
+  mirnext::Var ap = function.var(mirnext::Type::p(), "ap");
+  mirnext::Var total = function.var(mirnext::Type::i64(), "total");
+  function[total] = 0;
+  function.va_start(ap.value());
+  mirnext::Value next = function.va_arg(mirnext::Type::i64(), ap.value());
+  function[total] = function[total] + next;
+  function.va_end(ap.value());
+  function.ret(function[total]);
+  function.end();
+  if (module.error()) return 306;
+
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered = expect(read_binary_module(legacy, module, "sum_i64"), 307);
+  if (lowered.function->item_type != MIR_func_item) return 308;
+  if (!lowered.function->u.func->vararg_p) return 309;
+
+  bool saw_vararg_proto = false;
+  for (MIR_item_t item = DLIST_HEAD(MIR_item_t, lowered.module->items); item != nullptr;
+       item = DLIST_NEXT(MIR_item_t, item)) {
+    if (item->item_type == MIR_proto_item
+        && std::strcmp(MIR_item_name(legacy.raw(), item), "sum_i64_p") == 0) {
+      saw_vararg_proto = item->u.proto->vararg_p != 0;
+    }
+  }
+  return saw_vararg_proto ? 0 : 310;
+}
+
+static int check_binary_alias_memory_read() {
+  mirnext::Context ctx;
+  mirnext::Module &module = ctx.new_module("m_binary_alias_memory");
+  mirnext::Function &function = module.new_function(
+      "alias_memory", {mirnext::Type::i64()},
+      {{mirnext::Type::p(), "base"}, {mirnext::Type::i64(), "index"}});
+  mirnext::Value base = expect(function.arg("base"), 410);
+  mirnext::Value index = expect(function.arg("index"), 411);
+  mirnext::Memory alias_only = function.mem(mirnext::Type::i64(), base,
+                                            {.alias = "items"});
+  mirnext::Memory nonalias_only = function.mem(mirnext::Type::i64(), base, 8,
+                                               {.nonalias = "scratch"});
+  mirnext::Memory both = function.mem(mirnext::Type::i64(), base, index, 8, 16,
+                                      {.alias = "items", .nonalias = "scratch"});
+  function.store(alias_only, function.i64(1));
+  function.store(nonalias_only, function.i64(2));
+  mirnext::Value loaded = function.load(both);
+  function.ret(loaded);
+  function.end();
+  if (module.error()) return 412;
+
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered = expect(read_binary_module(legacy, module, "alias_memory"),
+                                                  413);
+  if (lowered.function == nullptr || lowered.function->item_type != MIR_func_item) return 414;
+
+  bool saw_alias_only = false;
+  bool saw_nonalias_only = false;
+  bool saw_both = false;
+  MIR_func_t decoded = lowered.function->u.func;
+  for (MIR_insn_t insn = DLIST_HEAD(MIR_insn_t, decoded->insns); insn != nullptr;
+       insn = DLIST_NEXT(MIR_insn_t, insn)) {
+    for (unsigned int i = 0; i < insn->nops; ++i) {
+      if (insn->ops[i].mode != MIR_OP_MEM) continue;
+      const char *alias = MIR_alias_name(legacy.raw(), insn->ops[i].u.mem.alias);
+      const char *nonalias = MIR_alias_name(legacy.raw(), insn->ops[i].u.mem.nonalias);
+      if (std::strcmp(alias, "items") == 0 && std::strcmp(nonalias, "") == 0) {
+        saw_alias_only = true;
+      }
+      if (std::strcmp(alias, "") == 0 && std::strcmp(nonalias, "scratch") == 0) {
+        saw_nonalias_only = true;
+      }
+      if (std::strcmp(alias, "items") == 0 && std::strcmp(nonalias, "scratch") == 0) {
+        saw_both = true;
+      }
+    }
+  }
+
+  return saw_alias_only && saw_nonalias_only && saw_both ? 0 : 415;
+}
+
+static int check_binary_jret_read() {
+  mirnext::Context ctx;
+  mirnext::Module *module = nullptr;
+  mirnext::Function &function = create_jret_binary_smoke(ctx, &module);
+  if (module->error()) return 407;
+
+  mirnext::LegacyContext legacy;
+  mirnext::LegacyLoweredFunction lowered
+      = expect(read_binary_module(legacy, *module, std::string(function.name()).c_str()), 408);
+  if (lowered.function->item_type != MIR_func_item) return 409;
   return 0;
 }
 
@@ -2106,10 +2282,20 @@ TEST_CASE("legacy lowering executes addr data loads") {
   CHECK(check_compare_bytes_gen() == 0);
 }
 
+TEST_CASE("legacy interp executes indirect label jump") {
+  // Current Windows MIR generator crashes on this laddr/jmpi shape; keep JIT out
+  // until that backend path is fixed.
+  CHECK(check_indirect_label_jump_interp() == 0);
+}
+
 TEST_CASE("binary encode round-trips through MIR-C reader") {
   CHECK(check_binary_loop_interp() == 0);
   CHECK(check_binary_import_call_interp() == 0);
   CHECK(check_binary_forward_call_interp() == 0);
   CHECK(check_binary_double_interp() == 0);
   CHECK(check_binary_void_call_read() == 0);
+  CHECK(check_binary_inline_call_read() == 0);
+  CHECK(check_binary_vararg_read() == 0);
+  CHECK(check_binary_alias_memory_read() == 0);
+  CHECK(check_binary_jret_read() == 0);
 }
