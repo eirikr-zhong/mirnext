@@ -3,6 +3,7 @@
 
 #include "mir.hpp"
 
+#include <string>
 #include <utility>
 
 namespace mirnext {
@@ -24,6 +25,56 @@ Type Type::ld() noexcept { return Type(Kind::LD); }
 Type Type::p() noexcept { return Type(Kind::P); }
 Type Type::from_kind(Kind kind) noexcept { return Type(kind); }
 Type::Kind Type::kind() const noexcept { return kind_; }
+
+AttrValue::Kind AttrValue::kind() const noexcept {
+  if (std::holds_alternative<bool>(value_)) return Kind::Bool;
+  if (std::holds_alternative<std::int64_t>(value_)) return Kind::Int64;
+  if (std::holds_alternative<std::uint64_t>(value_)) return Kind::UInt64;
+  return Kind::String;
+}
+
+const bool *AttrValue::bool_value() const noexcept { return std::get_if<bool>(&value_); }
+const std::int64_t *AttrValue::int64_value() const noexcept {
+  return std::get_if<std::int64_t>(&value_);
+}
+const std::uint64_t *AttrValue::uint64_value() const noexcept {
+  return std::get_if<std::uint64_t>(&value_);
+}
+const std::string *AttrValue::string_value() const noexcept {
+  return std::get_if<std::string>(&value_);
+}
+
+AttributeSet::AttributeSet(std::initializer_list<std::pair<std::string_view, AttrValue>> attrs) {
+  for (const auto &attr : attrs) set(attr.first, attr.second);
+}
+
+bool AttributeSet::has(std::string_view key) const noexcept {
+  return attrs_.find(std::string(key)) != attrs_.end();
+}
+
+const AttrValue *AttributeSet::get(std::string_view key) const noexcept {
+  auto it = attrs_.find(std::string(key));
+  return it == attrs_.end() ? nullptr : &it->second;
+}
+
+void AttributeSet::set(std::string_view key, AttrValue value) {
+  attrs_.insert_or_assign(std::string(key), std::move(value));
+}
+
+void AttributeSet::remove(std::string_view key) noexcept {
+  attrs_.erase(std::string(key));
+}
+
+bool AttributeSet::bool_attr(std::string_view key, bool default_value) const noexcept {
+  const AttrValue *value = get(key);
+  if (value == nullptr) return default_value;
+  const bool *bool_value = value->bool_value();
+  return bool_value == nullptr ? default_value : *bool_value;
+}
+
+const std::unordered_map<std::string, AttrValue> &AttributeSet::entries() const noexcept {
+  return attrs_;
+}
 
 Register::Register(const Function *function, std::size_t id, Type type, std::string name)
     : function_(function), id_(id), type_(type), name_(std::move(name)) {}
@@ -289,10 +340,38 @@ bool Function::is_local() const noexcept { return linkage_ == Linkage::Local; }
 bool Function::is_import() const noexcept { return linkage_ == Linkage::Import; }
 bool Function::is_signature() const noexcept { return linkage_ == Linkage::Signature; }
 bool Function::is_vararg() const noexcept { return vararg_; }
-bool Function::is_inline() const noexcept { return inline_hint_; }
-Function &Function::set_inline(bool enabled) noexcept {
-  inline_hint_ = enabled;
+bool Function::has_attr(std::string_view key) const noexcept { return attrs_.has(key); }
+const AttrValue *Function::attr(std::string_view key) const noexcept { return attrs_.get(key); }
+Function &Function::set_attr(std::string_view key, AttrValue value) {
+  attrs_.set(key, std::move(value));
   return *this;
+}
+Function &Function::set_attr(std::string_view key, bool value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Function &Function::set_attr(std::string_view key, std::int64_t value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Function &Function::set_attr(std::string_view key, std::uint64_t value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Function &Function::set_attr(std::string_view key, std::string_view value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Function &Function::set_attr(std::string_view key, const char *value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Function &Function::remove_attr(std::string_view key) noexcept {
+  attrs_.remove(key);
+  return *this;
+}
+bool Function::bool_attr(std::string_view key, bool default_value) const noexcept {
+  return attrs_.bool_attr(key, default_value);
 }
 const std::vector<Register> &Function::arguments() const noexcept { return arguments_; }
 
@@ -471,7 +550,8 @@ void Function::flatten_into(std::vector<std::unique_ptr<Instruction>> &out, cons
   }
 }
 
-Module::Module(std::string name) : Block(Kind::Module, nullptr), name_(std::move(name)) {
+Module::Module(std::string name, ModuleOptions options)
+    : Block(Kind::Module, nullptr), name_(std::move(name)), attrs_(std::move(options.attrs)) {
   set_module(this);
 }
 
@@ -506,7 +586,9 @@ Function &Module::new_function(std::string_view name, std::vector<Type> return_t
                                                   std::move(return_types),
                                                   std::move(parameters), linkage,
                                                   options.vararg));
-  functions_.back()->set_inline(options.inline_hint);
+  for (const auto &attr : options.attrs.entries()) {
+    functions_.back()->set_attr(attr.first, attr.second);
+  }
   return *functions_.back();
 }
 
@@ -532,8 +614,42 @@ const std::vector<std::unique_ptr<Function>> &Module::functions() const noexcept
   return functions_;
 }
 
-Module &Context::new_module(std::string_view name) {
-  modules_.push_back(std::make_unique<Module>(std::string(name)));
+bool Module::has_attr(std::string_view key) const noexcept { return attrs_.has(key); }
+const AttrValue *Module::attr(std::string_view key) const noexcept { return attrs_.get(key); }
+Module &Module::set_attr(std::string_view key, AttrValue value) {
+  attrs_.set(key, std::move(value));
+  return *this;
+}
+Module &Module::set_attr(std::string_view key, bool value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Module &Module::set_attr(std::string_view key, std::int64_t value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Module &Module::set_attr(std::string_view key, std::uint64_t value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Module &Module::set_attr(std::string_view key, std::string_view value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Module &Module::set_attr(std::string_view key, const char *value) {
+  attrs_.set(key, AttrValue(value));
+  return *this;
+}
+Module &Module::remove_attr(std::string_view key) noexcept {
+  attrs_.remove(key);
+  return *this;
+}
+bool Module::bool_attr(std::string_view key, bool default_value) const noexcept {
+  return attrs_.bool_attr(key, default_value);
+}
+
+Module &Context::new_module(std::string_view name, ModuleOptions options) {
+  modules_.push_back(std::make_unique<Module>(std::string(name), std::move(options)));
   return *modules_.back();
 }
 

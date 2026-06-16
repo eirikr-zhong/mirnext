@@ -1513,7 +1513,7 @@ Value Block::convert(Value value, Type to) {
 }
 
 CallResult Block::call(const Function &callee, std::vector<Value> args) {
-  return append_call(callee.is_inline() ? Opcode::Inline : Opcode::Call, callee,
+  return append_call(callee.bool_attr(attr::Inline) ? Opcode::Inline : Opcode::Call, callee,
                      Operand::ref(callee), std::move(args));
 }
 

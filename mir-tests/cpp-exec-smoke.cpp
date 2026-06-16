@@ -2045,7 +2045,7 @@ static int check_binary_inline_call_read() {
   mirnext::Module &module = ctx.new_module("m_binary_inline_call");
   mirnext::Function &callee = module.new_function(
       "add1", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "arg"}},
-      {.inline_hint = true});
+      {.attrs = {{mirnext::attr::Inline, true}}});
   mirnext::Value callee_arg = expect(callee.arg("arg"), 416);
   callee.ret(callee_arg + callee.i64(1));
   callee.end();

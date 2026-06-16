@@ -1316,44 +1316,94 @@ static int check_call_result_api() {
 
 static int check_function_inline_tag_api() {
   mirnext::Context ctx;
-  mirnext::Module &module = ctx.new_module("inline_api");
+  std::string module_key = "module.enabled";
+  std::string module_string_key = "module.name";
+  mirnext::Module &module = ctx.new_module(
+      "inline_api",
+      {.attrs = {{std::string_view(module_key), true},
+                 {"module.count", std::int64_t(7)},
+                 {std::string_view(module_string_key), std::string("owned")}}});
+  module_key.assign("changed");
+  module_string_key.assign("changed");
+  if (!module.bool_attr("module.enabled")) return 435;
+  const mirnext::AttrValue *module_count = module.attr("module.count");
+  if (module_count == nullptr || module_count->kind() != mirnext::AttrValue::Kind::Int64
+      || module_count->int64_value() == nullptr || *module_count->int64_value() != 7) {
+    return 436;
+  }
+  const mirnext::AttrValue *module_name = module.attr("module.name");
+  if (module_name == nullptr || module_name->string_value() == nullptr
+      || *module_name->string_value() != "owned") {
+    return 437;
+  }
+  module.set_attr("module.u", std::uint64_t(9));
+  const mirnext::AttrValue *module_u = module.attr("module.u");
+  if (module_u == nullptr || module_u->uint64_value() == nullptr
+      || *module_u->uint64_value() != 9) {
+    return 438;
+  }
+  if (&module.set_attr("module.flag", true) != &module || !module.bool_attr("module.flag")) {
+    return 439;
+  }
+  if (&module.remove_attr("module.flag") != &module || module.has_attr("module.flag")) {
+    return 440;
+  }
+
+  std::string inline_key = std::string(mirnext::attr::Inline);
   mirnext::Function &inline_callee = module.new_function(
       "add1", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}},
-      {.inline_hint = true});
-  if (!inline_callee.is_inline()) return 435;
-  mirnext::Value inline_arg = expect(inline_callee.arg("x"), 436);
+      {.attrs = {{std::string_view(inline_key), true}}});
+  inline_key.assign("changed");
+  if (!inline_callee.bool_attr(mirnext::attr::Inline)) return 441;
+  if (!inline_callee.has_attr(mirnext::attr::Inline)) return 442;
+  mirnext::Value inline_arg = expect(inline_callee.arg("x"), 443);
   inline_callee.ret(inline_arg + inline_callee.i64(1));
   inline_callee.end();
 
   mirnext::Function &caller = module.new_function(
       "use_inline_option", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
-  mirnext::Value caller_arg = expect(caller.arg("x"), 437);
+  mirnext::Value caller_arg = expect(caller.arg("x"), 444);
   mirnext::CallResult inline_result = caller[inline_callee]({caller_arg});
   if (inline_result.size() != 1 || inline_result.value().type() != mirnext::Type::i64()) {
-    return 438;
+    return 445;
   }
   caller.ret(inline_result.value());
   caller.end();
 
   mirnext::Function &setter_callee = module.new_function(
       "setter_add", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
-  if (setter_callee.is_inline()) return 439;
-  if (&setter_callee.set_inline() != &setter_callee || !setter_callee.is_inline()) return 440;
-  mirnext::Value setter_arg = expect(setter_callee.arg("x"), 441);
+  if (setter_callee.bool_attr(mirnext::attr::Inline)) return 446;
+  if (&setter_callee.set_attr(mirnext::attr::Inline, true) != &setter_callee
+      || !setter_callee.bool_attr(mirnext::attr::Inline)) {
+    return 447;
+  }
+  setter_callee.set_attr("notes", "callee metadata");
+  const mirnext::AttrValue *notes = setter_callee.attr("notes");
+  if (notes == nullptr || notes->string_value() == nullptr
+      || *notes->string_value() != "callee metadata") {
+    return 448;
+  }
+  setter_callee.set_attr(mirnext::attr::Inline, std::int64_t(1));
+  if (setter_callee.bool_attr(mirnext::attr::Inline)) return 449;
+  setter_callee.set_attr(mirnext::attr::Inline, true);
+  mirnext::Value setter_arg = expect(setter_callee.arg("x"), 450);
   setter_callee.ret(setter_arg + setter_callee.i64(2));
   setter_callee.end();
 
   mirnext::Function &setter_caller = module.new_function(
       "use_inline_setter", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
-  mirnext::Value setter_caller_arg = expect(setter_caller.arg("x"), 442);
+  mirnext::Value setter_caller_arg = expect(setter_caller.arg("x"), 451);
   mirnext::Value setter_value = setter_caller[setter_callee]({setter_caller_arg}).value();
   setter_caller.ret(setter_value);
   setter_caller.end();
 
-  if (&setter_callee.set_inline(false) != &setter_callee || setter_callee.is_inline()) return 443;
+  if (&setter_callee.set_attr(mirnext::attr::Inline, false) != &setter_callee
+      || setter_callee.bool_attr(mirnext::attr::Inline)) {
+    return 452;
+  }
   mirnext::Function &plain_caller = module.new_function(
       "use_plain_after_disable", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
-  mirnext::Value plain_arg = expect(plain_caller.arg("x"), 444);
+  mirnext::Value plain_arg = expect(plain_caller.arg("x"), 453);
   mirnext::Value plain_value = plain_caller[setter_callee]({plain_arg}).value();
   plain_caller.ret(plain_value);
   plain_caller.end();
@@ -1362,8 +1412,8 @@ static int check_function_inline_tag_api() {
       "inline_pair",
       {mirnext::Type::i64(), mirnext::Type::i64()},
       {{mirnext::Type::i64(), "x"}},
-      {.inline_hint = true});
-  mirnext::Value multi_arg = expect(multi.arg("x"), 445);
+      {.attrs = {{mirnext::attr::Inline, true}}});
+  mirnext::Value multi_arg = expect(multi.arg("x"), 454);
   multi.ret({multi_arg, multi_arg + multi.i64(3)});
   multi.end();
 
@@ -1374,14 +1424,14 @@ static int check_function_inline_tag_api() {
   mirnext::CallResult pair = multi_caller[multi]({multi_caller.arg("x")});
   if (pair.size() != 2 || pair[0].type() != mirnext::Type::i64()
       || pair[1].type() != mirnext::Type::i64()) {
-    return 446;
+    return 455;
   }
   multi_caller.ret({pair[0], pair[1]});
   multi_caller.end();
 
   mirnext::Function &vararg = module.new_function(
       "inline_vararg", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "first"}},
-      {.vararg = true, .inline_hint = true});
+      {.vararg = true, .attrs = {{mirnext::attr::Inline, true}}});
   vararg.ret(vararg.arg("first"));
   vararg.end();
   mirnext::Function &vararg_caller = module.new_function("use_inline_vararg",
@@ -1393,44 +1443,46 @@ static int check_function_inline_tag_api() {
 
   mirnext::Function &signature = module.new_function(
       "inline_sig", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}},
-      {.linkage = mirnext::FunctionLinkage::Signature, .inline_hint = true});
-  if (!signature.is_inline()) return 447;
+      {.linkage = mirnext::FunctionLinkage::Signature,
+       .attrs = {{mirnext::attr::Inline, true}}});
+  if (!signature.bool_attr(mirnext::attr::Inline)) return 456;
   mirnext::Function &indirect_caller = module.new_function(
       "indirect_inline_sig", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
-  mirnext::Value callee_ref = expect(module.ref(inline_callee), 448);
+  mirnext::Value callee_ref = expect(module.ref(inline_callee), 457);
   mirnext::Value callee_ptr = indirect_caller.addr(callee_ref);
   mirnext::Value indirect_value
       = indirect_caller[signature](callee_ptr, {indirect_caller.arg("x")}).value();
   indirect_caller.ret(indirect_value);
   indirect_caller.end();
 
-  if (module.error()) return 449;
+  if (module.error()) return 458;
 
   std::ostringstream out;
   ctx.dump(out);
   const std::string text = out.str();
-  if (!contains(text, "inline @add1 @add1")) return 450;
-  if (!contains(text, "inline @setter_add @setter_add")) return 451;
-  if (!contains(text, "call @setter_add @setter_add")) return 452;
-  if (!contains(text, "inline @inline_pair @inline_pair")) return 453;
-  if (!contains(text, "inline @inline_vararg @inline_vararg")) return 454;
-  if (!contains(text, "jcall @inline_sig")) return 455;
+  if (!contains(text, "inline @add1 @add1")) return 459;
+  if (!contains(text, "inline @setter_add @setter_add")) return 460;
+  if (!contains(text, "call @setter_add @setter_add")) return 461;
+  if (!contains(text, "inline @inline_pair @inline_pair")) return 462;
+  if (!contains(text, "inline @inline_vararg @inline_vararg")) return 463;
+  if (!contains(text, "jcall @inline_sig")) return 464;
 
   mirnext::Result<std::vector<std::byte>> bytes = module.encode_binary();
-  if (!bytes) return 456;
+  if (!bytes) return 465;
 
   mirnext::Context error_ctx;
   mirnext::Module &bad_module = error_ctx.new_module("bad_inline_signature_call");
   mirnext::Function &bad_sig = bad_module.new_function(
       "bad_sig", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}},
-      {.linkage = mirnext::FunctionLinkage::Signature, .inline_hint = true});
+      {.linkage = mirnext::FunctionLinkage::Signature,
+       .attrs = {{mirnext::attr::Inline, true}}});
   mirnext::Function &bad_caller = bad_module.new_function(
       "bad_caller", {mirnext::Type::i64()}, {{mirnext::Type::i64(), "x"}});
   mirnext::Value bad = bad_caller[bad_sig]({bad_caller.arg("x")}).value();
-  if (!bad.is_valid() || !bad.is_poison()) return 457;
+  if (!bad.is_valid() || !bad.is_poison()) return 466;
   if (!bad_module.error()
       || bad_module.error()->code != mirnext::ErrorCode::InvalidOperand) {
-    return 458;
+    return 467;
   }
 
   return 0;

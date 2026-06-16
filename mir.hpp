@@ -17,7 +17,9 @@
 #include <string>
 #include <string_view>
 #include <type_traits>
+#include <unordered_map>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace mirnext {
@@ -88,6 +90,47 @@ struct MemoryOptions {
 struct LabelOptions {
   bool stack_scope = false;
 };
+
+class AttrValue {
+public:
+  enum class Kind { Bool, Int64, UInt64, String };
+
+  AttrValue(bool value) : value_(value) {}
+  AttrValue(std::int64_t value) : value_(value) {}
+  AttrValue(std::uint64_t value) : value_(value) {}
+  AttrValue(std::string value) : value_(std::move(value)) {}
+  AttrValue(std::string_view value) : value_(std::string(value)) {}
+  AttrValue(const char *value) : value_(std::string(value != nullptr ? value : "")) {}
+
+  Kind kind() const noexcept;
+  const bool *bool_value() const noexcept;
+  const std::int64_t *int64_value() const noexcept;
+  const std::uint64_t *uint64_value() const noexcept;
+  const std::string *string_value() const noexcept;
+
+private:
+  std::variant<bool, std::int64_t, std::uint64_t, std::string> value_;
+};
+
+class AttributeSet {
+public:
+  AttributeSet() = default;
+  AttributeSet(std::initializer_list<std::pair<std::string_view, AttrValue>> attrs);
+
+  bool has(std::string_view key) const noexcept;
+  const AttrValue *get(std::string_view key) const noexcept;
+  void set(std::string_view key, AttrValue value);
+  void remove(std::string_view key) noexcept;
+  bool bool_attr(std::string_view key, bool default_value = false) const noexcept;
+  const std::unordered_map<std::string, AttrValue> &entries() const noexcept;
+
+private:
+  std::unordered_map<std::string, AttrValue> attrs_;
+};
+
+namespace attr {
+inline constexpr std::string_view Inline = "inline";
+} // namespace attr
 
 class Block {
 public:
@@ -307,8 +350,16 @@ public:
   bool is_import() const noexcept;
   bool is_signature() const noexcept;
   bool is_vararg() const noexcept;
-  bool is_inline() const noexcept;
-  Function &set_inline(bool enabled = true) noexcept;
+  bool has_attr(std::string_view key) const noexcept;
+  const AttrValue *attr(std::string_view key) const noexcept;
+  Function &set_attr(std::string_view key, AttrValue value);
+  Function &set_attr(std::string_view key, bool value);
+  Function &set_attr(std::string_view key, std::int64_t value);
+  Function &set_attr(std::string_view key, std::uint64_t value);
+  Function &set_attr(std::string_view key, std::string_view value);
+  Function &set_attr(std::string_view key, const char *value);
+  Function &remove_attr(std::string_view key) noexcept;
+  bool bool_attr(std::string_view key, bool default_value = false) const noexcept;
   const std::vector<Register> &arguments() const noexcept;
   Value arg(std::string_view name);
   const std::vector<Register> &local_registers() const noexcept;
@@ -335,7 +386,7 @@ private:
   std::vector<Type> return_types_;
   Linkage linkage_ = Linkage::Local;
   bool vararg_ = false;
-  bool inline_hint_ = false;
+  AttributeSet attrs_;
   std::vector<Register> arguments_;
   std::vector<Register> local_registers_;
   mutable std::vector<std::unique_ptr<Instruction>> flattened_instructions_;
@@ -349,12 +400,16 @@ enum class FunctionLinkage { Local, Import, Signature };
 struct FunctionOptions {
   FunctionLinkage linkage = FunctionLinkage::Local;
   bool vararg = false;
-  bool inline_hint = false;
+  AttributeSet attrs = {};
+};
+
+struct ModuleOptions {
+  AttributeSet attrs = {};
 };
 
 class Module final : public Block {
 public:
-  explicit Module(std::string name);
+  explicit Module(std::string name, ModuleOptions options = {});
 
   Module(const Module &) = delete;
   Module &operator=(const Module &) = delete;
@@ -368,6 +423,16 @@ public:
                          FunctionOptions options = {});
   Function &new_vararg_function(std::string_view name, std::vector<Type> return_types,
                                 std::vector<Function::Parameter> parameters);
+  bool has_attr(std::string_view key) const noexcept;
+  const AttrValue *attr(std::string_view key) const noexcept;
+  Module &set_attr(std::string_view key, AttrValue value);
+  Module &set_attr(std::string_view key, bool value);
+  Module &set_attr(std::string_view key, std::int64_t value);
+  Module &set_attr(std::string_view key, std::uint64_t value);
+  Module &set_attr(std::string_view key, std::string_view value);
+  Module &set_attr(std::string_view key, const char *value);
+  Module &remove_attr(std::string_view key) noexcept;
+  bool bool_attr(std::string_view key, bool default_value = false) const noexcept;
   Data &bss(std::string_view name, std::size_t size);
   Data &data(std::string_view name, Type element_type, std::vector<std::int64_t> values);
   Data &data(std::string_view name, Type element_type, std::vector<std::uint64_t> values);
@@ -390,6 +455,7 @@ private:
   void fail(Error error);
 
   std::string name_;
+  AttributeSet attrs_;
   std::optional<Error> error_;
   std::vector<std::unique_ptr<Data>> data_items_;
   std::vector<std::unique_ptr<Function>> functions_;
@@ -405,7 +471,7 @@ public:
   Context(Context &&) = delete;
   Context &operator=(Context &&) = delete;
 
-  Module &new_module(std::string_view name);
+  Module &new_module(std::string_view name, ModuleOptions options = {});
   const std::vector<std::unique_ptr<Module>> &modules() const noexcept;
   void dump(std::ostream &out) const;
 
