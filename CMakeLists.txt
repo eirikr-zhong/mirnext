@@ -67,15 +67,23 @@ endfunction()
 
 function(mir_target_cxx_options target)
   if(MSVC)
+    set(rtti_option /GR-)
+    if(ARGV1 STREQUAL "WITH_RTTI")
+      set(rtti_option /GR)
+    endif()
     target_compile_definitions(${target} PRIVATE _HAS_EXCEPTIONS=0)
     target_compile_options(${target} PRIVATE
       $<$<COMPILE_LANGUAGE:CXX>:/EHs->
       $<$<COMPILE_LANGUAGE:CXX>:/EHc->
-      $<$<COMPILE_LANGUAGE:CXX>:/GR->)
+      $<$<COMPILE_LANGUAGE:CXX>:${rtti_option}>)
   else()
+    set(rtti_option -fno-rtti)
+    if(ARGV1 STREQUAL "WITH_RTTI")
+      set(rtti_option -frtti)
+    endif()
     target_compile_options(${target} PRIVATE
       $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions>
-      $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+      $<$<COMPILE_LANGUAGE:CXX>:${rtti_option}>)
   endif()
 endfunction()
 
@@ -388,7 +396,9 @@ if(BUILD_TESTING)
     else()
       target_link_libraries(mirnext_text_test_${linkage} PRIVATE MIRNext::SerializationShared doctest::doctest)
     endif()
-    mir_target_cxx_options(mirnext_text_test_${linkage})
+    # libstdc++ inspects dynamic facet types while installing the custom locale.
+    # Only this test executable needs RTTI; the product remains RTTI-free.
+    mir_target_cxx_options(mirnext_text_test_${linkage} WITH_RTTI)
     target_compile_definitions(mirnext_text_test_${linkage} PRIVATE MIRNEXT_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
     add_test(NAME mirnext-unified-text-${linkage} COMMAND mirnext_text_test_${linkage})
     add_executable(mirnext_binary_test_${linkage} tests/Serialization/Binary.cpp)

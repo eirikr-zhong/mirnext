@@ -158,13 +158,15 @@ private:
           return Operand(std::copysign(value, signed_value ? T{-1} : T{1}));
         }
         T value{};
-        if constexpr (std::is_same_v<T, long double>) {
-          // libc++ does not provide long-double from_chars on every supported platform.
-          std::istringstream stream(spelling); stream.imbue(std::locale::classic()); stream >> std::noskipws >> value;
-          if (stream.fail() || stream.peek() != std::char_traits<char>::eof()) return error("invalid floating literal", line, column);
-        } else {
+        if constexpr (!std::is_same_v<T, long double>
+                      && requires { std::from_chars(text.data(), text.data() + text.size(), value); }) {
           auto [last, status] = std::from_chars(text.data(), text.data() + text.size(), value);
           if (status != std::errc{} || last != text.data() + text.size()) return error("invalid or out-of-range floating literal", line, column);
+        } else {
+          // Older libc++ also lacks float/double from_chars. Keep the fallback
+          // independent of both the global C++ locale and the process C locale.
+          std::istringstream stream(spelling); stream.imbue(std::locale::classic()); stream >> std::noskipws >> value;
+          if (stream.fail() || stream.peek() != std::char_traits<char>::eof()) return error("invalid floating literal", line, column);
         }
         return Operand(value);
       };

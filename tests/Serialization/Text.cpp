@@ -10,6 +10,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <locale>
 using namespace mirnext;
 using namespace mirnext::ir;
 using namespace mirnext::serialization;
@@ -64,10 +65,16 @@ TEST_CASE("native text roundtrips each public opcode with validated operands") {
 TEST_CASE("native floating parsing ignores locale and preserves canonical nonfinite values") {
   struct CommaLocale : std::numpunct<char> { char do_decimal_point() const override { return ','; } };
   auto original = std::locale(); std::locale::global(std::locale(std::locale::classic(), new CommaLocale));
-  auto parsed = parse_text("m:module\nf:func d\nret 1.25\nendfunc\ng:func ld\nret 2.5L\nendfunc\nendmodule");
+  CHECK(std::use_facet<std::numpunct<char>>(std::locale()).decimal_point() == ',');
+  auto parsed = parse_text("m:module\nf:func d\nret 1.25\nendfunc\ng:func ld\nret 2.5L\nendfunc\nh:func f\nret 3.75f\nendfunc\nendmodule");
   std::locale::global(original); REQUIRE(parsed); roundtrip(**parsed);
   auto &f = *(*parsed)->modules().begin()->functions().begin();
   CHECK(*f.blocks().begin()->instructions().begin()->operands()[0].get<double>() == 1.25);
+  auto functions = (*parsed)->modules().begin()->functions();
+  auto it = functions.begin(); ++it;
+  CHECK(*it->blocks().begin()->instructions().begin()->operands()[0].get<long double>() == 2.5L);
+  ++it;
+  CHECK(*it->blocks().begin()->instructions().begin()->operands()[0].get<float>() == 3.75f);
   for (auto type : {Type(Type::Kind::F32), Type(Type::Kind::F64), Type(Type::Kind::LongDouble)}) {
     for (bool negative : {false, true}) for (bool nan : {false, true}) {
       Context context; auto module = context.create_module("m"); REQUIRE(module);
