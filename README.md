@@ -8,14 +8,13 @@ Hardware-bound registers have no memory address. Copy their value to an ordinary
 local before calling `IRBuilder::address_of`; writes through that address update
 the copy.
 
-The MIR core is being migrated to one C++ object model throughout IR, analysis,
-optimization, code generation and execution. C2MIR and surrounding tools are
-outside this phase. The final target removes the old implementation and the
-temporary C reference used for migration tests.
+IR construction, analysis, optimization, machine code generation and execution
+share one owning C++ object model. Supported native targets are Linux and macOS
+on x86_64 and aarch64. Windows is currently deferred.
 
-## Current implementation
+## Architecture
 
-The replacement libraries live in `include/mirnext` and `lib`:
+The library is organized under `include/mirnext` and `lib`:
 
 | Layer | Responsibilities |
 | --- | --- |
@@ -24,14 +23,14 @@ The replacement libraries live in `include/mirnext` and `lib`:
 | Transforms | Module/function pass managers, O0–O3 optimization, internal SSA, pass observation and independently owned optimized programs |
 | Target | Native target facts, data layout, register information, addressing and ABI rules |
 | CodeGen | Owning machine IR, lowering, allocation, spill rewriting, post-allocation optimization, frame formation and compiled artifacts |
-| Serialization | Native MIR text and binary readers/writers, independent of the C reader |
+| Serialization | MIR text and binary readers/writers |
 | Execution | Loaded programs, symbols, data initialization, interpreter, code publication, typed calls and eager/lazy/BBV JIT |
 
 AArch64 has a complete owning machine-code pipeline connected to the interpreter,
 linker and execution session, including eager/lazy JIT and native ABI adapters.
 Linux and macOS retain their separate ABI rules.
 
-The x86_64 SysV/Windows port implements instruction selection,
+The x86_64 backend implements instruction selection,
 ABI lowering, two-address legalization, allocation, spill rewriting and
 post-allocation optimization using the new machine objects. Frame plans preserve
 variadic areas and full vector saves, with explicit no-red-zone support and
@@ -40,10 +39,6 @@ include branch layout, switch tables, constant pools and near-call patching.
 The same owning session and IR-built host adapters now connect the x86 pipeline
 to eager/lazy JIT and native interpreted callbacks. Immutable x86 lazy gates share
 a resolver that preserves integer, XMM and x87 state across cold compilation.
-Native x86 phase, byte, ABI and session comparisons require the corresponding CI
-hosts and are pending acceptance; arm64 tests do not establish x86 parity.
-Windows native calls retain the original single-result restriction; interpreted
-calls support multiple results.
 
 BBV now has owning machine preparation, stable block/version identities,
 property specialization and independently owned block bytes with typed successor
@@ -57,57 +52,77 @@ block gates, and expression initializers use the same typed calls and symbol
 image. Failed cold compilation reports diagnostics and leaves entries retryable,
 including raw variadic entries and nested host callbacks. Block observers and
 per-function statistics expose demand-driven compilation; there is no fallback
-to whole-function compilation or the old engine. `ExecutionOptions::select_engine`
+to whole-function compilation. `ExecutionOptions::select_engine`
 chooses interpretation, eager JIT, lazy JIT or BBV per definition in one loaded
 program. Engines share symbols, global data and typed function handles.
-The transitional C++ runtime, compatibility views and duplicate build targets
-have been removed. The product uses only the owning layers; the original C
-engine is an optional test oracle or a dependency of explicitly enabled tools.
-The architecture dependency guard checks the owning layers and rejects
-reintroducing the retired transitional sources.
-
-See [the architecture and migration record](docs/cpp-architecture.md) for stage
-contracts, behavioral comparisons, known C defects and validation details.
-The [native platform acceptance gate](docs/native-acceptance.md) distinguishes
-local execution, build-only checks and the CI evidence still needed to retire
-the temporary C oracle.
-The [IR reference](MIR.md), [target development guide](HOW-TO-PORT-MIR.md)
-and [code-memory service guide](CUSTOM-ALLOCATORS.md) describe the C++ interfaces.
+Public examples cover
+[custom code memory](examples/custom-code-memory.cpp),
+[machine IR](examples/native-machine-ir.cpp) and
+[compilation stages](examples/native-compile.cpp).
 
 ## Build
 
-A C++20 compiler and CMake are required. The replacement libraries build without
-a C compiler or C reference engine:
+A C++20 compiler and CMake 3.14 or newer are required. Script integration checks
+are enabled with tests by default and require Python 3.8 or newer. Optional
+platform acceptance auditing also requires CTest 3.21 or newer for JUnit output:
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMIRNEXT_BUILD_C_REFERENCE=OFF
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
 ctest --test-dir build --output-on-failure --parallel 8
 ```
 
-Use a separate build directory with `MIRNEXT_BUILD_C_REFERENCE=ON` to run the
-temporary independent C comparisons. These require a C compiler.
-The original MIR file corpus also executes through the C++ interpreter and JIT
-when the C reference is off.
+Compilation uses two jobs; test parallelism is independent. MIR language fixtures
+in `tests/Fixtures` run through the C++ interpreter and JIT.
 
 Useful options:
 
 | Option | Purpose |
 | --- | --- |
+| `BUILD_SHARED_LIBS=ON` | Build a shared library; defaults to a static library |
 | `BUILD_TESTING=OFF` | Build without test executables |
+| `MIRNEXT_BUILD_SCRIPT_TESTS=OFF` | Omit Python integration checks; C++ tests remain available without Python |
 | `MIRNEXT_BUILD_EXAMPLES=OFF` | Build without examples |
 | `MIRNEXT_BUILD_BENCHMARKS=ON` | Build native architecture microbenchmarks |
 | `MIRNEXT_BUILD_UTILITIES=OFF` | Omit the native format converters and binary runner; enabled by default |
-| `MIRNEXT_BUILD_C_REFERENCE=ON` | Enable the temporary C test oracle; off by default, requires tests and a C compiler |
+| `MIRNEXT_ENABLE_ASAN=ON` | Compile and link with AddressSanitizer; disabled by default |
+| `MIRNEXT_ENABLE_NATIVE_EVIDENCE=ON` | Build source-stamped acceptance tests and register audit checks; disabled by default, enabled in CI |
 | `MIRNEXT_TEST_EXPECTED_TARGET` | Require a native test ABI instead of accepting the detected host target |
-| `MIRNEXT_BUILD_TOOLS=ON` | Build the original C2MIR tool; off by default, outside the core migration |
 
-The native `m2b`, `b2m`, `b2ctab` and `mir-bin-run` commands use the same owning
+The native `m2b`, `b2m`, `b2cpp` and `mir-bin-run` commands use the same owning
 C++ format and execution layers. See [command usage](tools/README.md) for binary
-execution, host library loading and embedding a program without the C engine.
-The root GNU make entry points also build/test/install these native layers;
-see [GNU make usage](INSTALL.md#gnu-make-entry-points). C2MIR remains an explicit
-separate build.
+execution, host library loading and embedding a program.
+
+For a library/commands build without tests or examples, configure
+with `-DBUILD_TESTING=OFF -DMIRNEXT_BUILD_EXAMPLES=OFF`.
+
+Select build features through `-D` options without editing build files. For example,
+to build tests with AddressSanitizer:
+
+```sh
+cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
+  -DBUILD_TESTING=ON -DMIRNEXT_BUILD_EXAMPLES=OFF -DMIRNEXT_ENABLE_ASAN=ON
+cmake --build build-asan --parallel 2
+ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan --output-on-failure --parallel 4
+```
+
+`CMAKE_BUILD_TYPE` and the standard CMake compiler/toolchain and installation
+variables select the configuration, compiler, toolchain and install prefix.
+Optimization and execution behavior are selected through the C++ API.
+CMake declares build targets, dependencies, compiler options, installation and
+test commands. Source auditing, report validation and command behavior checks
+are implemented in standalone Python scripts. Native evidence requires script
+tests to be enabled. After building with `MIRNEXT_ENABLE_NATIVE_EVIDENCE=ON`, run
+its audit independently (use the actual build configuration):
+
+```sh
+ctest --test-dir build --output-on-failure --parallel 8 --output-junit build/native-tests.xml
+python3 tests/Platform/AuditAcceptance.py --source . --platform native \
+  --configuration Release --linkage static --output build/native-evidence-Release.json build
+```
+
+Use `--linkage shared` for a shared build. To audit both linkages together, omit
+`--linkage` and pass both build directories.
 
 ## Build and execute IR
 
@@ -212,7 +227,7 @@ into the public binary protocol.
 
 ## CMake integration
 
-Install the replacement libraries:
+Install the library:
 
 ```sh
 cmake --install build --prefix /your/install/prefix
@@ -226,19 +241,18 @@ project(MyJIT LANGUAGES CXX)
 find_package(MIRNext CONFIG REQUIRED)
 add_executable(my_jit main.cpp)
 target_compile_features(my_jit PRIVATE cxx_std_20)
-target_link_libraries(my_jit PRIVATE MIRNext::Execution MIRNext::Transforms)
+target_link_libraries(my_jit PRIVATE MIRNext::MIRNext)
 ```
 
 Configure the consumer with `CMAKE_PREFIX_PATH` pointing to the installation.
-Available targets include `IR`, `Analysis`, `Transforms`, `Target`, `CodeGen`,
-`Serialization` and `Execution` in the `MIRNext::` namespace.
-Each layer has a corresponding `Shared` target. Link `MIRNext::ExecutionShared`
-to use the interpreter, optimizer and JIT through shared libraries; its transitive
-dependencies also use shared libraries. Static and shared targets use the same
-compiled objects. CMake rejects mixing the two variants in one dependency graph
-because that would duplicate IR and runtime state.
+The single `MIRNext::MIRNext` target provides IR construction, optimization,
+serialization, interpretation and JIT execution. Configure MIRNext with
+`-DBUILD_SHARED_LIBS=ON` for a shared library, or `OFF` (the default) for a static
+library. To build and test both, use separate build and installation directories.
 
 ## License
 
-MIRNext is licensed under the [MIT License](LICENSE). Project attribution and
-third-party license information are recorded in [NOTICE](NOTICE).
+MIRNext is licensed under the [MIT License](LICENSE), retaining the original MIR
+copyright and adding attribution for MIRNext contributors. Project attribution
+is recorded in [NOTICE](NOTICE). Both files are included in installations under
+`share/licenses/MIRNext` with the default CMake data directory.

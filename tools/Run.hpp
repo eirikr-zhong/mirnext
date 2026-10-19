@@ -2,5 +2,5 @@
 #pragma once
 #include "mirnext/Execution/Session.hpp"
 namespace mirnext::tools {
-Result<int> run_program(std::span<const std::byte>,int argc,char **argv,char **environment);
+Result<int> run_program (std::span<const std::byte>, int argc, char **argv, char **environment);
 }

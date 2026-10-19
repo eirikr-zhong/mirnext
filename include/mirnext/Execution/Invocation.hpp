@@ -6,15 +6,18 @@ namespace mirnext::execution {
 // collects the first runtime error, including interpreted callbacks. Nested
 // scopes restore their parent. Checked session calls create one automatically.
 class ExecutionInvocation {
-public:
-  ExecutionInvocation();
-  ~ExecutionInvocation();
-  ExecutionInvocation(const ExecutionInvocation &) = delete;
-  ExecutionInvocation &operator=(const ExecutionInvocation &) = delete;
-  Result<void> status() const;
-private:
+ public:
+  ExecutionInvocation ();
+  ~ExecutionInvocation ();
+  ExecutionInvocation (const ExecutionInvocation &) = delete;
+  ExecutionInvocation &operator= (const ExecutionInvocation &) = delete;
+  Result<void> status () const;
+
+ private:
   std::optional<Error> error_;
   std::optional<Error> *previous_;
 };
-namespace detail { void report_execution_error(Error); }
+namespace detail {
+void report_execution_error (Error);
 }
+}  // namespace mirnext::execution

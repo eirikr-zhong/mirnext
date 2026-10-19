@@ -12,10 +12,11 @@ struct BlockCompilationSnapshot {
 struct BlockCompilationOptions {
   // Per-function executable arena budget, rounded to native pages. Exhaustion
   // returns a diagnostic; there is no unbounded mapping or engine fallback.
-  std::size_t code_capacity = 1024*1024;
-  std::function<Result<void>(const BlockCompilationSnapshot &)> observer;
+  std::size_t code_capacity = 1024 * 1024;
+  std::function<Result<void> (const BlockCompilationSnapshot &)> observer;
 };
 struct BlockCompilationStatistics {
-  std::size_t blocks = 0,compiled_blocks = 0,compilation_attempts = 0,code_batches = 0,code_bytes = 0;
+  std::size_t blocks = 0, compiled_blocks = 0, compilation_attempts = 0, code_batches = 0,
+              code_bytes = 0;
 };
-}
+}  // namespace mirnext::execution

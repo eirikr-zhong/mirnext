@@ -19,12 +19,13 @@ struct X86InstructionPattern {
   std::string_view constraints, encoding;
   MachineOpcode opcode;
 };
-std::span<const X86InstructionPattern> x86_instruction_patterns();
+std::span<const X86InstructionPattern> x86_instruction_patterns ();
 // Target-independent selection does not enable cross-target code generation.
 // Relocations remain symbolic and only match a full-width immediate.
-std::optional<X86InstructionPattern> x86_instruction_pattern(MachineOpcode,
-  std::span<const MachineOperand>, X86PatternOptions = {});
-bool x86_instruction_ok(MachineOpcode, std::span<const MachineOperand>);
-bool x86_inout_opcode(ir::Opcode);
-bool x86_operands_equal(const MachineOperand &, const MachineOperand &);
-}
+std::optional<X86InstructionPattern> x86_instruction_pattern (MachineOpcode,
+                                                              std::span<const MachineOperand>,
+                                                              X86PatternOptions = {});
+bool x86_instruction_ok (MachineOpcode, std::span<const MachineOperand>);
+bool x86_inout_opcode (ir::Opcode);
+bool x86_operands_equal (const MachineOperand &, const MachineOperand &);
+}  // namespace mirnext::codegen

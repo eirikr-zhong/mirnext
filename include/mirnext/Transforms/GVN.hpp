@@ -24,11 +24,11 @@ struct GVNResult {
 struct GVNAnalysis {
   using Result = GVNResult;
   static constexpr analysis::Dependency dependencies = analysis::Dependency::All;
-  static mirnext::Result<Result> run(const ir::Function &);
+  static mirnext::Result<Result> run (const ir::Function &);
 };
 class GVNPass final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "gvn"; }
-  Result<PassResult> run(ir::Function &, analysis::FunctionAnalysisManager &) override;
+ public:
+  std::string_view name () const noexcept override { return "gvn"; }
+  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
 };
-}
+}  // namespace mirnext::transforms

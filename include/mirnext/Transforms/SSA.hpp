@@ -5,21 +5,22 @@
 
 namespace mirnext::transforms {
 class BuildSSAPass final : public FunctionPass {
-public:
-  explicit BuildSSAPass(bool rename = true) : rename_(rename) {}
-  std::string_view name() const noexcept override { return "build-ssa"; }
-  Result<PassResult> run(ir::Function &, analysis::FunctionAnalysisManager &) override;
-private:
+ public:
+  explicit BuildSSAPass (bool rename = true) : rename_ (rename) {}
+  std::string_view name () const noexcept override { return "build-ssa"; }
+  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+
+ private:
   bool rename_;
 };
 class ConventionalSSAPass final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "conventional-ssa"; }
-  Result<PassResult> run(ir::Function &, analysis::FunctionAnalysisManager &) override;
+ public:
+  std::string_view name () const noexcept override { return "conventional-ssa"; }
+  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
 };
 class DestroySSAPass final : public FunctionPass {
-public:
-  std::string_view name() const noexcept override { return "destroy-ssa"; }
-  Result<PassResult> run(ir::Function &, analysis::FunctionAnalysisManager &) override;
+ public:
+  std::string_view name () const noexcept override { return "destroy-ssa"; }
+  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
 };
-} // namespace mirnext::transforms
+}  // namespace mirnext::transforms

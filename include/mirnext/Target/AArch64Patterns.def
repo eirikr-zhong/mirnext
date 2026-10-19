@@ -2,129 +2,136 @@
    Copyright (C) 2020-2024 Vladimir Makarov <vmakarov.gcc@gmail.com>.
    Licensed under the MIT License. */
 MIRNEXT_A64_TABLE = {
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r h31", "91000000:fffffc00 rd0 hn1f"}, /* mov Rd,SP */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "h31 r", "91000000:fffffc00 hd1f rn1"}, /* mov SP,Rn */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r r", "aa0003e0:ffe0ffe0 rd0 rm1"},    /* mov Rd,Rm */
+  {MIRNEXT_A64_OPCODE (Mov), "r h31", "91000000:fffffc00 rd0 hn1f"}, /* mov Rd,SP */
+  {MIRNEXT_A64_OPCODE (Mov), "h31 r", "91000000:fffffc00 hd1f rn1"}, /* mov SP,Rn */
+  {MIRNEXT_A64_OPCODE (Mov), "r r", "aa0003e0:ffe0ffe0 rd0 rm1"},    /* mov Rd,Rm */
 
   // ??? patterns to extend 32-bit index register
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r m3", "f8600800:ffe00c00 rd0 m"}, /* ldr Rd,[Rn,Rm{,#3}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "m3 r", "f8200800:ffe00c00 rd1 m"}, /* str Rd,[Rn,Rm{,#3}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r M3", "f9400000:ffc00000 rd0 M"}, /* ldr Rd,[Rn,{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "M3 r", "f9000000:ffc00000 rd1 M"}, /* str Rd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r m3", "f8600800:ffe00c00 rd0 m"}, /* ldr Rd,[Rn,Rm{,#3}] */
+  {MIRNEXT_A64_OPCODE (Mov), "m3 r", "f8200800:ffe00c00 rd1 m"}, /* str Rd,[Rn,Rm{,#3}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r M3", "f9400000:ffc00000 rd0 M"}, /* ldr Rd,[Rn,{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "M3 r", "f9000000:ffc00000 rd1 M"}, /* str Rd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r mu2", "b8600800:ffe00c00 rd0 m"}, /* ldr Wd,[Rn,Rm{,#2}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "m2 r", "b8200800:ffe00c00 rd1 m"},  /* str Wd,[Rn,Rm{,#2}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Mu2", "b9400000:ffc00000 rd0 M"}, /* ldr Wd,[Rn{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "M2 r", "b9000000:ffc00000 rd1 M"},  /* str Wd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r mu2", "b8600800:ffe00c00 rd0 m"}, /* ldr Wd,[Rn,Rm{,#2}] */
+  {MIRNEXT_A64_OPCODE (Mov), "m2 r", "b8200800:ffe00c00 rd1 m"},  /* str Wd,[Rn,Rm{,#2}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r Mu2", "b9400000:ffc00000 rd0 M"}, /* ldr Wd,[Rn{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "M2 r", "b9000000:ffc00000 rd1 M"},  /* str Wd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r ms2", "b8a00800:ffe00c00 rd0 m"}, /* ldrsw Rd,[Rn,Rm{,#2}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Ms2", "b9800000:ffc00000 rd0 M"}, /* ldrsw Rd,[Rn{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r ms2", "b8a00800:ffe00c00 rd0 m"}, /* ldrsw Rd,[Rn,Rm{,#2}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r Ms2", "b9800000:ffc00000 rd0 M"}, /* ldrsw Rd,[Rn{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r mu1", "78600800:ffe00c00 rd0 m"}, /* ldrh Wd,[Rn,Rm{,#1}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "m1 r", "78200800:ffe00c00 rd1 m"},  /* strh Wd,[Rn,Rm{,#1}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Mu1", "79400000:ffc00000 rd0 M"}, /* ldrh Wd,[Rn{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "M1 r", "79000000:ffc00000 rd1 M"},  /* strh Wd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r mu1", "78600800:ffe00c00 rd0 m"}, /* ldrh Wd,[Rn,Rm{,#1}] */
+  {MIRNEXT_A64_OPCODE (Mov), "m1 r", "78200800:ffe00c00 rd1 m"},  /* strh Wd,[Rn,Rm{,#1}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r Mu1", "79400000:ffc00000 rd0 M"}, /* ldrh Wd,[Rn{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "M1 r", "79000000:ffc00000 rd1 M"},  /* strh Wd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r ms1", "78a00800:ffe00c00 rd0 m"}, /* ldrsh Wd,[Rn,Rm{,#2}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Ms1", "79800000:ffc00000 rd0 M"}, /* ldrsh Wd,[Rn{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r ms1", "78a00800:ffe00c00 rd0 m"}, /* ldrsh Wd,[Rn,Rm{,#2}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r Ms1", "79800000:ffc00000 rd0 M"}, /* ldrsh Wd,[Rn{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r mu0", "38600800:ffe00c00 rd0 m"}, /* ldrb Wd,[Rn,Rm{,#1}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "m0 r", "38200800:ffe00c00 rd1 m"},  /* strb Wd,[Rn,Rm{,#1}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Mu0", "39400000:ffc00000 rd0 M"}, /* ldrb Wd,[Rn{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "M0 r", "39000000:ffc00000 rd1 M"},  /* strb Wd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r mu0", "38600800:ffe00c00 rd0 m"}, /* ldrb Wd,[Rn,Rm{,#1}] */
+  {MIRNEXT_A64_OPCODE (Mov), "m0 r", "38200800:ffe00c00 rd1 m"},  /* strb Wd,[Rn,Rm{,#1}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r Mu0", "39400000:ffc00000 rd0 M"}, /* ldrb Wd,[Rn{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "M0 r", "39000000:ffc00000 rd1 M"},  /* strb Wd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r ms0", "38a00800:ffa00c00 rd0 m"}, /* ldrsb Rd,[Rn,Rm{,#1}] */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Ms0", "39800000:ffc00000 rd0 M"}, /* ldrsb Rd,[Rn{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r ms0", "38a00800:ffa00c00 rd0 m"}, /* ldrsb Rd,[Rn,Rm{,#1}] */
+  {MIRNEXT_A64_OPCODE (Mov), "r Ms0", "39800000:ffc00000 rd0 M"}, /* ldrsb Rd,[Rn{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Z0", "d2800000:ff800000 rd0 Z0"}, /* movz Rd, imm */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r N0", "92800000:ff800000 rd0 N0"}, /* movn Rd, imm */
+  {MIRNEXT_A64_OPCODE (Mov), "r Z0", "d2800000:ff800000 rd0 Z0"}, /* movz Rd, imm */
+  {MIRNEXT_A64_OPCODE (Mov), "r N0", "92800000:ff800000 rd0 N0"}, /* movn Rd, imm */
   /* movn Rd, imm0, sh0; movk Rd, imm1, sh1: */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Z1", "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1"},
+  {MIRNEXT_A64_OPCODE (Mov), "r Z1", "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1"},
   /* movn imm0, sh0; movk Rd, imm1, sh1:  */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r N1", "92800000:ff800000 rd0 N0; f2800000:ff800000 rd0 N1"},
+  {MIRNEXT_A64_OPCODE (Mov), "r N1", "92800000:ff800000 rd0 N0; f2800000:ff800000 rd0 N1"},
   /* movz Rd, imm0, sh0; movk Rd, imm1, sh1; movk Rd, imm3, sh3: */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Z2", "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1; f2800000:ff800000 rd0 Z2"},
+  {MIRNEXT_A64_OPCODE (Mov), "r Z2",
+   "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1; f2800000:ff800000 rd0 Z2"},
   /* movn Rd, imm0, sh0; movk Rd, imm1, sh1; movk Rd, imm3, sh3: */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r N2", "92800000:ff800000 rd0 N0; f2800000:ff800000 rd0 N1; f2800000:ff800000 rd0 N2"},
+  {MIRNEXT_A64_OPCODE (Mov), "r N2",
+   "92800000:ff800000 rd0 N0; f2800000:ff800000 rd0 N1; f2800000:ff800000 rd0 N2"},
   /* movz Rd, imm0, sh0; movk Rd, imm1, sh1; movk Rd, imm2, sh2; movk Rd, imm3, sh3: */
-  {MIRNEXT_A64_OPCODE(Mov, MOV), "r Z3",
+  {MIRNEXT_A64_OPCODE (Mov), "r Z3",
    "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1; f2800000:ff800000 rd0 Z2;"
    "f2800000:ff800000 rd0 Z3"},
 
-  {MIRNEXT_A64_OPCODE(FMov, FMOV), "r r", "1e204000:fffffc00 vd0 vn1"}, /* fmov Sd,Sn */
-  {MIRNEXT_A64_OPCODE(FMov, FMOV), "r mf", "bc600800:ff600c00 vd0 m"},  /* ldr Sd,[Rn,Rm{,#2}] */
-  {MIRNEXT_A64_OPCODE(FMov, FMOV), "mf r", "bc200800:ff600c00 vd1 m"},  /* str Sd,[Rn,Rm{,#2}] */
-  {MIRNEXT_A64_OPCODE(FMov, FMOV), "r Mf", "bd400000:ffc00000 vd0 M"},  /* ldr Sd,[Rn,{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(FMov, FMOV), "Mf r", "bd000000:ffc00000 vd1 M"},  /* str Sd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (FMov), "r r", "1e204000:fffffc00 vd0 vn1"}, /* fmov Sd,Sn */
+  {MIRNEXT_A64_OPCODE (FMov), "r mf", "bc600800:ff600c00 vd0 m"},  /* ldr Sd,[Rn,Rm{,#2}] */
+  {MIRNEXT_A64_OPCODE (FMov), "mf r", "bc200800:ff600c00 vd1 m"},  /* str Sd,[Rn,Rm{,#2}] */
+  {MIRNEXT_A64_OPCODE (FMov), "r Mf", "bd400000:ffc00000 vd0 M"},  /* ldr Sd,[Rn,{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (FMov), "Mf r", "bd000000:ffc00000 vd1 M"},  /* str Sd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(DMov, DMOV), "r r", "1e604000:fffffc00 vd0 vn1"}, /* fmov Dd,Dn */
-  {MIRNEXT_A64_OPCODE(DMov, DMOV), "r md", "fc600800:ff600c00 vd0 m"},  /* ldr Dd,[Rn,Rm{,#3}] */
-  {MIRNEXT_A64_OPCODE(DMov, DMOV), "md r", "fc200800:ff600c00 vd1 m"},  /* str Dd,[Rn,Rm{,#3}] */
-  {MIRNEXT_A64_OPCODE(DMov, DMOV), "r Md", "fd400000:ffc00000 vd0 M"},  /* ldr Dd,[Rn,{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(DMov, DMOV), "Md r", "fd000000:ffc00000 vd1 M"},  /* str Dd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (DMov), "r r", "1e604000:fffffc00 vd0 vn1"}, /* fmov Dd,Dn */
+  {MIRNEXT_A64_OPCODE (DMov), "r md", "fc600800:ff600c00 vd0 m"},  /* ldr Dd,[Rn,Rm{,#3}] */
+  {MIRNEXT_A64_OPCODE (DMov), "md r", "fc200800:ff600c00 vd1 m"},  /* str Dd,[Rn,Rm{,#3}] */
+  {MIRNEXT_A64_OPCODE (DMov), "r Md", "fd400000:ffc00000 vd0 M"},  /* ldr Dd,[Rn,{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (DMov), "Md r", "fd000000:ffc00000 vd1 M"},  /* str Dd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(LDMov, LDMOV), "r r", "4ea01c00:ffe0fc00 vd0 vm1 vn1"}, /* orr Qd.16b,Qm.16b,Qn.16b */
-  {MIRNEXT_A64_OPCODE(LDMov, LDMOV), "r mld", "3ce00800:ffe00c00 vd0 m"},     /* ldr Qd,[Rn,Rm{,#4}] */
-  {MIRNEXT_A64_OPCODE(LDMov, LDMOV), "mld r", "3ca00800:ffe00c00 vd1 m"},     /* str Qd,[Rn,Rm{,#4}] */
-  {MIRNEXT_A64_OPCODE(LDMov, LDMOV), "r Mld", "3dc00000:ffc00000 vd0 M"},     /* ldr Qd,[Rn,{,#imm12}] */
-  {MIRNEXT_A64_OPCODE(LDMov, LDMOV), "Mld r", "3d800000:ffc00000 vd1 M"},     /* str Qd,[Rn,Rm{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (LDMov), "r r",
+   "4ea01c00:ffe0fc00 vd0 vm1 vn1"},                                /* orr Qd.16b,Qm.16b,Qn.16b */
+  {MIRNEXT_A64_OPCODE (LDMov), "r mld", "3ce00800:ffe00c00 vd0 m"}, /* ldr Qd,[Rn,Rm{,#4}] */
+  {MIRNEXT_A64_OPCODE (LDMov), "mld r", "3ca00800:ffe00c00 vd1 m"}, /* str Qd,[Rn,Rm{,#4}] */
+  {MIRNEXT_A64_OPCODE (LDMov), "r Mld", "3dc00000:ffc00000 vd0 M"}, /* ldr Qd,[Rn,{,#imm12}] */
+  {MIRNEXT_A64_OPCODE (LDMov), "Mld r", "3d800000:ffc00000 vd1 M"}, /* str Qd,[Rn,Rm{,#imm12}] */
 
-  {MIRNEXT_A64_OPCODE(Ext8, EXT8), "r r", "93401c00:fffffc00 rd0 rn1"},  /* sxtb rd, wn */
-  {MIRNEXT_A64_OPCODE(Ext16, EXT16), "r r", "93403c00:fffffc00 rd0 rn1"}, /* sxth rd, wn */
-  {MIRNEXT_A64_OPCODE(Ext32, EXT32), "r r", "93407c00:fffffc00 rd0 rn1"}, /* sxtw rd, wn */
+  {MIRNEXT_A64_OPCODE (Ext8), "r r", "93401c00:fffffc00 rd0 rn1"},  /* sxtb rd, wn */
+  {MIRNEXT_A64_OPCODE (Ext16), "r r", "93403c00:fffffc00 rd0 rn1"}, /* sxth rd, wn */
+  {MIRNEXT_A64_OPCODE (Ext32), "r r", "93407c00:fffffc00 rd0 rn1"}, /* sxtw rd, wn */
 
-  {MIRNEXT_A64_OPCODE(UExt8, UEXT8), "r r", "53001c00:fffffc00 rd0 rn1"},  /* uxtb wd, wn */
-  {MIRNEXT_A64_OPCODE(UExt16, UEXT16), "r r", "53003c00:fffffc00 rd0 rn1"}, /* uxth wd, wn */
-  {MIRNEXT_A64_OPCODE(UExt32, UEXT32), "r r", "2a0003e0:7fe0ffe0 rd0 rm1"}, /* mov wd, wm */
+  {MIRNEXT_A64_OPCODE (UExt8), "r r", "53001c00:fffffc00 rd0 rn1"},  /* uxtb wd, wn */
+  {MIRNEXT_A64_OPCODE (UExt16), "r r", "53003c00:fffffc00 rd0 rn1"}, /* uxth wd, wn */
+  {MIRNEXT_A64_OPCODE (UExt32), "r r", "2a0003e0:7fe0ffe0 rd0 rm1"}, /* mov wd, wm */
 
-  {MIRNEXT_A64_OPCODE(Add, ADD), "r r r", "8b206000:ffe0fc00 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Add, ADD), "r r I", "91000000:ff000000 rd0 rn1 I"},
-  {MIRNEXT_A64_OPCODE(Adds, ADDS), "r r r", "0b000000:ff200000 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Adds, ADDS), "r r I", "11000000:ff000000 rd0 rn1 I"},
-    {MIRNEXT_A64_OPCODE(Addo, ADDO), "r r r", "ab206000:ffe0fc00 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Addo, ADDO), "r r I", "b1000000:ff000000 rd0 rn1 I"},
-  {MIRNEXT_A64_OPCODE(Addos, ADDOS), "r r r", "2b000000:ff200000 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Addos, ADDOS), "r r I", "31000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Add), "r r r", "8b206000:ffe0fc00 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Add), "r r I", "91000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Adds), "r r r", "0b000000:ff200000 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Adds), "r r I", "11000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Addo), "r r r", "ab206000:ffe0fc00 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Addo), "r r I", "b1000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Addos), "r r r", "2b000000:ff200000 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Addos), "r r I", "31000000:ff000000 rd0 rn1 I"},
 
-      {MIRNEXT_A64_OPCODE(FAdd, FADD), "r r r", "1e202800:ffe0fc00 vd0 vn1 vm2"}, /* fadd Sd,Sn,Sm*/
-  {MIRNEXT_A64_OPCODE(DAdd, DADD), "r r r", "1e602800:ffe0fc00 vd0 vn1 vm2"},     /* fadd Dd,Dn,Dm*/
+  {MIRNEXT_A64_OPCODE (FAdd), "r r r", "1e202800:ffe0fc00 vd0 vn1 vm2"}, /* fadd Sd,Sn,Sm*/
+  {MIRNEXT_A64_OPCODE (DAdd), "r r r", "1e602800:ffe0fc00 vd0 vn1 vm2"}, /* fadd Dd,Dn,Dm*/
   // ldadd is implemented through builtin
 
-  {MIRNEXT_A64_OPCODE(Sub, SUB), "r r r", "cb206000:ffe0fc00 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Sub, SUB), "r r I", "d1000000:ff000000 rd0 rn1 I"},
-  {MIRNEXT_A64_OPCODE(Subs, SUBS), "r r r", "4b000000:ff200000 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Subs, SUBS), "r r I", "51000000:ff000000 rd0 rn1 I"},
-    {MIRNEXT_A64_OPCODE(Subo, SUBO), "r r r", "eb206000:ffe0fc00 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Subo, SUBO), "r r I", "f1000000:ff000000 rd0 rn1 I"},
-  {MIRNEXT_A64_OPCODE(Subos, SUBOS), "r r r", "6b000000:ff200000 rd0 rn1 rm2"},
-  {MIRNEXT_A64_OPCODE(Subos, SUBOS), "r r I", "71000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Sub), "r r r", "cb206000:ffe0fc00 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Sub), "r r I", "d1000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Subs), "r r r", "4b000000:ff200000 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Subs), "r r I", "51000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Subo), "r r r", "eb206000:ffe0fc00 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Subo), "r r I", "f1000000:ff000000 rd0 rn1 I"},
+  {MIRNEXT_A64_OPCODE (Subos), "r r r", "6b000000:ff200000 rd0 rn1 rm2"},
+  {MIRNEXT_A64_OPCODE (Subos), "r r I", "71000000:ff000000 rd0 rn1 I"},
 
-      {MIRNEXT_A64_OPCODE(FSub, FSUB), "r r r", "1e203800:ffe0fc00 vd0 vn1 vm2"}, /* fsub Sd,Sn,Sm*/
-  {MIRNEXT_A64_OPCODE(DSub, DSUB), "r r r", "1e603800:ffe0fc00 vd0 vn1 vm2"},     /* fsub Dd,Dn,Dm*/
+  {MIRNEXT_A64_OPCODE (FSub), "r r r", "1e203800:ffe0fc00 vd0 vn1 vm2"}, /* fsub Sd,Sn,Sm*/
+  {MIRNEXT_A64_OPCODE (DSub), "r r r", "1e603800:ffe0fc00 vd0 vn1 vm2"}, /* fsub Dd,Dn,Dm*/
   // ldsub is implemented through builtin
 
-  {MIRNEXT_A64_OPCODE(Mul, MUL), "r r r", "9b007c00:ffe0fc00 rd0 rn1 rm2"},  /* mul Rd,Rn,Rm*/
-  {MIRNEXT_A64_OPCODE(Muls, MULS), "r r r", "1b007c00:ffe0fc00 rd0 rn1 rm2"}, /* mul Wd,Wn,Wm*/
-  {MIRNEXT_A64_OPCODE(FMul, FMUL), "r r r", "1e200800:ffe0fc00 vd0 vn1 vm2"}, /* fmul Sd,Sn,Sm*/
-  {MIRNEXT_A64_OPCODE(DMul, DMUL), "r r r", "1e600800:ffe0fc00 vd0 vn1 vm2"}, /* fmul Dd,Dn,Dm*/
+  {MIRNEXT_A64_OPCODE (Mul), "r r r", "9b007c00:ffe0fc00 rd0 rn1 rm2"},  /* mul Rd,Rn,Rm*/
+  {MIRNEXT_A64_OPCODE (Muls), "r r r", "1b007c00:ffe0fc00 rd0 rn1 rm2"}, /* mul Wd,Wn,Wm*/
+  {MIRNEXT_A64_OPCODE (FMul), "r r r", "1e200800:ffe0fc00 vd0 vn1 vm2"}, /* fmul Sd,Sn,Sm*/
+  {MIRNEXT_A64_OPCODE (DMul), "r r r", "1e600800:ffe0fc00 vd0 vn1 vm2"}, /* fmul Dd,Dn,Dm*/
   // ldmul is implemented through builtin
 
-  {MIRNEXT_A64_OPCODE(Div, DIV), "r r r", "9ac00c00:ffe0fc00 rd0 rn1 rm2"},   /* sdiv Rd,Rn,Rm*/
-  {MIRNEXT_A64_OPCODE(Divs, DIVS), "r r r", "1ac00c00:ffe0fc00 rd0 rn1 rm2"},  /* sdiv Wd,Wn,Wm*/
-  {MIRNEXT_A64_OPCODE(UDiv, UDIV), "r r r", "9ac00800:ffe0fc00 rd0 rn1 rm2"},  /* udiv Rd,Rn,Rm*/
-  {MIRNEXT_A64_OPCODE(UDivs, UDIVS), "r r r", "1ac00800:ffe0fc00 rd0 rn1 rm2"}, /* udiv Wd,Wn,Wm*/
-  {MIRNEXT_A64_OPCODE(FDiv, FDIV), "r r r", "1e201800:ffe0fc00 vd0 vn1 vm2"},  /* fdiv Sd,Sn,Sm*/
-  {MIRNEXT_A64_OPCODE(DDiv, DDIV), "r r r", "1e601800:ffe0fc00 vd0 vn1 vm2"},  /* fmul Dd,Dn,Dm*/
+  {MIRNEXT_A64_OPCODE (Div), "r r r", "9ac00c00:ffe0fc00 rd0 rn1 rm2"},   /* sdiv Rd,Rn,Rm*/
+  {MIRNEXT_A64_OPCODE (Divs), "r r r", "1ac00c00:ffe0fc00 rd0 rn1 rm2"},  /* sdiv Wd,Wn,Wm*/
+  {MIRNEXT_A64_OPCODE (UDiv), "r r r", "9ac00800:ffe0fc00 rd0 rn1 rm2"},  /* udiv Rd,Rn,Rm*/
+  {MIRNEXT_A64_OPCODE (UDivs), "r r r", "1ac00800:ffe0fc00 rd0 rn1 rm2"}, /* udiv Wd,Wn,Wm*/
+  {MIRNEXT_A64_OPCODE (FDiv), "r r r", "1e201800:ffe0fc00 vd0 vn1 vm2"},  /* fdiv Sd,Sn,Sm*/
+  {MIRNEXT_A64_OPCODE (DDiv), "r r r", "1e601800:ffe0fc00 vd0 vn1 vm2"},  /* fmul Dd,Dn,Dm*/
   // lddiv is implemented through builtin
 
   /* sdiv r8,Rn,Rm;msub Rd,r8,Rm,Rn: */
-  {MIRNEXT_A64_OPCODE(Mod, MOD), "r r r", "9ac00c00:ffe0fc00 hd8 rn1 rm2;9b008000:ffe08000 rd0 hm8 rn2 ra1"},
+  {MIRNEXT_A64_OPCODE (Mod), "r r r",
+   "9ac00c00:ffe0fc00 hd8 rn1 rm2;9b008000:ffe08000 rd0 hm8 rn2 ra1"},
   /* sdiv r8,Wn,Wm;msub Wd,r8,Wm,Wn: */
-  {MIRNEXT_A64_OPCODE(Mods, MODS), "r r r", "1ac00c00:ffe0fc00 hd8 rn1 rm2;1b008000:ffe08000 rd0 hm8 rn2 ra1"},
+  {MIRNEXT_A64_OPCODE (Mods), "r r r",
+   "1ac00c00:ffe0fc00 hd8 rn1 rm2;1b008000:ffe08000 rd0 hm8 rn2 ra1"},
   /* udiv r8,Rn,Rm;msub Rd,r8,Rm,Rn: */
-  {MIRNEXT_A64_OPCODE(UMod, UMOD), "r r r", "9ac00800:ffe0fc00 hd8 rn1 rm2;9b008000:ffe08000 rd0 hm8 rn2 ra1"},
+  {MIRNEXT_A64_OPCODE (UMod), "r r r",
+   "9ac00800:ffe0fc00 hd8 rn1 rm2;9b008000:ffe08000 rd0 hm8 rn2 ra1"},
   /* udiv r8,Wn,Wm;msub Wd,r8,Wm,Wn: */
-  {MIRNEXT_A64_OPCODE(UMods, UMODS), "r r r", "1ac00800:ffe0fc00 hd8 rn1 rm2;1b008000:ffe08000 rd0 hm8 rn2 ra1"},
+  {MIRNEXT_A64_OPCODE (UMods), "r r r",
+   "1ac00800:ffe0fc00 hd8 rn1 rm2;1b008000:ffe08000 rd0 hm8 rn2 ra1"},
 
 #define CMPR "eb00001f:ff20001f rn1 rm2"
 #define CMPI "f100001f:ff00001f rn1 I"
@@ -138,40 +145,40 @@ MIRNEXT_A64_TABLE = {
   // ??? add extended reg cmp insns:
   // all ld insn are changed to builtins
   /* cmp Rn,Rm; cset Rd,eq */
-  {MIRNEXT_A64_OPCODE(Eq, EQ), "r r r", CMPR "; " REQ},
+  {MIRNEXT_A64_OPCODE (Eq), "r r r", CMPR "; " REQ},
   /* cmp Rn,I,shift ; cset Wd,eq */
-  {MIRNEXT_A64_OPCODE(Eq, EQ), "r r I", CMPI "; " REQ},
+  {MIRNEXT_A64_OPCODE (Eq), "r r I", CMPI "; " REQ},
   /* cmp Wn,Wm;cset Rd,eq */
-  {MIRNEXT_A64_OPCODE(Eqs, EQS), "r r r", SCMPR "; " REQS},
+  {MIRNEXT_A64_OPCODE (Eqs), "r r r", SCMPR "; " REQS},
   /* cmp Wn,I,shift; cset Wd,eq */
-  {MIRNEXT_A64_OPCODE(Eqs, EQS), "r r I", SCMPI "; " REQS},
+  {MIRNEXT_A64_OPCODE (Eqs), "r r I", SCMPI "; " REQS},
   /* fcmpe Sn,Sm; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(FEq, FEQ), "r r r", FCMP "; " REQ},
+  {MIRNEXT_A64_OPCODE (FEq), "r r r", FCMP "; " REQ},
   /* fcmpe Dn,Dm; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(DEq, DEQ), "r r r", DCMP "; " REQ},
+  {MIRNEXT_A64_OPCODE (DEq), "r r r", DCMP "; " REQ},
   /* fcmpe Sn,0.0; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(FEq, FEQ), "r r Zf", "1e202018:fffffc1f vn1 vm2; " REQ},
+  {MIRNEXT_A64_OPCODE (FEq), "r r Zf", "1e202018:fffffc1f vn1 vm2; " REQ},
   /* fcmpe Dn,0.0; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(DEq, DEQ), "r r Zd", "1e602018:fffffc1f vn1 vm2; " REQ},
+  {MIRNEXT_A64_OPCODE (DEq), "r r Zd", "1e602018:fffffc1f vn1 vm2; " REQ},
 
 #define RNE "9a9f07e0:ffffffe0 rd0"
 #define RNES "1a9f07e0:ffffffe0 rd0"
   /* cmp Rn,Rm; cset Rd,ne */
-  {MIRNEXT_A64_OPCODE(Ne, NE), "r r r", CMPR "; " RNE},
+  {MIRNEXT_A64_OPCODE (Ne), "r r r", CMPR "; " RNE},
   /* cmp Rn,I,shift ; cset Wd,ne */
-  {MIRNEXT_A64_OPCODE(Ne, NE), "r r I", CMPI "; " RNE},
+  {MIRNEXT_A64_OPCODE (Ne), "r r I", CMPI "; " RNE},
   /* cmp Wn,Wm;cset Rd,ne */
-  {MIRNEXT_A64_OPCODE(Nes, NES), "r r r", SCMPR "; " RNES},
+  {MIRNEXT_A64_OPCODE (Nes), "r r r", SCMPR "; " RNES},
   /* cmp Wn,I,shift; cset Wd,ne */
-  {MIRNEXT_A64_OPCODE(Nes, NES), "r r I", SCMPI "; " RNES},
+  {MIRNEXT_A64_OPCODE (Nes), "r r I", SCMPI "; " RNES},
   /* fcmpe Sn,Sm; cset Rd,ne */
-  {MIRNEXT_A64_OPCODE(FNe, FNE), "r r r", FCMP "; " RNE},
+  {MIRNEXT_A64_OPCODE (FNe), "r r r", FCMP "; " RNE},
   /* fcmpe Dn,Dm; cset Rd,ne */
-  {MIRNEXT_A64_OPCODE(DNe, DNE), "r r r", DCMP "; " RNE},
+  {MIRNEXT_A64_OPCODE (DNe), "r r r", DCMP "; " RNE},
   /* fcmpe Sn,0.0; cset Rd,ne */
-  {MIRNEXT_A64_OPCODE(FNe, FNE), "r r Zf", "1e202018:fffffc1f vn1 vm2; " RNE},
+  {MIRNEXT_A64_OPCODE (FNe), "r r Zf", "1e202018:fffffc1f vn1 vm2; " RNE},
   /* fcmpe Dn,0.0; cset Rd,ne */
-  {MIRNEXT_A64_OPCODE(DNe, DNE), "r r Zd", "1e602018:fffffc1f vn1 vm2; " RNE},
+  {MIRNEXT_A64_OPCODE (DNe), "r r Zd", "1e602018:fffffc1f vn1 vm2; " RNE},
 
 #define RLT "9a9fa7e0:ffffffe0 rd0"
 #define RLTS "1a9fa7e0:ffffffe0 rd0"
@@ -179,87 +186,87 @@ MIRNEXT_A64_TABLE = {
 #define RULTS "1a9f27e0:ffffffe0 rd0"
 #define FLTC "9a9f57e0:ffffffe0 rd0"
   /* cmp Rn,Rm; cset Rd,lt */
-  {MIRNEXT_A64_OPCODE(Lt, LT), "r r r", CMPR "; " RLT},
+  {MIRNEXT_A64_OPCODE (Lt), "r r r", CMPR "; " RLT},
   /* cmp Rn,I,shift ; cset Wd,lt */
-  {MIRNEXT_A64_OPCODE(Lt, LT), "r r I", CMPI "; " RLT},
+  {MIRNEXT_A64_OPCODE (Lt), "r r I", CMPI "; " RLT},
   /* cmp Wn,Wm;cset Rd,lt */
-  {MIRNEXT_A64_OPCODE(Lts, LTS), "r r r", SCMPR "; " RLTS},
+  {MIRNEXT_A64_OPCODE (Lts), "r r r", SCMPR "; " RLTS},
   /* cmp Wn,I,shift; cset Wd,lt */
-  {MIRNEXT_A64_OPCODE(Lts, LTS), "r r I", SCMPI "; " RLTS},
+  {MIRNEXT_A64_OPCODE (Lts), "r r I", SCMPI "; " RLTS},
   /* cmp Rn,Rm; cset Rd,ult */
-  {MIRNEXT_A64_OPCODE(ULt, ULT), "r r r", CMPR "; " RULT},
+  {MIRNEXT_A64_OPCODE (ULt), "r r r", CMPR "; " RULT},
   /* cmp Rn,I,shift ; cset Wd,cc */
-  {MIRNEXT_A64_OPCODE(ULt, ULT), "r r I", CMPI "; " RULT},
+  {MIRNEXT_A64_OPCODE (ULt), "r r I", CMPI "; " RULT},
   /* cmp Wn,Wm;cset Rd,cc */
-  {MIRNEXT_A64_OPCODE(ULts, ULTS), "r r r", SCMPR "; " RULTS},
+  {MIRNEXT_A64_OPCODE (ULts), "r r r", SCMPR "; " RULTS},
   /* cmp Wn,I,shift; cset Wd,cc */
-  {MIRNEXT_A64_OPCODE(ULts, ULTS), "r r I", SCMPI "; " RULTS},
+  {MIRNEXT_A64_OPCODE (ULts), "r r I", SCMPI "; " RULTS},
   /* fcmpe Sn,Sm; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(FLt, FLT), "r r r", FCMP "; " FLTC},
+  {MIRNEXT_A64_OPCODE (FLt), "r r r", FCMP "; " FLTC},
   /* fcmpe Dn,Dm; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(DLt, DLT), "r r r", DCMP "; " FLTC},
+  {MIRNEXT_A64_OPCODE (DLt), "r r r", DCMP "; " FLTC},
   /* fcmpe Sn,0.0; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(FLt, FLT), "r r Zf", "1e202018:fffffc1f vn1 vm2; " FLTC},
+  {MIRNEXT_A64_OPCODE (FLt), "r r Zf", "1e202018:fffffc1f vn1 vm2; " FLTC},
   /* fcmpe Dn,0.0; cset Rd,mi */
-  {MIRNEXT_A64_OPCODE(DLt, DLT), "r r Zd", "1e602018:fffffc1f vn1 vm2; " FLTC},
+  {MIRNEXT_A64_OPCODE (DLt), "r r Zd", "1e602018:fffffc1f vn1 vm2; " FLTC},
 
 #define RGE "9a9fb7e0:ffffffe0 rd0"
 #define RGES "1a9fb7e0:ffffffe0 rd0"
 #define RUGE "9a9f37e0:ffffffe0 rd0"
 #define RUGES "1a9f37e0:ffffffe0 rd0"
   /* cmp Rn,Rm; cset Rd,ge */
-  {MIRNEXT_A64_OPCODE(Ge, GE), "r r r", CMPR "; " RGE},
+  {MIRNEXT_A64_OPCODE (Ge), "r r r", CMPR "; " RGE},
   /* cmp Rn,I,shift ; cset Wd,ge */
-  {MIRNEXT_A64_OPCODE(Ge, GE), "r r I", CMPI "; " RGE},
+  {MIRNEXT_A64_OPCODE (Ge), "r r I", CMPI "; " RGE},
   /* cmp Wn,Wm;cset Rd,ge */
-  {MIRNEXT_A64_OPCODE(Ges, GES), "r r r", SCMPR "; " RGES},
+  {MIRNEXT_A64_OPCODE (Ges), "r r r", SCMPR "; " RGES},
   /* cmp Wn,I,shift; cset Wd,ge */
-  {MIRNEXT_A64_OPCODE(Ges, GES), "r r I", SCMPI "; " RGES},
+  {MIRNEXT_A64_OPCODE (Ges), "r r I", SCMPI "; " RGES},
   /* cmp Rn,Rm; cset Rd,cs */
-  {MIRNEXT_A64_OPCODE(UGe, UGE), "r r r", CMPR "; " RUGE},
+  {MIRNEXT_A64_OPCODE (UGe), "r r r", CMPR "; " RUGE},
   /* cmp Rn,I,shift ; cset Wd,cs */
-  {MIRNEXT_A64_OPCODE(UGe, UGE), "r r I", CMPI "; " RUGE},
+  {MIRNEXT_A64_OPCODE (UGe), "r r I", CMPI "; " RUGE},
   /* cmp Wn,Wm;cset Rd,cs */
-  {MIRNEXT_A64_OPCODE(UGes, UGES), "r r r", SCMPR "; " RUGES},
+  {MIRNEXT_A64_OPCODE (UGes), "r r r", SCMPR "; " RUGES},
   /* cmp Wn,I,shift; cset Wd,cs */
-  {MIRNEXT_A64_OPCODE(UGes, UGES), "r r I", SCMPI "; " RUGES},
+  {MIRNEXT_A64_OPCODE (UGes), "r r I", SCMPI "; " RUGES},
   /* fcmpe Sn,Sm; cset Rd,ge */
-  {MIRNEXT_A64_OPCODE(FGe, FGE), "r r r", FCMP "; " RGE},
+  {MIRNEXT_A64_OPCODE (FGe), "r r r", FCMP "; " RGE},
   /* fcmpe Dn,Dm; cset Rd,ge */
-  {MIRNEXT_A64_OPCODE(DGe, DGE), "r r r", DCMP "; " RGE},
+  {MIRNEXT_A64_OPCODE (DGe), "r r r", DCMP "; " RGE},
   /* fcmpe Sn,0.0; cset Rd,ge */
-  {MIRNEXT_A64_OPCODE(FGe, FGE), "r r Zf", "1e202018:fffffc1f vn1 vm2; " RGE},
+  {MIRNEXT_A64_OPCODE (FGe), "r r Zf", "1e202018:fffffc1f vn1 vm2; " RGE},
   /* fcmpe Dn,0.0; cset Rd,ge */
-  {MIRNEXT_A64_OPCODE(DGe, DGE), "r r Zd", "1e602018:fffffc1f vn1 vm2; " RGE},
+  {MIRNEXT_A64_OPCODE (DGe), "r r Zd", "1e602018:fffffc1f vn1 vm2; " RGE},
 
 #define RGT "9a9fd7e0:ffffffe0 rd0"
 #define RGTS "1a9fd7e0:ffffffe0 rd0"
 #define RUGT "9a9f97e0:ffffffe0 rd0"
 #define RUGTS "1a9f97e0:ffffffe0 rd0"
   /* cmp Rn,Rm; cset Rd,gt */
-  {MIRNEXT_A64_OPCODE(Gt, GT), "r r r", CMPR "; " RGT},
+  {MIRNEXT_A64_OPCODE (Gt), "r r r", CMPR "; " RGT},
   /* cmp Rn,I,shift ; cset Wd,gt */
-  {MIRNEXT_A64_OPCODE(Gt, GT), "r r I", CMPI "; " RGT},
+  {MIRNEXT_A64_OPCODE (Gt), "r r I", CMPI "; " RGT},
   /* cmp Wn,Wm;cset Rd,gt */
-  {MIRNEXT_A64_OPCODE(Gts, GTS), "r r r", SCMPR "; " RGTS},
+  {MIRNEXT_A64_OPCODE (Gts), "r r r", SCMPR "; " RGTS},
   /* cmp Wn,I,shift; cset Wd,gt */
-  {MIRNEXT_A64_OPCODE(Gts, GTS), "r r I", SCMPI "; " RGTS},
+  {MIRNEXT_A64_OPCODE (Gts), "r r I", SCMPI "; " RGTS},
   /* cmp Rn,Rm; cset Rd,hi */
-  {MIRNEXT_A64_OPCODE(UGt, UGT), "r r r", CMPR "; " RUGT},
+  {MIRNEXT_A64_OPCODE (UGt), "r r r", CMPR "; " RUGT},
   /* cmp Rn,I,shift ; cset Wd,hi */
-  {MIRNEXT_A64_OPCODE(UGt, UGT), "r r I", CMPI "; " RUGT},
+  {MIRNEXT_A64_OPCODE (UGt), "r r I", CMPI "; " RUGT},
   /* cmp Wn,Wm;cset Rd,hi */
-  {MIRNEXT_A64_OPCODE(UGts, UGTS), "r r r", SCMPR "; " RUGTS},
+  {MIRNEXT_A64_OPCODE (UGts), "r r r", SCMPR "; " RUGTS},
   /* cmp Wn,I,shift; cset Wd,hi */
-  {MIRNEXT_A64_OPCODE(UGts, UGTS), "r r I", SCMPI "; " RUGTS},
+  {MIRNEXT_A64_OPCODE (UGts), "r r I", SCMPI "; " RUGTS},
   /* fcmpe Sn,Sm; cset Rd,gt */
-  {MIRNEXT_A64_OPCODE(FGt, FGT), "r r r", FCMP "; " RGT},
+  {MIRNEXT_A64_OPCODE (FGt), "r r r", FCMP "; " RGT},
   /* fcmpe Dn,Dm; cset Rd,gt */
-  {MIRNEXT_A64_OPCODE(DGt, DGT), "r r r", DCMP "; " RGT},
+  {MIRNEXT_A64_OPCODE (DGt), "r r r", DCMP "; " RGT},
   /* fcmpe Sn,0.0; cset Rd,gt */
-  {MIRNEXT_A64_OPCODE(FGt, FGT), "r r Zf", "1e202018:fffffc1f vn1 vm2; " RGT},
+  {MIRNEXT_A64_OPCODE (FGt), "r r Zf", "1e202018:fffffc1f vn1 vm2; " RGT},
   /* fcmpe Dn,0.0; cset Rd,gt */
-  {MIRNEXT_A64_OPCODE(DGt, DGT), "r r Zd", "1e602018:fffffc1f vn1 vm2; " RGT},
+  {MIRNEXT_A64_OPCODE (DGt), "r r Zd", "1e602018:fffffc1f vn1 vm2; " RGT},
 
 #define RLE "9a9fc7e0:ffffffe0 rd0"
 #define RLES "1a9fc7e0:ffffffe0 rd0"
@@ -267,268 +274,270 @@ MIRNEXT_A64_TABLE = {
 #define RULES "1a9f87e0:ffffffe0 rd0"
 #define FLEC "9a9f87e0:ffffffe0 rd0"
   /* cmp Rn,Rm; cset Rd,le */
-  {MIRNEXT_A64_OPCODE(Le, LE), "r r r", CMPR "; " RLE},
+  {MIRNEXT_A64_OPCODE (Le), "r r r", CMPR "; " RLE},
   /* cmp Rn,I,shift ; cset Wd,le */
-  {MIRNEXT_A64_OPCODE(Le, LE), "r r I", CMPI "; " RLE},
+  {MIRNEXT_A64_OPCODE (Le), "r r I", CMPI "; " RLE},
   /* cmp Wn,Wm;cset Rd,le */
-  {MIRNEXT_A64_OPCODE(Les, LES), "r r r", SCMPR "; " RLES},
+  {MIRNEXT_A64_OPCODE (Les), "r r r", SCMPR "; " RLES},
   /* cmp Wn,I,shift; cset Wd,le */
-  {MIRNEXT_A64_OPCODE(Les, LES), "r r I", SCMPI "; " RLES},
+  {MIRNEXT_A64_OPCODE (Les), "r r I", SCMPI "; " RLES},
   /* cmp Rn,Rm; cset Rd,ls */
-  {MIRNEXT_A64_OPCODE(ULe, ULE), "r r r", CMPR "; " RULE},
+  {MIRNEXT_A64_OPCODE (ULe), "r r r", CMPR "; " RULE},
   /* cmp Rn,I,shift ; cset Wd,ls */
-  {MIRNEXT_A64_OPCODE(ULe, ULE), "r r I", CMPI "; " RULE},
+  {MIRNEXT_A64_OPCODE (ULe), "r r I", CMPI "; " RULE},
   /* cmp Wn,Wm;cset Rd,ls */
-  {MIRNEXT_A64_OPCODE(ULes, ULES), "r r r", SCMPR "; " RULES},
+  {MIRNEXT_A64_OPCODE (ULes), "r r r", SCMPR "; " RULES},
   /* cmp Wn,I,shift; cset Wd,ls */
-  {MIRNEXT_A64_OPCODE(ULes, ULES), "r r I", SCMPI "; " RULES},
+  {MIRNEXT_A64_OPCODE (ULes), "r r I", SCMPI "; " RULES},
   /* fcmpe Sn,Sm; cset Rd,ls */
-  {MIRNEXT_A64_OPCODE(FLe, FLE), "r r r", FCMP "; " FLEC},
+  {MIRNEXT_A64_OPCODE (FLe), "r r r", FCMP "; " FLEC},
   /* fcmpe Dn,Dm; cset Rd,ls */
-  {MIRNEXT_A64_OPCODE(DLe, DLE), "r r r", DCMP "; " FLEC},
+  {MIRNEXT_A64_OPCODE (DLe), "r r r", DCMP "; " FLEC},
   /* fcmpe Sn,0.0; cset Rd,ls */
-  {MIRNEXT_A64_OPCODE(FLe, FLE), "r r Zf", "1e202018:fffffc1f vn1 vm2; " FLEC},
+  {MIRNEXT_A64_OPCODE (FLe), "r r Zf", "1e202018:fffffc1f vn1 vm2; " FLEC},
   /* fcmpe Dn,0.0; cset Rd,ls */
-  {MIRNEXT_A64_OPCODE(DLe, DLE), "r r Zd", "1e602018:fffffc1f vn1 vm2; " FLEC},
+  {MIRNEXT_A64_OPCODE (DLe), "r r Zd", "1e602018:fffffc1f vn1 vm2; " FLEC},
 
-  {MIRNEXT_A64_OPCODE(Jmp, JMP), "L", "14000000:fc000000 L"}, /* 26-bit offset jmp */
+  {MIRNEXT_A64_OPCODE (Jmp), "L", "14000000:fc000000 L"}, /* 26-bit offset jmp */
 
-  {MIRNEXT_A64_OPCODE(LAddr, LADDR), "r l", "10000000:ff000000 rd0 l"}, /* adr r, L ip-relative address */
-  {MIRNEXT_A64_OPCODE(JmpIndirect, JMPI), "r", "d61f0000:fffffc00 rn0"},      /* jmp *r */
+  {MIRNEXT_A64_OPCODE (LAddr), "r l", "10000000:ff000000 rd0 l"}, /* adr r, L ip-relative address */
+  {MIRNEXT_A64_OPCODE (JmpIndirect), "r", "d61f0000:fffffc00 rn0"}, /* jmp *r */
 
-  {MIRNEXT_A64_OPCODE(Bt, BT), "l r", "b5000000:ff000000 rd1 l"},  /* cbnz rd,l */
-  {MIRNEXT_A64_OPCODE(Bts, BTS), "l r", "35000000:ff000000 rd1 l"}, /* cbnz wd,l */
-  {MIRNEXT_A64_OPCODE(Bf, BF), "l r", "b4000000:ff000000 rd1 l"},  /* cbz rd,l */
-  {MIRNEXT_A64_OPCODE(Bfs, BFS), "l r", "34000000:ff000000 rd1 l"}, /* cbz wd,l */
+  {MIRNEXT_A64_OPCODE (Bt), "l r", "b5000000:ff000000 rd1 l"},  /* cbnz rd,l */
+  {MIRNEXT_A64_OPCODE (Bts), "l r", "35000000:ff000000 rd1 l"}, /* cbnz wd,l */
+  {MIRNEXT_A64_OPCODE (Bf), "l r", "b4000000:ff000000 rd1 l"},  /* cbz rd,l */
+  {MIRNEXT_A64_OPCODE (Bfs), "l r", "34000000:ff000000 rd1 l"}, /* cbz wd,l */
 
-  {MIRNEXT_A64_OPCODE(Bo, BO), "l", "54000006:ff00001f l"},  /* b.vs */
-  {MIRNEXT_A64_OPCODE(UBo, UBO), "l", "54000002:ff00001f l"}, /* b.cs */
+  {MIRNEXT_A64_OPCODE (Bo), "l", "54000006:ff00001f l"},  /* b.vs */
+  {MIRNEXT_A64_OPCODE (UBo), "l", "54000002:ff00001f l"}, /* b.cs */
 
-  {MIRNEXT_A64_OPCODE(Bno, BNO), "l", "54000007:ff00001f l"},  /* b.vc */
-  {MIRNEXT_A64_OPCODE(UBno, UBNO), "l", "54000003:ff00001f l"}, /* b.cc */
+  {MIRNEXT_A64_OPCODE (Bno), "l", "54000007:ff00001f l"},  /* b.vc */
+  {MIRNEXT_A64_OPCODE (UBno), "l", "54000003:ff00001f l"}, /* b.cc */
 
 #define BEQ "54000000:ff00001f l"
   // ??? add extended reg cmp insns:
   // all ld insn are changed to builtins and bt/bts
   /* cmp Rn,Rm; beq l */
-  {MIRNEXT_A64_OPCODE(Beq, BEQ), "l r r", CMPR "; " BEQ},
+  {MIRNEXT_A64_OPCODE (Beq), "l r r", CMPR "; " BEQ},
   /* cmp Rn,I,shift ; beq l */
-  {MIRNEXT_A64_OPCODE(Beq, BEQ), "l r I", CMPI "; " BEQ},
+  {MIRNEXT_A64_OPCODE (Beq), "l r I", CMPI "; " BEQ},
   /* cmp Wn,Wm;beq l */
-  {MIRNEXT_A64_OPCODE(Beqs, BEQS), "l r r", SCMPR "; " BEQ},
+  {MIRNEXT_A64_OPCODE (Beqs), "l r r", SCMPR "; " BEQ},
   /* cmp Wn,I,shift; beq l */
-  {MIRNEXT_A64_OPCODE(Beqs, BEQS), "l r I", SCMPI "; " BEQ},
+  {MIRNEXT_A64_OPCODE (Beqs), "l r I", SCMPI "; " BEQ},
   /* fcmpe Sn,Sm; beq l */
-  {MIRNEXT_A64_OPCODE(FBeq, FBEQ), "l r r", FCMP "; " BEQ},
+  {MIRNEXT_A64_OPCODE (FBeq), "l r r", FCMP "; " BEQ},
   /* fcmpe Dn,Dm; beq l */
-  {MIRNEXT_A64_OPCODE(DBeq, DBEQ), "l r r", DCMP "; " BEQ},
+  {MIRNEXT_A64_OPCODE (DBeq), "l r r", DCMP "; " BEQ},
   /* fcmpe Sn,0.0; beq l */
-  {MIRNEXT_A64_OPCODE(FBeq, FBEQ), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BEQ},
+  {MIRNEXT_A64_OPCODE (FBeq), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BEQ},
   /* fcmpe Dn,0.0; beq l */
-  {MIRNEXT_A64_OPCODE(DBeq, DBEQ), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BEQ},
+  {MIRNEXT_A64_OPCODE (DBeq), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BEQ},
 
 #define BNE "54000001:ff00001f l"
   /* cmp Rn,Rm; bne l */
-  {MIRNEXT_A64_OPCODE(Bne, BNE), "l r r", CMPR "; " BNE},
+  {MIRNEXT_A64_OPCODE (Bne), "l r r", CMPR "; " BNE},
   /* cmp Rn,I,shift ; bne l */
-  {MIRNEXT_A64_OPCODE(Bne, BNE), "l r I", CMPI "; " BNE},
+  {MIRNEXT_A64_OPCODE (Bne), "l r I", CMPI "; " BNE},
   /* cmp Wn,Wm;bne l */
-  {MIRNEXT_A64_OPCODE(Bnes, BNES), "l r r", SCMPR "; " BNE},
+  {MIRNEXT_A64_OPCODE (Bnes), "l r r", SCMPR "; " BNE},
   /* cmp Wn,I,shift; bne l */
-  {MIRNEXT_A64_OPCODE(Bnes, BNES), "l r I", SCMPI "; " BNE},
+  {MIRNEXT_A64_OPCODE (Bnes), "l r I", SCMPI "; " BNE},
   /* fcmpe Sn,Sm; bne l */
-  {MIRNEXT_A64_OPCODE(FBne, FBNE), "l r r", FCMP "; " BNE},
+  {MIRNEXT_A64_OPCODE (FBne), "l r r", FCMP "; " BNE},
   /* fcmpe Dn,Dm; bne l */
-  {MIRNEXT_A64_OPCODE(DBne, DBNE), "l r r", DCMP "; " BNE},
+  {MIRNEXT_A64_OPCODE (DBne), "l r r", DCMP "; " BNE},
   /* fcmpe Sn,0.0; bne l */
-  {MIRNEXT_A64_OPCODE(FBne, FBNE), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BNE},
+  {MIRNEXT_A64_OPCODE (FBne), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BNE},
   /* fcmpe Dn,0.0; bne l */
-  {MIRNEXT_A64_OPCODE(DBne, DBNE), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BNE},
+  {MIRNEXT_A64_OPCODE (DBne), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BNE},
 
 #define BLT "5400000b:ff00001f l"
 #define UBLT "54000003:ff00001f l"
   /* cmp Rn,Rm; blt l */
-  {MIRNEXT_A64_OPCODE(Blt, BLT), "l r r", CMPR "; " BLT},
+  {MIRNEXT_A64_OPCODE (Blt), "l r r", CMPR "; " BLT},
   /* cmp Rn,I,shift ; blt l */
-  {MIRNEXT_A64_OPCODE(Blt, BLT), "l r I", CMPI "; " BLT},
+  {MIRNEXT_A64_OPCODE (Blt), "l r I", CMPI "; " BLT},
   /* cmp Wn,Wm;blt l */
-  {MIRNEXT_A64_OPCODE(Blts, BLTS), "l r r", SCMPR "; " BLT},
+  {MIRNEXT_A64_OPCODE (Blts), "l r r", SCMPR "; " BLT},
   /* cmp Wn,I,shift; blt l */
-  {MIRNEXT_A64_OPCODE(Blts, BLTS), "l r I", SCMPI "; " BLT},
+  {MIRNEXT_A64_OPCODE (Blts), "l r I", SCMPI "; " BLT},
   /* cmp Rn,Rm; bcc l */
-  {MIRNEXT_A64_OPCODE(UBlt, UBLT), "l r r", CMPR "; " UBLT},
+  {MIRNEXT_A64_OPCODE (UBlt), "l r r", CMPR "; " UBLT},
   /* cmp Rn,I,shift ; bcc l */
-  {MIRNEXT_A64_OPCODE(UBlt, UBLT), "l r I", CMPI "; " UBLT},
+  {MIRNEXT_A64_OPCODE (UBlt), "l r I", CMPI "; " UBLT},
   /* cmp Wn,Wm;bcc l */
-  {MIRNEXT_A64_OPCODE(UBlts, UBLTS), "l r r", SCMPR "; " UBLT},
+  {MIRNEXT_A64_OPCODE (UBlts), "l r r", SCMPR "; " UBLT},
   /* cmp Wn,I,shift; bcc l */
-  {MIRNEXT_A64_OPCODE(UBlts, UBLTS), "l r I", SCMPI "; " UBLT},
+  {MIRNEXT_A64_OPCODE (UBlts), "l r I", SCMPI "; " UBLT},
 
 #define BGE "5400000a:ff00001f l"
 #define UBGE "54000002:ff00001f l"
   /* cmp Rn,Rm; bge l */
-  {MIRNEXT_A64_OPCODE(Bge, BGE), "l r r", CMPR "; " BGE},
+  {MIRNEXT_A64_OPCODE (Bge), "l r r", CMPR "; " BGE},
   /* cmp Rn,I,shift ; bge l */
-  {MIRNEXT_A64_OPCODE(Bge, BGE), "l r I", CMPI "; " BGE},
+  {MIRNEXT_A64_OPCODE (Bge), "l r I", CMPI "; " BGE},
   /* cmp Wn,Wm;bge l */
-  {MIRNEXT_A64_OPCODE(Bges, BGES), "l r r", SCMPR "; " BGE},
+  {MIRNEXT_A64_OPCODE (Bges), "l r r", SCMPR "; " BGE},
   /* cmp Wn,I,shift; bge l */
-  {MIRNEXT_A64_OPCODE(Bges, BGES), "l r I", SCMPI "; " BGE},
+  {MIRNEXT_A64_OPCODE (Bges), "l r I", SCMPI "; " BGE},
   /* cmp Rn,Rm; bcs l */
-  {MIRNEXT_A64_OPCODE(UBge, UBGE), "l r r", CMPR "; " UBGE},
+  {MIRNEXT_A64_OPCODE (UBge), "l r r", CMPR "; " UBGE},
   /* cmp Rn,I,shift ; bcs l */
-  {MIRNEXT_A64_OPCODE(UBge, UBGE), "l r I", CMPI "; " UBGE},
+  {MIRNEXT_A64_OPCODE (UBge), "l r I", CMPI "; " UBGE},
   /* cmp Wn,Wm;bcs l */
-  {MIRNEXT_A64_OPCODE(UBges, UBGES), "l r r", SCMPR "; " UBGE},
+  {MIRNEXT_A64_OPCODE (UBges), "l r r", SCMPR "; " UBGE},
   /* cmp Wn,I,shift; bcs l */
-  {MIRNEXT_A64_OPCODE(UBges, UBGES), "l r I", SCMPI "; " UBGE},
+  {MIRNEXT_A64_OPCODE (UBges), "l r I", SCMPI "; " UBGE},
   /* fcmpe Sn,Sm; bpl l */
-  {MIRNEXT_A64_OPCODE(FBge, FBGE), "l r r", FCMP "; " BGE},
+  {MIRNEXT_A64_OPCODE (FBge), "l r r", FCMP "; " BGE},
   /* fcmpe Dn,Dm; bpl l */
-  {MIRNEXT_A64_OPCODE(DBge, DBGE), "l r r", DCMP "; " BGE},
+  {MIRNEXT_A64_OPCODE (DBge), "l r r", DCMP "; " BGE},
   /* fcmpe Sn,0.0; bpl l */
-  {MIRNEXT_A64_OPCODE(FBge, FBGE), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BGE},
+  {MIRNEXT_A64_OPCODE (FBge), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BGE},
   /* fcmpe Dn,0.0; bpl l */
-  {MIRNEXT_A64_OPCODE(DBge, DBGE), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BGE},
+  {MIRNEXT_A64_OPCODE (DBge), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BGE},
 
 #define BGT "5400000c:ff00001f l"
 #define UBGT "54000008:ff00001f l"
   /* cmp Rn,Rm; bgt l */
-  {MIRNEXT_A64_OPCODE(Bgt, BGT), "l r r", CMPR "; " BGT},
+  {MIRNEXT_A64_OPCODE (Bgt), "l r r", CMPR "; " BGT},
   /* cmp Rn,I,shift ; bgt l */
-  {MIRNEXT_A64_OPCODE(Bgt, BGT), "l r I", CMPI "; " BGT},
+  {MIRNEXT_A64_OPCODE (Bgt), "l r I", CMPI "; " BGT},
   /* cmp Wn,Wm;bgt l */
-  {MIRNEXT_A64_OPCODE(Bgts, BGTS), "l r r", SCMPR "; " BGT},
+  {MIRNEXT_A64_OPCODE (Bgts), "l r r", SCMPR "; " BGT},
   /* cmp Wn,I,shift; bgt l */
-  {MIRNEXT_A64_OPCODE(Bgts, BGTS), "l r I", SCMPI "; " BGT},
+  {MIRNEXT_A64_OPCODE (Bgts), "l r I", SCMPI "; " BGT},
   /* cmp Rn,Rm; bhi l */
-  {MIRNEXT_A64_OPCODE(UBgt, UBGT), "l r r", CMPR "; " UBGT},
+  {MIRNEXT_A64_OPCODE (UBgt), "l r r", CMPR "; " UBGT},
   /* cmp Rn,I,shift ; bhi l */
-  {MIRNEXT_A64_OPCODE(UBgt, UBGT), "l r I", CMPI "; " UBGT},
+  {MIRNEXT_A64_OPCODE (UBgt), "l r I", CMPI "; " UBGT},
   /* cmp Wn,Wm;bhi l */
-  {MIRNEXT_A64_OPCODE(UBgts, UBGTS), "l r r", SCMPR "; " UBGT},
+  {MIRNEXT_A64_OPCODE (UBgts), "l r r", SCMPR "; " UBGT},
   /* cmp Wn,I,shift; bhi l */
-  {MIRNEXT_A64_OPCODE(UBgts, UBGTS), "l r I", SCMPI "; " UBGT},
+  {MIRNEXT_A64_OPCODE (UBgts), "l r I", SCMPI "; " UBGT},
   /* fcmpe Sn,Sm; bhi l */
-  {MIRNEXT_A64_OPCODE(FBgt, FBGT), "l r r", FCMP "; " BGT},
+  {MIRNEXT_A64_OPCODE (FBgt), "l r r", FCMP "; " BGT},
   /* fcmpe Dn,Dm; bhi l */
-  {MIRNEXT_A64_OPCODE(DBgt, DBGT), "l r r", DCMP "; " BGT},
+  {MIRNEXT_A64_OPCODE (DBgt), "l r r", DCMP "; " BGT},
   /* fcmpe Sn,0.0; bhi l */
-  {MIRNEXT_A64_OPCODE(FBgt, FBGT), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BGT},
+  {MIRNEXT_A64_OPCODE (FBgt), "l r Zf", "1e202018:fffffc1f vn1 vm2; " BGT},
   /* fcmpe Dn,0.0; bhi l */
-  {MIRNEXT_A64_OPCODE(DBgt, DBGT), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BGT},
+  {MIRNEXT_A64_OPCODE (DBgt), "l r Zd", "1e602018:fffffc1f vn1 vm2; " BGT},
 
 #define BLE "5400000d:ff00001f l"
 #define UBLE "54000009:ff00001f l"
   /* cmp Rn,Rm; ble l */
-  {MIRNEXT_A64_OPCODE(Ble, BLE), "l r r", CMPR "; " BLE},
+  {MIRNEXT_A64_OPCODE (Ble), "l r r", CMPR "; " BLE},
   /* cmp Rn,I,shift ; ble l */
-  {MIRNEXT_A64_OPCODE(Ble, BLE), "l r I", CMPI "; " BLE},
+  {MIRNEXT_A64_OPCODE (Ble), "l r I", CMPI "; " BLE},
   /* cmp Wn,Wm;ble l */
-  {MIRNEXT_A64_OPCODE(Bles, BLES), "l r r", SCMPR "; " BLE},
+  {MIRNEXT_A64_OPCODE (Bles), "l r r", SCMPR "; " BLE},
   /* cmp Wn,I,shift; ble l */
-  {MIRNEXT_A64_OPCODE(Bles, BLES), "l r I", SCMPI "; " BLE},
+  {MIRNEXT_A64_OPCODE (Bles), "l r I", SCMPI "; " BLE},
   /* cmp Rn,Rm; bls l */
-  {MIRNEXT_A64_OPCODE(UBle, UBLE), "l r r", CMPR "; " UBLE},
+  {MIRNEXT_A64_OPCODE (UBle), "l r r", CMPR "; " UBLE},
   /* cmp Rn,I,shift ; bls l */
-  {MIRNEXT_A64_OPCODE(UBle, UBLE), "l r I", CMPI "; " UBLE},
+  {MIRNEXT_A64_OPCODE (UBle), "l r I", CMPI "; " UBLE},
   /* cmp Wn,Wm;bls l */
-  {MIRNEXT_A64_OPCODE(UBles, UBLES), "l r r", SCMPR "; " UBLE},
+  {MIRNEXT_A64_OPCODE (UBles), "l r r", SCMPR "; " UBLE},
   /* cmp Wn,I,shift; bls l */
-  {MIRNEXT_A64_OPCODE(UBles, UBLES), "l r I", SCMPI "; " UBLE},
+  {MIRNEXT_A64_OPCODE (UBles), "l r I", SCMPI "; " UBLE},
 
   // ??? with shift
-  {MIRNEXT_A64_OPCODE(Neg, NEG), "r r", "cb0003e0:ff2003e0 rd0 rm1"},  /* neg Rd,Rm */
-  {MIRNEXT_A64_OPCODE(Negs, NEGS), "r r", "4b0003e0:ff2003e0 rd0 rm1"}, /* neg Wd,Wm */
-  {MIRNEXT_A64_OPCODE(FNeg, FNEG), "r r", "1e214000:fffffc00 vd0 vn1"}, /* fneg Sd,Sn */
-  {MIRNEXT_A64_OPCODE(DNeg, DNEG), "r r", "1e614000:fffffc00 vd0 vn1"}, /* fneg Dd,Dn */
+  {MIRNEXT_A64_OPCODE (Neg), "r r", "cb0003e0:ff2003e0 rd0 rm1"},  /* neg Rd,Rm */
+  {MIRNEXT_A64_OPCODE (Negs), "r r", "4b0003e0:ff2003e0 rd0 rm1"}, /* neg Wd,Wm */
+  {MIRNEXT_A64_OPCODE (FNeg), "r r", "1e214000:fffffc00 vd0 vn1"}, /* fneg Sd,Sn */
+  {MIRNEXT_A64_OPCODE (DNeg), "r r", "1e614000:fffffc00 vd0 vn1"}, /* fneg Dd,Dn */
   // ldneg is a builtin
 
-  {MIRNEXT_A64_OPCODE(Lsh, LSH), "r r r", "9ac02000:ffe0fc00 rd0 rn1 rm2"},  /* lsl Rd,Rn,Rm */
-  {MIRNEXT_A64_OPCODE(Lshs, LSHS), "r r r", "1ac02000:ffe0fc00 rd0 rn1 rm2"}, /* lsl Wd,Wn,Wm */
-  {MIRNEXT_A64_OPCODE(Lsh, LSH), "r r SL", "d3400000:ffc00000 rd0 rn1 SL"},  /* ubfm Rd,Rn,immr,imms */
-  {MIRNEXT_A64_OPCODE(Lshs, LSHS), "r r Sl", "53000000:ffc00000 rd0 rn1 Sl"}, /* ubfm Wd,Wn,immr,imms */
+  {MIRNEXT_A64_OPCODE (Lsh), "r r r", "9ac02000:ffe0fc00 rd0 rn1 rm2"},  /* lsl Rd,Rn,Rm */
+  {MIRNEXT_A64_OPCODE (Lshs), "r r r", "1ac02000:ffe0fc00 rd0 rn1 rm2"}, /* lsl Wd,Wn,Wm */
+  {MIRNEXT_A64_OPCODE (Lsh), "r r SL", "d3400000:ffc00000 rd0 rn1 SL"},  /* ubfm Rd,Rn,immr,imms */
+  {MIRNEXT_A64_OPCODE (Lshs), "r r Sl", "53000000:ffc00000 rd0 rn1 Sl"}, /* ubfm Wd,Wn,immr,imms */
 
-  {MIRNEXT_A64_OPCODE(Rsh, RSH), "r r r", "9ac02800:ffe0fc00 rd0 rn1 rm2"},  /* asr Rd,Rn,Rm */
-  {MIRNEXT_A64_OPCODE(Rshs, RSHS), "r r r", "1ac02800:ffe0fc00 rd0 rn1 rm2"}, /* asr Wd,Wn,Wm */
-  {MIRNEXT_A64_OPCODE(Rsh, RSH), "r r SR", "9340fc00:ffc0fc00 rd0 rn1 S"},   /* asr Rd,Rn,S */
-  {MIRNEXT_A64_OPCODE(Rshs, RSHS), "r r Sr", "13007c00:ffc0fc00 rd0 rn1 S"},  /* asr Wd,Wn,S */
+  {MIRNEXT_A64_OPCODE (Rsh), "r r r", "9ac02800:ffe0fc00 rd0 rn1 rm2"},  /* asr Rd,Rn,Rm */
+  {MIRNEXT_A64_OPCODE (Rshs), "r r r", "1ac02800:ffe0fc00 rd0 rn1 rm2"}, /* asr Wd,Wn,Wm */
+  {MIRNEXT_A64_OPCODE (Rsh), "r r SR", "9340fc00:ffc0fc00 rd0 rn1 S"},   /* asr Rd,Rn,S */
+  {MIRNEXT_A64_OPCODE (Rshs), "r r Sr", "13007c00:ffc0fc00 rd0 rn1 S"},  /* asr Wd,Wn,S */
 
-  {MIRNEXT_A64_OPCODE(URsh, URSH), "r r r", "9ac02400:ffe0fc00 rd0 rn1 rm2"},  /* lsr Rd,Rn,Rm */
-  {MIRNEXT_A64_OPCODE(URshs, URSHS), "r r r", "1ac02400:ffe0fc00 rd0 rn1 rm2"}, /* lsr Wd,Wn,Wm */
-  {MIRNEXT_A64_OPCODE(URsh, URSH), "r r SR", "d340fc00:ffc0fc00 rd0 rn1 S"},   /* lsr Rd,Rn,S */
-  {MIRNEXT_A64_OPCODE(URshs, URSHS), "r r Sr", "53007c00:ffc0fc00 rd0 rn1 S"},  /* lsr Wd,Wn,S */
+  {MIRNEXT_A64_OPCODE (URsh), "r r r", "9ac02400:ffe0fc00 rd0 rn1 rm2"},  /* lsr Rd,Rn,Rm */
+  {MIRNEXT_A64_OPCODE (URshs), "r r r", "1ac02400:ffe0fc00 rd0 rn1 rm2"}, /* lsr Wd,Wn,Wm */
+  {MIRNEXT_A64_OPCODE (URsh), "r r SR", "d340fc00:ffc0fc00 rd0 rn1 S"},   /* lsr Rd,Rn,S */
+  {MIRNEXT_A64_OPCODE (URshs), "r r Sr", "53007c00:ffc0fc00 rd0 rn1 S"},  /* lsr Wd,Wn,S */
 
   // ??? adding shift, negate, immediate
-  {MIRNEXT_A64_OPCODE(And, AND), "r r r", "8a000000:ffe0fc00 rd0 rn1 rm2"},  /* and Rd,Rn,Rm */
-  {MIRNEXT_A64_OPCODE(Ands, ANDS), "r r r", "0a000000:ffe0fc00 rd0 rn1 rm2"}, /* and Wd,Wn,Wm */
+  {MIRNEXT_A64_OPCODE (And), "r r r", "8a000000:ffe0fc00 rd0 rn1 rm2"},  /* and Rd,Rn,Rm */
+  {MIRNEXT_A64_OPCODE (Ands), "r r r", "0a000000:ffe0fc00 rd0 rn1 rm2"}, /* and Wd,Wn,Wm */
 
-  {MIRNEXT_A64_OPCODE(Or, OR), "r r r", "aa000000:ffe0fc00 rd0 rn1 rm2"},  /* orr Rd,Rn,Rm */
-  {MIRNEXT_A64_OPCODE(Ors, ORS), "r r r", "2a000000:ffe0fc00 rd0 rn1 rm2"}, /* orr Wd,Wn,Wm */
+  {MIRNEXT_A64_OPCODE (Or), "r r r", "aa000000:ffe0fc00 rd0 rn1 rm2"},  /* orr Rd,Rn,Rm */
+  {MIRNEXT_A64_OPCODE (Ors), "r r r", "2a000000:ffe0fc00 rd0 rn1 rm2"}, /* orr Wd,Wn,Wm */
 
-  {MIRNEXT_A64_OPCODE(Xor, XOR), "r r r", "ca000000:ffe0fc00 rd0 rn1 rm2"},  /* eor Rd,Rn,Rm */
-  {MIRNEXT_A64_OPCODE(Xors, XORS), "r r r", "4a000000:ffe0fc00 rd0 rn1 rm2"}, /* eor Wd,Wn,Wm */
+  {MIRNEXT_A64_OPCODE (Xor), "r r r", "ca000000:ffe0fc00 rd0 rn1 rm2"},  /* eor Rd,Rn,Rm */
+  {MIRNEXT_A64_OPCODE (Xors), "r r r", "4a000000:ffe0fc00 rd0 rn1 rm2"}, /* eor Wd,Wn,Wm */
 
   // ??? can we add scale
-  {MIRNEXT_A64_OPCODE(I2F, I2F), "r r", "9e220000:ffff0000 vd0 rn1"},  /* scvtf Sd,Rn */
-  {MIRNEXT_A64_OPCODE(I2D, I2D), "r r", "9e620000:ffff0000 vd0 rn1"},  /* scvtf Dd,Rn */
-  {MIRNEXT_A64_OPCODE(UI2F, UI2F), "r r", "9e230000:ffff0000 vd0 rn1"}, /* ucvtf Sd,Rn */
-  {MIRNEXT_A64_OPCODE(UI2D, UI2D), "r r", "9e630000:ffff0000 vd0 rn1"}, /* ucvtf Dd,Rn */
-  {MIRNEXT_A64_OPCODE(F2I, F2I), "r r", "9e380000:ffff0000 rd0 vn1"},  /* fcvtzs Rd,Sn */
-  {MIRNEXT_A64_OPCODE(D2I, D2I), "r r", "9e780000:ffff0000 rd0 vn1"},  /* fcvtzs Rd,Dn */
-  {MIRNEXT_A64_OPCODE(F2D, F2D), "r r", "1e22c000:fffffc00 vd0 vn1"},  /* fcvt Dd,Sn */
-  {MIRNEXT_A64_OPCODE(D2F, D2F), "r r", "1e624000:fffffc00 vd0 vn1"},  /* fcvt Sd,Dn */
+  {MIRNEXT_A64_OPCODE (I2F), "r r", "9e220000:ffff0000 vd0 rn1"},  /* scvtf Sd,Rn */
+  {MIRNEXT_A64_OPCODE (I2D), "r r", "9e620000:ffff0000 vd0 rn1"},  /* scvtf Dd,Rn */
+  {MIRNEXT_A64_OPCODE (UI2F), "r r", "9e230000:ffff0000 vd0 rn1"}, /* ucvtf Sd,Rn */
+  {MIRNEXT_A64_OPCODE (UI2D), "r r", "9e630000:ffff0000 vd0 rn1"}, /* ucvtf Dd,Rn */
+  {MIRNEXT_A64_OPCODE (F2I), "r r", "9e380000:ffff0000 rd0 vn1"},  /* fcvtzs Rd,Sn */
+  {MIRNEXT_A64_OPCODE (D2I), "r r", "9e780000:ffff0000 rd0 vn1"},  /* fcvtzs Rd,Dn */
+  {MIRNEXT_A64_OPCODE (F2D), "r r", "1e22c000:fffffc00 vd0 vn1"},  /* fcvt Dd,Sn */
+  {MIRNEXT_A64_OPCODE (D2F), "r r", "1e624000:fffffc00 vd0 vn1"},  /* fcvt Sd,Dn */
   // i2ld, ui2ld, ld2i, f2ld, d2ld, ld2f, ld2d are builtins
 
-  {MIRNEXT_A64_OPCODE(Call, CALL), "X r $", "d63f0000:fffffc1f rn1"},   /* blr *Rn */
-  {MIRNEXT_A64_OPCODE(Call, CALL), "X L $", "94000000:fc000000 rn1"},   /* bl address */
-  {MIRNEXT_A64_OPCODE(Inline, INLINE), "X r $", "d63f0000:fffffc1f rn1"}, /* blr *Rn */
-  {MIRNEXT_A64_OPCODE(Inline, INLINE), "X L $", "94000000:fc000000 rn1"}, /* bl address */
-  {MIRNEXT_A64_OPCODE(Ret, RET), "$", "d65f0000:fffffc1f hn1e"},       /* ret R30  */
+  {MIRNEXT_A64_OPCODE (Call), "X r $", "d63f0000:fffffc1f rn1"},   /* blr *Rn */
+  {MIRNEXT_A64_OPCODE (Call), "X L $", "94000000:fc000000 rn1"},   /* bl address */
+  {MIRNEXT_A64_OPCODE (Inline), "X r $", "d63f0000:fffffc1f rn1"}, /* blr *Rn */
+  {MIRNEXT_A64_OPCODE (Inline), "X L $", "94000000:fc000000 rn1"}, /* bl address */
+  {MIRNEXT_A64_OPCODE (Ret), "$", "d65f0000:fffffc1f hn1e"},       /* ret R30  */
 
-  {MIRNEXT_A64_OPCODE(JCall, JCALL), "X r $", "d61f0000:fffffc00 rn1"}, /* br r1 */
-  {MIRNEXT_A64_OPCODE(JRet, JRET), "r $", "d61f0000:fffffc00 rn0"},    /* br r0  */
+  {MIRNEXT_A64_OPCODE (JCall), "X r $", "d61f0000:fffffc00 rn1"}, /* br r1 */
+  {MIRNEXT_A64_OPCODE (JRet), "r $", "d61f0000:fffffc00 rn0"},    /* br r0  */
 
   /* add r0, r1, 15; and r0, r0, -16; sub sp, sp, r0; mov r0, sp: */
-  {MIRNEXT_A64_OPCODE(Alloca, ALLOCA), "r r",
+  {MIRNEXT_A64_OPCODE (Alloca), "r r",
    "91003c00:fffffc00 rd0 rn1; 927cec00:fffffc00 rd0 rn0;"         /* add r0,r1,15;and r0,r0,-16
                                                                     */
    "cb206000:ffe0fc00 hn1f hd1f rm0; 91000000:fffffc00 rd0 hn1f"}, /* sub sp,sp,r0; mov r0,sp */
   /* sub sp, sp, roundup (imm, 16); mov r0, sp: */
-  {MIRNEXT_A64_OPCODE(Alloca, ALLOCA), "r Iu", "d1000000:ff000000 hd1f hn1f Iu; 91000000:fffffc00 rd0 hn1f"},
+  {MIRNEXT_A64_OPCODE (Alloca), "r Iu",
+   "d1000000:ff000000 hd1f hn1f Iu; 91000000:fffffc00 rd0 hn1f"},
 
-  {MIRNEXT_A64_OPCODE(BStart, BSTART), "r", "91000000:fffffc00 rd0 hn1f"}, /* Rd = sp */
-  {MIRNEXT_A64_OPCODE(BEnd, BEND), "r", "91000000:fffffc00 hd1f rn0"},   /* sp = Rn */
+  {MIRNEXT_A64_OPCODE (BStart), "r", "91000000:fffffc00 rd0 hn1f"}, /* Rd = sp */
+  {MIRNEXT_A64_OPCODE (BEnd), "r", "91000000:fffffc00 hd1f rn0"},   /* sp = Rn */
 
   /* adr r10,PC-relative TableAddress; ldr r10,(r10,r,8);br r10; TableContent
      We use r10 as r9 can be used if switch operand is memory. */
-  {MIRNEXT_A64_OPCODE(Switch, SWITCH), "r $",
+  {MIRNEXT_A64_OPCODE (Switch), "r $",
    "10000000:ff000000 hda T; f8607800:ffe0fc00 hda hna rm0; d61f0000:fffffc00 hna;"},
 
   /* Used only during machine code generation.  Should have the same format as branch on overflow
      insns */
   /* unsigned sub sets up carry flag when there is no overflow: */
-  {MIRNEXT_A64_OPCODE(SubUnsignedOverflow, SUB_UBO), "l", "54000003:ff00001f l"},  /* b.cc */
-  {MIRNEXT_A64_OPCODE(SubUnsignedNoOverflow, SUB_UBNO), "l", "54000002:ff00001f l"}, /* b.cs */
+  {MIRNEXT_A64_OPCODE (SubUnsignedOverflow), "l", "54000003:ff00001f l"},   /* b.cc */
+  {MIRNEXT_A64_OPCODE (SubUnsignedNoOverflow), "l", "54000002:ff00001f l"}, /* b.cs */
 
   /* MULOS:smull Rd,Wn,Wm; asr r10,Rd,32; cmp W10,Wd,asr 31 */
-  {MIRNEXT_A64_OPCODE(Mulos, MULOS), "r r r",
+  {MIRNEXT_A64_OPCODE (Mulos), "r r r",
    "9b207c00:ffe0fc00 rd0 rn1 rm2; 9340fc00:ffc0fc00 hda rn0 I20; "
    "6b80001f:ffe0001f hna rm0 i1f"},
   /* UMULOS:umull Rd,Wn,Wm; cmp xzr,Rd,lsr 32 */
-  {MIRNEXT_A64_OPCODE(UMulos, UMULOS), "r r r", "9ba07c00:ffe0fc00 rd0 rn1 rm2; eb40001f:ffe0001f hn1f rm0 i20"},
+  {MIRNEXT_A64_OPCODE (UMulos), "r r r",
+   "9ba07c00:ffe0fc00 rd0 rn1 rm2; eb40001f:ffe0001f hn1f rm0 i20"},
   /* MULO:smulh h11,Rn,Rm; mul Rd,Rn,Rm; cmp h11,Rd,asr 63 (r11 is a scratch reg) */
-  {MIRNEXT_A64_OPCODE(Mulo, MULO), "r r r",
+  {MIRNEXT_A64_OPCODE (Mulo), "r r r",
    "9b407c00:ffe0fc00 hdb rn1 rm2; 9b007c00:ffe0fc00 rd0 rn1 rm2; "
    "eb80001f:ffe0001f hnb rm0 i3f"},
   /* UMULO:umulh h11,Rn,Rm; mul Rd,Rn,Rm; cmp xzr,h11 (r11 is a scratch reg) */
-  {MIRNEXT_A64_OPCODE(UMulo, UMULO), "r r r",
+  {MIRNEXT_A64_OPCODE (UMulo), "r r r",
    "9bc07c00:ffe0fc00 hdb rn1 rm2; 9b007c00:ffe0fc00 rd0 rn1 rm2; "
    "eb00001f:ff20001f hn1f hmb"},
 
   /* [u]mulo[s] insns uses zero flag to check overflow: */
-  {MIRNEXT_A64_OPCODE(MultiplyOverflow, MUL_BO), "l", BNE},  /* b.ne */
-  {MIRNEXT_A64_OPCODE(MultiplyNoOverflow, MUL_BNO), "l", BEQ}, /* b.eq */
+  {MIRNEXT_A64_OPCODE (MultiplyOverflow), "l", BNE},   /* b.ne */
+  {MIRNEXT_A64_OPCODE (MultiplyNoOverflow), "l", BEQ}, /* b.eq */
 };
 
 #undef CMPR

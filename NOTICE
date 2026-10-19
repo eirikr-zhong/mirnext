@@ -1,6 +1,7 @@
 MIRNext
 
-MIRNext is an independently maintained continuation fork of the MIR Project.
+MIRNext is an independently maintained C++ implementation derived from the
+MIR Project.
 
 Original project:
   MIR Project
@@ -10,11 +11,8 @@ Original project:
 
 This fork:
   MIRNext
+  Copyright (c) 2026 MIRNext contributors
   Licensed under the MIT License unless otherwise stated.
 
 MIRNext is not affiliated with, sponsored by, or endorsed by the original MIR
 Project maintainers.
-
-Some test and benchmark files are third-party materials under their own
-licenses. See c-tests/*/LICENSE, c-tests/gcc/COPYING,
-c-tests/gcc/COPYING3, and inline notices in c-benchmarks.

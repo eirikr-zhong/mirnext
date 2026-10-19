@@ -1,110 +1,121 @@
 /* Native C++ lowering / shared target patterns derived from MIR.
    Copyright (C) 2018-2024 Vladimir Makarov <vmakarov.gcc@gmail.com>.
    Licensed under the MIT License. */
-#define IOP0(ICODE, SUFF, RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE) \
-  {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 r", "X " RRM_CODE " r0 R2"},       /* op r0,r2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 m3", "X " RRM_CODE " r0 m2"},    /* op r0,m2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "m3 0 r", "X " MR_CODE " r2 m0"},     /* op m0,r2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 i0", "X " RMI8_CODE " R0 i2"},   /* op r0,i2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "m3 0 i0", "X " RMI8_CODE " m0 i2"},  /* op m0,i2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 i2", "X " RMI32_CODE " R0 I2"},  /* op r0,i2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "m3 0 i2", "X " RMI32_CODE " m0 I2"}, /* op m0,i2*/
+#define IOP0(ICODE, SUFF, RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE)                        \
+  {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 r", "X " RRM_CODE " r0 R2"},       /* op r0,r2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 m3", "X " RRM_CODE " r0 m2"},    /* op r0,m2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "m3 0 r", "X " MR_CODE " r2 m0"},     /* op m0,r2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 i0", "X " RMI8_CODE " R0 i2"},   /* op r0,i2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "m3 0 i0", "X " RMI8_CODE " m0 i2"},  /* op m0,i2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 i2", "X " RMI32_CODE " R0 I2"},  /* op r0,i2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "m3 0 i2", "X " RMI32_CODE " m0 I2"}, /* op m0,i2*/
 
-#define IOP0S(ICODE, SUFF, RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE)     \
-  {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 r", "Y " RRM_CODE " r0 R2"},       /* op r0,r2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 m2", "Y " RRM_CODE " r0 m2"},    /* op r0,m2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "m2 0 r", "Y " MR_CODE " r2 m0"},     /* op m0,r2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 i0", "Y " RMI8_CODE " R0 i2"},   /* op r0,i2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "m2 0 i0", "Y " RMI8_CODE " m0 i2"},  /* op m0,i2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "r 0 i2", "Y " RMI32_CODE " R0 I2"},  /* op r0,i2*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "m2 0 i2", "Y " RMI32_CODE " m0 I2"}, /* op m0,i2*/
+#define IOP0S(ICODE, SUFF, RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE)                       \
+  {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 r", "Y " RRM_CODE " r0 R2"},       /* op r0,r2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 m2", "Y " RRM_CODE " r0 m2"},    /* op r0,m2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "m2 0 r", "Y " MR_CODE " r2 m0"},     /* op m0,r2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 i0", "Y " RMI8_CODE " R0 i2"},   /* op r0,i2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "m2 0 i0", "Y " RMI8_CODE " m0 i2"},  /* op m0,i2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "r 0 i2", "Y " RMI32_CODE " R0 I2"},  /* op r0,i2*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "m2 0 i2", "Y " RMI32_CODE " m0 I2"}, /* op m0,i2*/
 
 #define IOP(ICODE, RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE) \
   IOP0 (ICODE, , RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE)   \
   IOP0S (ICODE, s, RRM_CODE, MR_CODE, RMI8_CODE, RMI32_CODE)
 
-#define FOP(ICODE, OP_CODE) \
-  {MIRNEXT_X86_OPCODE(ICODE), "r 0 r", OP_CODE " r0 R2"}, {MIRNEXT_X86_OPCODE(ICODE), "r 0 mf", OP_CODE " r0 m2"},
+#define FOP(ICODE, OP_CODE)                                \
+  {MIRNEXT_X86_OPCODE (ICODE), "r 0 r", OP_CODE " r0 R2"}, \
+    {MIRNEXT_X86_OPCODE (ICODE), "r 0 mf", OP_CODE " r0 m2"},
 
-#define DOP(ICODE, OP_CODE) \
-  {MIRNEXT_X86_OPCODE(ICODE), "r 0 r", OP_CODE " r0 R2"}, {MIRNEXT_X86_OPCODE(ICODE), "r 0 md", OP_CODE " r0 m2"},
+#define DOP(ICODE, OP_CODE)                                \
+  {MIRNEXT_X86_OPCODE (ICODE), "r 0 r", OP_CODE " r0 R2"}, \
+    {MIRNEXT_X86_OPCODE (ICODE), "r 0 md", OP_CODE " r0 m2"},
 
 #define LDOP(ICODE, OP_CODE)      \
   /* fld m1;fld m2;op;fstp m0: */ \
-  {MIRNEXT_X86_OPCODE(ICODE), "mld mld mld", "DB /5 m1; DB /5 m2; " OP_CODE "; DB /7 m0"},
+  {MIRNEXT_X86_OPCODE (ICODE), "mld mld mld", "DB /5 m1; DB /5 m2; " OP_CODE "; DB /7 m0"},
 
-#define SHOP(ICODE, CL_OP_CODE, I8_OP_CODE)                      \
-  {MIRNEXT_X86_OPCODE(ICODE), "r 0 h1", "X " CL_OP_CODE " R0"},       /* sh r0,cl */ \
-    {MIRNEXT_X86_OPCODE(ICODE), "m3 0 h1", "X " CL_OP_CODE " m0"},    /* sh m0,cl */ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r 0 i0", "X " I8_OP_CODE " R0 i2"},  /* sh r0,i2 */ \
-    {MIRNEXT_X86_OPCODE(ICODE), "m3 0 i0", "X " I8_OP_CODE " m0 i2"}, /* sh m0,i2 */
+#define SHOP(ICODE, CL_OP_CODE, I8_OP_CODE)                                           \
+  {MIRNEXT_X86_OPCODE (ICODE), "r 0 h1", "X " CL_OP_CODE " R0"},       /* sh r0,cl */ \
+    {MIRNEXT_X86_OPCODE (ICODE), "m3 0 h1", "X " CL_OP_CODE " m0"},    /* sh m0,cl */ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r 0 i0", "X " I8_OP_CODE " R0 i2"},  /* sh r0,i2 */ \
+    {MIRNEXT_X86_OPCODE (ICODE), "m3 0 i0", "X " I8_OP_CODE " m0 i2"}, /* sh m0,i2 */
 
-#define SHOPS(ICODE, CL_OP_CODE, I8_OP_CODE)                     \
-  {MIRNEXT_X86_OPCODE(ICODE), "r 0 h1", "Y " CL_OP_CODE " R0"},       /* sh r0,cl */ \
-    {MIRNEXT_X86_OPCODE(ICODE), "m2 0 h1", "Y " CL_OP_CODE " m0"},    /* sh m0,cl */ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r 0 i0", "Y " I8_OP_CODE " R0 i2"},  /* sh r0,i2 */ \
-    {MIRNEXT_X86_OPCODE(ICODE), "m2 0 i0", "Y " I8_OP_CODE " m0 i2"}, /* sh m0,i2 */
+#define SHOPS(ICODE, CL_OP_CODE, I8_OP_CODE)                                          \
+  {MIRNEXT_X86_OPCODE (ICODE), "r 0 h1", "Y " CL_OP_CODE " R0"},       /* sh r0,cl */ \
+    {MIRNEXT_X86_OPCODE (ICODE), "m2 0 h1", "Y " CL_OP_CODE " m0"},    /* sh m0,cl */ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r 0 i0", "Y " I8_OP_CODE " R0 i2"},  /* sh r0,i2 */ \
+    {MIRNEXT_X86_OPCODE (ICODE), "m2 0 i0", "Y " I8_OP_CODE " m0 i2"}, /* sh m0,i2 */
 
 /* cmp ...; setx r0: */
-#define CMP(ICODE, SETX)                                                      \
-  {MIRNEXT_X86_OPCODE(ICODE), "r r r", "X 3B r1 R2; Y " SETX " S0"},        /* cmp r1,r2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r m3", "X 3B r1 m2; Y " SETX " S0"},     /* cmp r1,m2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r i0", "X 83 /7 R1 i2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r i2", "X 81 /7 R1 I2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r m3 i0", "X 83 /7 m1 i2; Y " SETX " S0"}, /* cmp m1,i2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r m3 i2", "X 81 /7 m1 I2; Y " SETX " S0"}, /* cmp m1,i2;...*/
+#define CMP(ICODE, SETX)                                                                        \
+  {MIRNEXT_X86_OPCODE (ICODE), "r r r", "X 3B r1 R2; Y " SETX " S0"},        /* cmp r1,r2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r m3", "X 3B r1 m2; Y " SETX " S0"},     /* cmp r1,m2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r i0", "X 83 /7 R1 i2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r i2", "X 81 /7 R1 I2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r m3 i0", "X 83 /7 m1 i2; Y " SETX " S0"}, /* cmp m1,i2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r m3 i2", "X 81 /7 m1 I2; Y " SETX " S0"}, /* cmp m1,i2;...*/
 
-#define CMPS(ICODE, SETX)                                                     \
-  {MIRNEXT_X86_OPCODE(ICODE), "r r r", "Y 3B r1 R2; Y " SETX " S0"},        /* cmp r1,r2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r m2", "Y 3B r1 m2; Y " SETX " S0"},     /* cmp r1,m2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r i0", "Y 83 /7 R1 i2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r i2", "Y 81 /7 R1 I2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r m2 i0", "Y 83 /7 m1 i2; Y " SETX " S0"}, /* cmp m1,i2;...*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r m2 i2", "Y 81 /7 m1 I2; Y " SETX " S0"}, /* cmp m1,i2;...*/
+#define CMPS(ICODE, SETX)                                                                       \
+  {MIRNEXT_X86_OPCODE (ICODE), "r r r", "Y 3B r1 R2; Y " SETX " S0"},        /* cmp r1,r2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r m2", "Y 3B r1 m2; Y " SETX " S0"},     /* cmp r1,m2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r i0", "Y 83 /7 R1 i2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r i2", "Y 81 /7 R1 I2; Y " SETX " S0"},  /* cmp r1,i2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r m2 i0", "Y 83 /7 m1 i2; Y " SETX " S0"}, /* cmp m1,i2;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r m2 i2", "Y 81 /7 m1 I2; Y " SETX " S0"}, /* cmp m1,i2;...*/
 
 #define FEQ(ICODE, V, SET_OPCODE)                                                            \
   /*xor %eax,%eax;ucomiss r1,{r,m2};mov V,%edx;set[n]p r0;cmovne %rdx,%rax; mov %rax,r0:  */ \
-  {MIRNEXT_X86_OPCODE(ICODE), "r r r",                                                                           \
-   "33 h0 H0; 0F 2E r1 R2; BA " V "; " SET_OPCODE " H0; X 0F 45 h0 H2; X 8B r0 H0"},      \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r md",                                                                        \
+  {MIRNEXT_X86_OPCODE (ICODE), "r r r",                                                      \
+   "33 h0 H0; 0F 2E r1 R2; BA " V "; " SET_OPCODE " H0; X 0F 45 h0 H2; X 8B r0 H0"},         \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r md",                                                   \
      "33 h0 H0; 0F 2E r1 m2; BA " V "; " SET_OPCODE " H0; X 0F 45 h0 H2; X 8B r0 H0"},
 
 #define DEQ(ICODE, V, SET_OPCODE)                                                            \
   /*xor %eax,%eax;ucomisd r1,{r,m2};mov V,%edx;set[n]p r0;cmovne %rdx,%rax; mov %rax,r0:  */ \
-  {MIRNEXT_X86_OPCODE(ICODE), "r r r",                                                                           \
-   "33 h0 H0; 66 Y 0F 2E r1 R2; BA " V "; " SET_OPCODE " H0; X 0F 45 h0 H2; X 8B r0 H0"}, \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r md",                                                                        \
+  {MIRNEXT_X86_OPCODE (ICODE), "r r r",                                                      \
+   "33 h0 H0; 66 Y 0F 2E r1 R2; BA " V "; " SET_OPCODE " H0; X 0F 45 h0 H2; X 8B r0 H0"},    \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r md",                                                   \
      "33 h0 H0; 66 Y 0F 2E r1 m2; BA " V "; " SET_OPCODE " H0; X 0F 45 h0 H2; X 8B r0 H0"},
 
 #define LDEQ(ICODE, V, SET_OPCODE)                                     \
   /*fld m2;fld m1;xor %eax,%eax;fucomip st,st(1);fstp %st;mov V,%edx;  \
     set[n]p r0;cmovne %rdx,%rax;mov %rax,r0: */                        \
-  {MIRNEXT_X86_OPCODE(ICODE), "r mld mld",                                                 \
+  {MIRNEXT_X86_OPCODE (ICODE), "r mld mld",                            \
    "DB /5 m2; DB /5 m1; 33 h0 H0; DF E9; DD D8; BA " V "; " SET_OPCODE \
    " H0; X 0F 45 h0 H2; X 8B r0 H0"},
 
-#define FCMP(ICODE, SET_OPCODE)                                                 \
-  /*xor %eax,%eax;ucomiss r1,r2;setx az; mov %rax,r0:  */                       \
-  {MIRNEXT_X86_OPCODE(ICODE), "r r r", "33 h0 H0; Y 0F 2E r1 R2; " SET_OPCODE " H0;X 8B r0 H0"}, \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r mf", "33 h0 H0; Y 0F 2E r1 m2; " SET_OPCODE " H0;X 8B r0 H0"},
+#define FCMP(ICODE, SET_OPCODE)                                                                   \
+  /*xor %eax,%eax;ucomiss r1,r2;setx az; mov %rax,r0:  */                                         \
+  {MIRNEXT_X86_OPCODE (ICODE), "r r r", "33 h0 H0; Y 0F 2E r1 R2; " SET_OPCODE " H0;X 8B r0 H0"}, \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r mf",                                                        \
+     "33 h0 H0; Y 0F 2E r1 m2; " SET_OPCODE " H0;X 8B r0 H0"},
 
-#define DCMP(ICODE, SET_OPCODE)                                                    \
-  /*xor %eax,%eax;ucomisd r1,r2;setx az; mov %rax,r0:  */                          \
-  {MIRNEXT_X86_OPCODE(ICODE), "r r r", "33 h0 H0; 66 Y 0F 2E r1 R2; " SET_OPCODE " H0;X 8B r0 H0"}, \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r md", "33 h0 H0; 66 Y 0F 2E r1 m2; " SET_OPCODE " H0;X 8B r0 H0"},
+#define DCMP(ICODE, SET_OPCODE)                                 \
+  /*xor %eax,%eax;ucomisd r1,r2;setx az; mov %rax,r0:  */       \
+  {MIRNEXT_X86_OPCODE (ICODE), "r r r",                         \
+   "33 h0 H0; 66 Y 0F 2E r1 R2; " SET_OPCODE " H0;X 8B r0 H0"}, \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r md",                      \
+     "33 h0 H0; 66 Y 0F 2E r1 m2; " SET_OPCODE " H0;X 8B r0 H0"},
 
-#define LDCMP(ICODE, SET_OPCODE)                                                                   \
-  /*fld m2;fld m1;xor %eax,%eax;fcomip st,st(1);fstp %st;setx az; mov %rax,r0:  */                 \
-  {MIRNEXT_X86_OPCODE(ICODE), "r mld mld", "DB /5 m2; DB /5 m1; 33 h0 H0; DF F1; DD D8; " SET_OPCODE " H0;X 8B r0 H0"},
+#define LDCMP(ICODE, SET_OPCODE)                                                   \
+  /*fld m2;fld m1;xor %eax,%eax;fcomip st,st(1);fstp %st;setx az; mov %rax,r0:  */ \
+  {MIRNEXT_X86_OPCODE (ICODE), "r mld mld",                                        \
+   "DB /5 m2; DB /5 m1; 33 h0 H0; DF F1; DD D8; " SET_OPCODE " H0;X 8B r0 H0"},
 
-#define BRS0(ICODE, SUFF, PREF, SHORT_JMP_OPCODE)                                             \
-  {MIRNEXT_X86_OPCODE(ICODE##SUFF), "l r", #PREF " 85 r1 R1;" SHORT_JMP_OPCODE " l0"}, /*test r0,r0;jxx rel8*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "l m3", #PREF " 83 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,$0;jxx rel8*/
+#define BRS0(ICODE, SUFF, PREF, SHORT_JMP_OPCODE)                      \
+  {MIRNEXT_X86_OPCODE (ICODE##SUFF), "l r",                            \
+   #PREF " 85 r1 R1;" SHORT_JMP_OPCODE " l0"}, /*test r0,r0;jxx rel8*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "l m3",                         \
+     #PREF " 83 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,$0;jxx rel8*/
 
-#define BRS1(ICODE, SUFF, PREF, SHORT_JMP_OPCODE)                                                 \
-  {MIRNEXT_X86_OPCODE(ICODE##SUFF), "l m0", #PREF " 80 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmpb m0,$0;jxx rel8*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "l m1", "66 " #PREF " 83 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmpw ...*/    \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "l m2", #PREF " 83 /7 m1 v0;" SHORT_JMP_OPCODE " l0"},       /*cmpl ...*/
+#define BRS1(ICODE, SUFF, PREF, SHORT_JMP_OPCODE)                         \
+  {MIRNEXT_X86_OPCODE (ICODE##SUFF), "l m0",                              \
+   #PREF " 80 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmpb m0,$0;jxx rel8*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "l m1",                            \
+     "66 " #PREF " 83 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmpw ...*/    \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "l m2",                            \
+     #PREF " 83 /7 m1 v0;" SHORT_JMP_OPCODE " l0"}, /*cmpl ...*/
 
 #define BRS(ICODE, SHORT_JMP_OPCODE)   \
   BRS0 (ICODE, , X, SHORT_JMP_OPCODE)  \
@@ -112,14 +123,19 @@
   BRS1 (ICODE, , Y, SHORT_JMP_OPCODE)  \
   BRS1 (ICODE, s, Y, SHORT_JMP_OPCODE)
 
-#define BR0(ICODE, SUFF, PREF, LONG_JMP_OPCODE)                                               \
-  {MIRNEXT_X86_OPCODE(ICODE##SUFF), "L r", #PREF " 85 r1 R1;" LONG_JMP_OPCODE " L0"}, /*test r0,r0;jxx rel32*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "L m3", #PREF " 83 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmp m0,$0;jxx rel32*/
+#define BR0(ICODE, SUFF, PREF, LONG_JMP_OPCODE)                        \
+  {MIRNEXT_X86_OPCODE (ICODE##SUFF), "L r",                            \
+   #PREF " 85 r1 R1;" LONG_JMP_OPCODE " L0"}, /*test r0,r0;jxx rel32*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "L m3",                         \
+     #PREF " 83 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmp m0,$0;jxx rel32*/
 
-#define BR1(ICODE, SUFF, PREF, LONG_JMP_OPCODE)                                                   \
-  {MIRNEXT_X86_OPCODE(ICODE##SUFF), "L m0", #PREF " 80 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmpb m0,$0;jxx rel32*/ \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "L m1", "66 " #PREF " 83 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmpw ...*/     \
-    {MIRNEXT_X86_OPCODE(ICODE##SUFF), "L m2", #PREF " 83 /7 m1 v0;" LONG_JMP_OPCODE " L0"},       /*cmpl ...*/
+#define BR1(ICODE, SUFF, PREF, LONG_JMP_OPCODE)                           \
+  {MIRNEXT_X86_OPCODE (ICODE##SUFF), "L m0",                              \
+   #PREF " 80 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmpb m0,$0;jxx rel32*/ \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "L m1",                            \
+     "66 " #PREF " 83 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmpw ...*/     \
+    {MIRNEXT_X86_OPCODE (ICODE##SUFF), "L m2",                            \
+     #PREF " 83 /7 m1 v0;" LONG_JMP_OPCODE " L0"}, /*cmpl ...*/
 
 #define BR(ICODE, LONG_JMP_OPCODE)   \
   BR0 (ICODE, , X, LONG_JMP_OPCODE)  \
@@ -127,230 +143,265 @@
   BR1 (ICODE, , Y, LONG_JMP_OPCODE)  \
   BR1 (ICODE, s, Y, LONG_JMP_OPCODE)
 
-#define BCMPS(ICODE, SHORT_JMP_OPCODE)                                                     \
-  {MIRNEXT_X86_OPCODE(ICODE), "l r r", "X 3B r1 R2;" SHORT_JMP_OPCODE " l0"},        /*cmp r0,r1;jxx rel8*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "l r m3", "X 3B r1 m2;" SHORT_JMP_OPCODE " l0"},     /*cmp r0,m1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l r i0", "X 83 /7 R1 i2;" SHORT_JMP_OPCODE " l0"},  /*cmp r0,i1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l r i2", "X 81 /7 R1 I2;" SHORT_JMP_OPCODE " l0"},  /*cmp r0,i1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l m3 i0", "X 83 /7 m1 i2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l m3 i2", "X 81 /7 m1 I2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/
-#define SBCMPS(ICODE, SHORT_JMP_OPCODE)                                                    \
-  {MIRNEXT_X86_OPCODE(ICODE), "l r r", "Y 3B r1 R2;" SHORT_JMP_OPCODE " l0"},        /*cmp r0,r1;jxx rel8*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "l r m2", "Y 3B r1 m2;" SHORT_JMP_OPCODE " l0"},     /*cmp r0,m1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l r i0", "Y 83 /7 R1 i2;" SHORT_JMP_OPCODE " l0"},  /*cmp r0,i1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l r i2", "Y 81 /7 R1 I2;" SHORT_JMP_OPCODE " l0"},  /*cmp r0,i1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l m2 i0", "Y 83 /7 m1 i2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/      \
-    {MIRNEXT_X86_OPCODE(ICODE), "l m2 i2", "Y 81 /7 m1 I2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/
+#define BCMPS(ICODE, SHORT_JMP_OPCODE)                           \
+  {MIRNEXT_X86_OPCODE (ICODE), "l r r",                          \
+   "X 3B r1 R2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,r1;jxx rel8*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l r m3",                       \
+     "X 3B r1 m2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,m1;...*/    \
+    {MIRNEXT_X86_OPCODE (ICODE), "l r i0",                       \
+     "X 83 /7 R1 i2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,i1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l r i2",                       \
+     "X 81 /7 R1 I2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,i1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l m3 i0",                      \
+     "X 83 /7 m1 i2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l m3 i2",                      \
+     "X 81 /7 m1 I2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/
+#define SBCMPS(ICODE, SHORT_JMP_OPCODE)                          \
+  {MIRNEXT_X86_OPCODE (ICODE), "l r r",                          \
+   "Y 3B r1 R2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,r1;jxx rel8*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l r m2",                       \
+     "Y 3B r1 m2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,m1;...*/    \
+    {MIRNEXT_X86_OPCODE (ICODE), "l r i0",                       \
+     "Y 83 /7 R1 i2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,i1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l r i2",                       \
+     "Y 81 /7 R1 I2;" SHORT_JMP_OPCODE " l0"}, /*cmp r0,i1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l m2 i0",                      \
+     "Y 83 /7 m1 i2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "l m2 i2",                      \
+     "Y 81 /7 m1 I2;" SHORT_JMP_OPCODE " l0"}, /*cmp m0,i1;...*/
 
-#define BCMP(ICODE, LONG_JMP_OPCODE)                                                       \
-  {MIRNEXT_X86_OPCODE(ICODE), "L r r", "X 3B r1 R2;" LONG_JMP_OPCODE " L0"},        /*cmp r0,r1;jxx rel32*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "L r m3", "X 3B r1 m2;" LONG_JMP_OPCODE " L0"},     /*cmp r0,m1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L r i0", "X 83 /7 R1 i2;" LONG_JMP_OPCODE " L0"},  /*cmp r0,i1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L r i2", "X 81 /7 R1 I2;" LONG_JMP_OPCODE " L0"},  /*cmp r0,i1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L m3 i0", "X 83 /7 m1 i2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L m3 i2", "X 81 /7 m1 I2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/
-#define SBCMP(ICODE, LONG_JMP_OPCODE)                                                      \
-  {MIRNEXT_X86_OPCODE(ICODE), "L r r", "Y 3B r1 R2;" LONG_JMP_OPCODE " L0"},        /*cmp r0,r1;jxx rel32*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "L r m2", "Y 3B r1 m2;" LONG_JMP_OPCODE " L0"},     /*cmp r0,m1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L r i0", "Y 83 /7 R1 i2;" LONG_JMP_OPCODE " L0"},  /*cmp r0,i1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L r i2", "Y 81 /7 R1 I2;" LONG_JMP_OPCODE " L0"},  /*cmp r0,i1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L m2 i0", "Y 83 /7 m1 i2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/       \
-    {MIRNEXT_X86_OPCODE(ICODE), "L m2 i2", "Y 81 /7 m1 I2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/
+#define BCMP(ICODE, LONG_JMP_OPCODE)                                                               \
+  {MIRNEXT_X86_OPCODE (ICODE), "L r r",                                                            \
+   "X 3B r1 R2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,r1;jxx rel32*/                                   \
+    {MIRNEXT_X86_OPCODE (ICODE), "L r m3", "X 3B r1 m2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,m1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "L r i0",                                                         \
+     "X 83 /7 R1 i2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,i1;...*/                                    \
+    {MIRNEXT_X86_OPCODE (ICODE), "L r i2",                                                         \
+     "X 81 /7 R1 I2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,i1;...*/                                    \
+    {MIRNEXT_X86_OPCODE (ICODE), "L m3 i0",                                                        \
+     "X 83 /7 m1 i2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/                                    \
+    {MIRNEXT_X86_OPCODE (ICODE), "L m3 i2",                                                        \
+     "X 81 /7 m1 I2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/
+#define SBCMP(ICODE, LONG_JMP_OPCODE)                                                              \
+  {MIRNEXT_X86_OPCODE (ICODE), "L r r",                                                            \
+   "Y 3B r1 R2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,r1;jxx rel32*/                                   \
+    {MIRNEXT_X86_OPCODE (ICODE), "L r m2", "Y 3B r1 m2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,m1;...*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "L r i0",                                                         \
+     "Y 83 /7 R1 i2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,i1;...*/                                    \
+    {MIRNEXT_X86_OPCODE (ICODE), "L r i2",                                                         \
+     "Y 81 /7 R1 I2;" LONG_JMP_OPCODE " L0"}, /*cmp r0,i1;...*/                                    \
+    {MIRNEXT_X86_OPCODE (ICODE), "L m2 i0",                                                        \
+     "Y 83 /7 m1 i2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/                                    \
+    {MIRNEXT_X86_OPCODE (ICODE), "L m2 i2",                                                        \
+     "Y 81 /7 m1 I2;" LONG_JMP_OPCODE " L0"}, /*cmp m0,i1;...*/
 
 #define FBCMPS(ICODE, SHORT_JMP_OPCODE) \
-  {MIRNEXT_X86_OPCODE(ICODE), "l r r", "Y 0F 2E r1 R2;" SHORT_JMP_OPCODE " l0"}, /* ucomiss r0,r1;jxx rel8*/
+  {MIRNEXT_X86_OPCODE (ICODE), "l r r", \
+   "Y 0F 2E r1 R2;" SHORT_JMP_OPCODE " l0"}, /* ucomiss r0,r1;jxx rel8*/
 #define DBCMPS(ICODE, SHORT_JMP_OPCODE) \
-  {MIRNEXT_X86_OPCODE(ICODE), "l r r", "66 Y 0F 2E r1 R2;" SHORT_JMP_OPCODE " l0"}, /* ucomisd r0,r1;jxx rel8*/
+  {MIRNEXT_X86_OPCODE (ICODE), "l r r", \
+   "66 Y 0F 2E r1 R2;" SHORT_JMP_OPCODE " l0"}, /* ucomisd r0,r1;jxx rel8*/
 #define LDBCMPS(ICODE, SHORT_JMP_OPCODE)                 \
   /* fld m2;fld m1; fcomip st,st(1); fstp st; jxx rel8*/ \
-  {MIRNEXT_X86_OPCODE(ICODE), "l mld mld", "DB /5 m2; DB /5 m1; DF F1; DD D8; " SHORT_JMP_OPCODE " l0"},
+  {MIRNEXT_X86_OPCODE (ICODE), "l mld mld",              \
+   "DB /5 m2; DB /5 m1; DF F1; DD D8; " SHORT_JMP_OPCODE " l0"},
 
-#define FBCMP(ICODE, LONG_JMP_OPCODE) \
-  {MIRNEXT_X86_OPCODE(ICODE), "L r r", "Y 0F 2E r1 R2;" LONG_JMP_OPCODE " L0"}, /* ucomiss r0,r1;jxx rel32*/
-#define DBCMP(ICODE, LONG_JMP_OPCODE) \
-  {MIRNEXT_X86_OPCODE(ICODE), "L r r", "66 Y 0F 2E r1 R2;" LONG_JMP_OPCODE " L0"}, /* ucomisd r0,r1;jxx rel32*/
+#define FBCMP(ICODE, LONG_JMP_OPCODE)   \
+  {MIRNEXT_X86_OPCODE (ICODE), "L r r", \
+   "Y 0F 2E r1 R2;" LONG_JMP_OPCODE " L0"}, /* ucomiss r0,r1;jxx rel32*/
+#define DBCMP(ICODE, LONG_JMP_OPCODE)   \
+  {MIRNEXT_X86_OPCODE (ICODE), "L r r", \
+   "66 Y 0F 2E r1 R2;" LONG_JMP_OPCODE " L0"}, /* ucomisd r0,r1;jxx rel32*/
 #define LDBCMP(ICODE, LONG_JMP_OPCODE)                    \
   /* fld m2;fld m1; fcomip st,st(1); fstp st; jxx rel32*/ \
-  {MIRNEXT_X86_OPCODE(ICODE), "L mld mld", "DB /5 m2; DB /5 m1; DF F1; DD D8; " LONG_JMP_OPCODE " L0"},
+  {MIRNEXT_X86_OPCODE (ICODE), "L mld mld",               \
+   "DB /5 m2; DB /5 m1; DF F1; DD D8; " LONG_JMP_OPCODE " L0"},
 
 MIRNEXT_X86_TABLE = {
-  {MIRNEXT_X86_OPCODE(Mov), "r z", "Y 33 r0 R0"},      /* xor r0,r0 -- 32 bit xor */
-  {MIRNEXT_X86_OPCODE(Mov), "r r", "X 8B r0 R1"},      /* mov r0,r1 */
-  {MIRNEXT_X86_OPCODE(Mov), "r m3", "X 8B r0 m1"},     /* mov r0,m1 */
-  {MIRNEXT_X86_OPCODE(Mov), "m3 r", "X 89 r1 m0"},     /* mov m0,r1 */
-  {MIRNEXT_X86_OPCODE(Mov), "r i2", "X C7 /0 R0 I1"},  /* mov r0,i32 */
-  {MIRNEXT_X86_OPCODE(Mov), "m3 i2", "X C7 /0 m0 I1"}, /* mov m0,i32 */
-  {MIRNEXT_X86_OPCODE(Mov), "r i3", "X B8 +0 J1"},     /* mov r0,i64 */
+  {MIRNEXT_X86_OPCODE (Mov), "r z", "Y 33 r0 R0"},      /* xor r0,r0 -- 32 bit xor */
+  {MIRNEXT_X86_OPCODE (Mov), "r r", "X 8B r0 R1"},      /* mov r0,r1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r m3", "X 8B r0 m1"},     /* mov r0,m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "m3 r", "X 89 r1 m0"},     /* mov m0,r1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r i2", "X C7 /0 R0 I1"},  /* mov r0,i32 */
+  {MIRNEXT_X86_OPCODE (Mov), "m3 i2", "X C7 /0 m0 I1"}, /* mov m0,i32 */
+  {MIRNEXT_X86_OPCODE (Mov), "r i3", "X B8 +0 J1"},     /* mov r0,i64 */
 
-  {MIRNEXT_X86_OPCODE(Mov), "m0 r", "Z 88 r1 m0"},    /* mov m0, r1 */
-  {MIRNEXT_X86_OPCODE(Mov), "m1 r", "66 Y 89 r1 m0"}, /* mov m0, r1 */
-  {MIRNEXT_X86_OPCODE(Mov), "m2 r", "Y 89 r1 m0"},    /* mov m0, r1 */
+  {MIRNEXT_X86_OPCODE (Mov), "m0 r", "Z 88 r1 m0"},    /* mov m0, r1 */
+  {MIRNEXT_X86_OPCODE (Mov), "m1 r", "66 Y 89 r1 m0"}, /* mov m0, r1 */
+  {MIRNEXT_X86_OPCODE (Mov), "m2 r", "Y 89 r1 m0"},    /* mov m0, r1 */
 
-  {MIRNEXT_X86_OPCODE(Mov), "r ms0", "X 0F BE r0 m1"}, /* movsx r0, m1 */
-  {MIRNEXT_X86_OPCODE(Mov), "r ms1", "X 0F BF r0 m1"}, /* movsx r0, m1 */
-  {MIRNEXT_X86_OPCODE(Mov), "r ms2", "X 63 r0 m1"},    /* movsx r0, m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r ms0", "X 0F BE r0 m1"}, /* movsx r0, m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r ms1", "X 0F BF r0 m1"}, /* movsx r0, m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r ms2", "X 63 r0 m1"},    /* movsx r0, m1 */
 
-  {MIRNEXT_X86_OPCODE(Mov), "r mu0", "X 0F B6 r0 m1"}, /* movzx r0, m1 */
-  {MIRNEXT_X86_OPCODE(Mov), "r mu1", "X 0F B7 r0 m1"}, /* movzx r0, m1 */
-  {MIRNEXT_X86_OPCODE(Mov), "r mu2", "Y 8B r0 m1"},    /* mov r0, m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r mu0", "X 0F B6 r0 m1"}, /* movzx r0, m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r mu1", "X 0F B7 r0 m1"}, /* movzx r0, m1 */
+  {MIRNEXT_X86_OPCODE (Mov), "r mu2", "Y 8B r0 m1"},    /* mov r0, m1 */
 
-  {MIRNEXT_X86_OPCODE(Mov), "m0 i0", "Y C6 /0 m0 i1"}, /* mov m0,i8 */
-  {MIRNEXT_X86_OPCODE(Mov), "m2 i2", "Y C7 /0 m0 I1"}, /* mov m0,i32 */
+  {MIRNEXT_X86_OPCODE (Mov), "m0 i0", "Y C6 /0 m0 i1"}, /* mov m0,i8 */
+  {MIRNEXT_X86_OPCODE (Mov), "m2 i2", "Y C7 /0 m0 I1"}, /* mov m0,i32 */
 
-  {MIRNEXT_X86_OPCODE(FMov), "r r", "Y 0F 28 r0 R1"},     /* movaps r0,r1 */
-  {MIRNEXT_X86_OPCODE(FMov), "r mf", "F3 Y 0F 10 r0 m1"}, /* movss r0,m32 */
-  {MIRNEXT_X86_OPCODE(FMov), "mf r", "F3 Y 0F 11 r1 m0"}, /* movss r0,m32 */
+  {MIRNEXT_X86_OPCODE (FMov), "r r", "Y 0F 28 r0 R1"},     /* movaps r0,r1 */
+  {MIRNEXT_X86_OPCODE (FMov), "r mf", "F3 Y 0F 10 r0 m1"}, /* movss r0,m32 */
+  {MIRNEXT_X86_OPCODE (FMov), "mf r", "F3 Y 0F 11 r1 m0"}, /* movss r0,m32 */
 
-  {MIRNEXT_X86_OPCODE(DMov), "r r", "66 Y 0F 28 r0 R1"},  /* movapd r0,r1 */
-  {MIRNEXT_X86_OPCODE(DMov), "r md", "F2 Y 0F 10 r0 m1"}, /* movsd r0,m64 */
-  {MIRNEXT_X86_OPCODE(DMov), "md r", "F2 Y 0F 11 r1 m0"}, /* movsd m64,r0 */
+  {MIRNEXT_X86_OPCODE (DMov), "r r", "66 Y 0F 28 r0 R1"},  /* movapd r0,r1 */
+  {MIRNEXT_X86_OPCODE (DMov), "r md", "F2 Y 0F 10 r0 m1"}, /* movsd r0,m64 */
+  {MIRNEXT_X86_OPCODE (DMov), "md r", "F2 Y 0F 11 r1 m0"}, /* movsd m64,r0 */
 
-  {MIRNEXT_X86_OPCODE(LDMov), "mld h32", "DB /7 m0"},        /*only for ret and calls in given order: fstp m0 */
-  {MIRNEXT_X86_OPCODE(LDMov), "h32 mld", "DB /5 m1"},        /*only for ret and calls in given order: fld m1 */
-  {MIRNEXT_X86_OPCODE(LDMov), "mld h33", "D9 C9; DB /7 m0"}, /*only for ret and calls: fxch;fstp m0 */
-  {MIRNEXT_X86_OPCODE(LDMov), "h33 mld", "DB /5 m1; D9 C9"}, /*only for ret and calls: fld m1; fxch */
-  {MIRNEXT_X86_OPCODE(LDMov), "mld mld", "DB /5 m1; DB /7 m0"}, /* fld m1; fstp m0 */
+  {MIRNEXT_X86_OPCODE (LDMov), "mld h32",
+   "DB /7 m0"}, /*only for ret and calls in given order: fstp m0 */
+  {MIRNEXT_X86_OPCODE (LDMov), "h32 mld",
+   "DB /5 m1"}, /*only for ret and calls in given order: fld m1 */
+  {MIRNEXT_X86_OPCODE (LDMov), "mld h33",
+   "D9 C9; DB /7 m0"}, /*only for ret and calls: fxch;fstp m0 */
+  {MIRNEXT_X86_OPCODE (LDMov), "h33 mld",
+   "DB /5 m1; D9 C9"}, /*only for ret and calls: fld m1; fxch */
+  {MIRNEXT_X86_OPCODE (LDMov), "mld mld", "DB /5 m1; DB /7 m0"}, /* fld m1; fstp m0 */
 
-  {MIRNEXT_X86_PRIVATE(AlignedMove), "r r", "66 Y 0F 6F r0 R1"},  /* movdqa r0,r1 */
-  {MIRNEXT_X86_PRIVATE(AlignedMove), "r md", "66 Y 0F 6F r0 m1"}, /* movdqa r0,m128 */
-  {MIRNEXT_X86_PRIVATE(AlignedMove), "md r", "66 Y 0F 7F r1 m0"}, /* movdqa m128,r0 */
+  {MIRNEXT_X86_PRIVATE (AlignedMove), "r r", "66 Y 0F 6F r0 R1"},  /* movdqa r0,r1 */
+  {MIRNEXT_X86_PRIVATE (AlignedMove), "r md", "66 Y 0F 6F r0 m1"}, /* movdqa r0,m128 */
+  {MIRNEXT_X86_PRIVATE (AlignedMove), "md r", "66 Y 0F 7F r1 m0"}, /* movdqa m128,r0 */
 
-  {MIRNEXT_X86_OPCODE(Ext8), "r r", "X 0F BE r0 R1"},    /* movsx r0,r1 */
-  {MIRNEXT_X86_OPCODE(Ext8), "r m0", "X 0F BE r0 m1"},   /* movsx r0,m1 */
-  {MIRNEXT_X86_OPCODE(Ext16), "r r", "X 0F BF r0 R1"},   /* movsx r0,r1 */
-  {MIRNEXT_X86_OPCODE(Ext16), "r m1", "X 0F BF r0 m1"},  /* movsx r0,m1 */
-  {MIRNEXT_X86_OPCODE(Ext32), "r r", "X 63 r0 R1"},      /* movsx r0,r1 */
-  {MIRNEXT_X86_OPCODE(Ext32), "r m2", "X 63 r0 m1"},     /* movsx r0,m1 */
-  {MIRNEXT_X86_OPCODE(UExt8), "r r", "Y 0F B6 r0 S1"},   /* movzx r0,r1 */
-  {MIRNEXT_X86_OPCODE(UExt8), "r m0", "X 0F B6 r0 m1"},  /* movzx r0,m1 */
-  {MIRNEXT_X86_OPCODE(UExt16), "r r", "X 0F B7 r0 R1"},  /* movzx r0,r1 */
-  {MIRNEXT_X86_OPCODE(UExt16), "r m1", "X 0F B7 r0 m1"}, /* movzx r0,m1 */
-  {MIRNEXT_X86_OPCODE(UExt32), "r r", "Y 8B r0 R1"},     /* mov r0,r1 */
-  {MIRNEXT_X86_OPCODE(UExt32), "r m2", "Y 8B r0 m1"},    /* mov r0,m1 */
+  {MIRNEXT_X86_OPCODE (Ext8), "r r", "X 0F BE r0 R1"},    /* movsx r0,r1 */
+  {MIRNEXT_X86_OPCODE (Ext8), "r m0", "X 0F BE r0 m1"},   /* movsx r0,m1 */
+  {MIRNEXT_X86_OPCODE (Ext16), "r r", "X 0F BF r0 R1"},   /* movsx r0,r1 */
+  {MIRNEXT_X86_OPCODE (Ext16), "r m1", "X 0F BF r0 m1"},  /* movsx r0,m1 */
+  {MIRNEXT_X86_OPCODE (Ext32), "r r", "X 63 r0 R1"},      /* movsx r0,r1 */
+  {MIRNEXT_X86_OPCODE (Ext32), "r m2", "X 63 r0 m1"},     /* movsx r0,m1 */
+  {MIRNEXT_X86_OPCODE (UExt8), "r r", "Y 0F B6 r0 S1"},   /* movzx r0,r1 */
+  {MIRNEXT_X86_OPCODE (UExt8), "r m0", "X 0F B6 r0 m1"},  /* movzx r0,m1 */
+  {MIRNEXT_X86_OPCODE (UExt16), "r r", "X 0F B7 r0 R1"},  /* movzx r0,r1 */
+  {MIRNEXT_X86_OPCODE (UExt16), "r m1", "X 0F B7 r0 m1"}, /* movzx r0,m1 */
+  {MIRNEXT_X86_OPCODE (UExt32), "r r", "Y 8B r0 R1"},     /* mov r0,r1 */
+  {MIRNEXT_X86_OPCODE (UExt32), "r m2", "Y 8B r0 m1"},    /* mov r0,m1 */
 
-  {MIRNEXT_X86_OPCODE(I2F), "r r", "F3 X 0F 2A r0 R1"},                  /* cvtsi2ss r0,r1 */
-  {MIRNEXT_X86_OPCODE(I2F), "r m3", "F3 X 0F 2A r0 m1"},                 /* cvtsi2ss r0,m1 */
-  {MIRNEXT_X86_OPCODE(I2D), "r r", "F2 X 0F 2A r0 R1"},                  /* cvtsi2sd r0,r1 */
-  {MIRNEXT_X86_OPCODE(I2D), "r m3", "F2 X 0F 2A r0 m1"},                 /* cvtsi2sd r0,m1 */
-  {MIRNEXT_X86_OPCODE(I2LD), "mld r", "X 89 r1 mt; DF /5 mt; DB /7 m0"}, /*mov -16(sp),r1;fild -16(sp);fstp m0 */
+  {MIRNEXT_X86_OPCODE (I2F), "r r", "F3 X 0F 2A r0 R1"},  /* cvtsi2ss r0,r1 */
+  {MIRNEXT_X86_OPCODE (I2F), "r m3", "F3 X 0F 2A r0 m1"}, /* cvtsi2ss r0,m1 */
+  {MIRNEXT_X86_OPCODE (I2D), "r r", "F2 X 0F 2A r0 R1"},  /* cvtsi2sd r0,r1 */
+  {MIRNEXT_X86_OPCODE (I2D), "r m3", "F2 X 0F 2A r0 m1"}, /* cvtsi2sd r0,m1 */
+  {MIRNEXT_X86_OPCODE (I2LD), "mld r",
+   "X 89 r1 mt; DF /5 mt; DB /7 m0"}, /*mov -16(sp),r1;fild -16(sp);fstp m0 */
 
-  {MIRNEXT_X86_OPCODE(F2I), "r r", "F3 X 0F 2C r0 R1"},  /* cvttss2si r0,r1 */
-  {MIRNEXT_X86_OPCODE(F2I), "r mf", "F3 X 0F 2C r0 m1"}, /* cvttss2si r0,m1 */
-  {MIRNEXT_X86_OPCODE(D2I), "r r", "F2 X 0F 2C r0 R1"},  /* cvttsd2si r0,r1 */
-  {MIRNEXT_X86_OPCODE(D2I), "r md", "F2 X 0F 2C r0 m1"}, /* cvttsd2si r0,m1 */
+  {MIRNEXT_X86_OPCODE (F2I), "r r", "F3 X 0F 2C r0 R1"},  /* cvttss2si r0,r1 */
+  {MIRNEXT_X86_OPCODE (F2I), "r mf", "F3 X 0F 2C r0 m1"}, /* cvttss2si r0,m1 */
+  {MIRNEXT_X86_OPCODE (D2I), "r r", "F2 X 0F 2C r0 R1"},  /* cvttsd2si r0,r1 */
+  {MIRNEXT_X86_OPCODE (D2I), "r md", "F2 X 0F 2C r0 m1"}, /* cvttsd2si r0,m1 */
 
-  {MIRNEXT_X86_OPCODE(F2D), "r r", "F3 Y 0F 5A r0 R1"},  /* cvtss2sd r0,r1 */
-  {MIRNEXT_X86_OPCODE(F2D), "r mf", "F3 Y 0F 5A r0 m1"}, /* cvtss2sd r0,m1 */
-                                            /* fld m1;fstpl -16(sp);movsd r0,-16(sp): */
-  {MIRNEXT_X86_OPCODE(LD2D), "r mld", "DB /5 m1; DD /3 mt; F2 Y 0F 10 r0 mt"},
+  {MIRNEXT_X86_OPCODE (F2D), "r r", "F3 Y 0F 5A r0 R1"},  /* cvtss2sd r0,r1 */
+  {MIRNEXT_X86_OPCODE (F2D), "r mf", "F3 Y 0F 5A r0 m1"}, /* cvtss2sd r0,m1 */
+  /* fld m1;fstpl -16(sp);movsd r0,-16(sp): */
+  {MIRNEXT_X86_OPCODE (LD2D), "r mld", "DB /5 m1; DD /3 mt; F2 Y 0F 10 r0 mt"},
 
-  {MIRNEXT_X86_OPCODE(D2F), "r r", "F2 Y 0F 5A r0 R1"},  /* cvtsd2ss r0,r1 */
-  {MIRNEXT_X86_OPCODE(D2F), "r md", "F2 Y 0F 5A r0 m1"}, /* cvtsd2ss r0,m1 */
+  {MIRNEXT_X86_OPCODE (D2F), "r r", "F2 Y 0F 5A r0 R1"},  /* cvtsd2ss r0,r1 */
+  {MIRNEXT_X86_OPCODE (D2F), "r md", "F2 Y 0F 5A r0 m1"}, /* cvtsd2ss r0,m1 */
   /* fld m1;fstps -16(sp);movss r0, -16(sp): */
-  {MIRNEXT_X86_OPCODE(LD2F), "r mld", "DB /5 m1; D9 /3 mt; F3 Y 0F 10 r0 mt"},
+  {MIRNEXT_X86_OPCODE (LD2F), "r mld", "DB /5 m1; D9 /3 mt; F3 Y 0F 10 r0 mt"},
 
   /* movss -16(sp), r1; flds -16(sp); fstp m0: */
-  {MIRNEXT_X86_OPCODE(F2LD), "mld r", "F3 Y 0F 11 r1 mt; D9 /0 mt; DB /7 m0"},
-  {MIRNEXT_X86_OPCODE(F2LD), "mld mf", "D9 /0 m1; DB /7 m0"}, /* flds m1; fstp m0 */
+  {MIRNEXT_X86_OPCODE (F2LD), "mld r", "F3 Y 0F 11 r1 mt; D9 /0 mt; DB /7 m0"},
+  {MIRNEXT_X86_OPCODE (F2LD), "mld mf", "D9 /0 m1; DB /7 m0"}, /* flds m1; fstp m0 */
   /* movsd -16(sp), r1; fldl -16(sp); fstp m0: */
-  {MIRNEXT_X86_OPCODE(D2LD), "mld r", "F2 Y 0F 11 r1 mt; DD /0 mt; DB /7 m0"},
-  {MIRNEXT_X86_OPCODE(D2LD), "mld md", "DD /0 m1; DB /7 m0"}, /* fldl m1; fstp m0 */
+  {MIRNEXT_X86_OPCODE (D2LD), "mld r", "F2 Y 0F 11 r1 mt; DD /0 mt; DB /7 m0"},
+  {MIRNEXT_X86_OPCODE (D2LD), "mld md", "DD /0 m1; DB /7 m0"}, /* fldl m1; fstp m0 */
 
   /* lea r0, 15(r1); and r0, r0, -16; sub sp, r0; mov r0, sp: */
-  {MIRNEXT_X86_OPCODE(Alloca), "r r", "Y 8D r0 adF; X 81 /4 R0 VFFFFFFF0; X 2B h04 R0; X 8B r0 H04"},
-  {MIRNEXT_X86_OPCODE(Alloca), "r i2", "X 81 /5 H04 I1; X 8B r0 H04"}, /* sub sp, i2; mov r0, sp */
+  {MIRNEXT_X86_OPCODE (Alloca), "r r",
+   "Y 8D r0 adF; X 81 /4 R0 VFFFFFFF0; X 2B h04 R0; X 8B r0 H04"},
+  {MIRNEXT_X86_OPCODE (Alloca), "r i2", "X 81 /5 H04 I1; X 8B r0 H04"}, /* sub sp, i2; mov r0, sp */
 
-  {MIRNEXT_X86_OPCODE(BStart), "r", "X 8B r0 H4"}, /* r0 = sp */
-  {MIRNEXT_X86_OPCODE(BEnd), "r", "X 8B h4 R0"},   /* sp = r0 */
+  {MIRNEXT_X86_OPCODE (BStart), "r", "X 8B r0 H4"}, /* r0 = sp */
+  {MIRNEXT_X86_OPCODE (BEnd), "r", "X 8B h4 R0"},   /* sp = r0 */
 
-  {MIRNEXT_X86_OPCODE(Neg), "r 0", "X F7 /3 R1"},   /* neg r0 */
-  {MIRNEXT_X86_OPCODE(Neg), "m3 0", "X F7 /3 m1"},  /* neg m0 */
-  {MIRNEXT_X86_OPCODE(Negs), "r 0", "Y F7 /3 R1"},  /* neg r0 */
-  {MIRNEXT_X86_OPCODE(Negs), "m2 0", "Y F7 /3 m1"}, /* neg m0 */
+  {MIRNEXT_X86_OPCODE (Neg), "r 0", "X F7 /3 R1"},   /* neg r0 */
+  {MIRNEXT_X86_OPCODE (Neg), "m3 0", "X F7 /3 m1"},  /* neg m0 */
+  {MIRNEXT_X86_OPCODE (Negs), "r 0", "Y F7 /3 R1"},  /* neg r0 */
+  {MIRNEXT_X86_OPCODE (Negs), "m2 0", "Y F7 /3 m1"}, /* neg m0 */
 
-  {MIRNEXT_X86_OPCODE(FNeg), "r 0", "Y 0F 57 r0 c0000000080000000"},    /* xorps r0,80000000 */
-  {MIRNEXT_X86_OPCODE(DNeg), "r 0", "66 Y 0F 57 r0 c8000000000000000"}, /* xorpd r0,0x8000000000000000 */
-  {MIRNEXT_X86_OPCODE(LDNeg), "mld mld", "DB /5 m1; D9 E0; DB /7 m0"},  /* fld m1; fchs; fstp m0 */
+  {MIRNEXT_X86_OPCODE (FNeg), "r 0", "Y 0F 57 r0 c0000000080000000"}, /* xorps r0,80000000 */
+  {MIRNEXT_X86_OPCODE (DNeg), "r 0",
+   "66 Y 0F 57 r0 c8000000000000000"}, /* xorpd r0,0x8000000000000000 */
+  {MIRNEXT_X86_OPCODE (LDNeg), "mld mld", "DB /5 m1; D9 E0; DB /7 m0"}, /* fld m1; fchs; fstp m0 */
 
   IOP (Add, "03", "01", "83 /0", "81 /0") /* x86_64 int additions */
 
-  {MIRNEXT_X86_OPCODE(Add), "r r r", "X 8D r0 ap"},   /* lea r0,(r1,r2)*/
-  {MIRNEXT_X86_OPCODE(Add), "r r i2", "X 8D r0 ap"},  /* lea r0,i2(r1)*/
-  {MIRNEXT_X86_OPCODE(Adds), "r r r", "Y 8D r0 ap"},  /* lea r0,(r1,r2)*/
-  {MIRNEXT_X86_OPCODE(Adds), "r r i2", "Y 8D r0 ap"}, /* lea r0,i2(r1)*/
+  {MIRNEXT_X86_OPCODE (Add), "r r r", "X 8D r0 ap"},   /* lea r0,(r1,r2)*/
+  {MIRNEXT_X86_OPCODE (Add), "r r i2", "X 8D r0 ap"},  /* lea r0,i2(r1)*/
+  {MIRNEXT_X86_OPCODE (Adds), "r r r", "Y 8D r0 ap"},  /* lea r0,(r1,r2)*/
+  {MIRNEXT_X86_OPCODE (Adds), "r r i2", "Y 8D r0 ap"}, /* lea r0,i2(r1)*/
 
   IOP (Sub, "2B", "29", "83 /5", "81 /5") /* x86_64 int subtractions */
 
   IOP (Addo, "03", "01", "83 /0", "81 /0") /* x86_64 int additions with ovfl flag */
   IOP (Subo, "2B", "29", "83 /5", "81 /5") /* x86_64 int subtractions with ovfl flag */
 
-#define IMULL(ICODE, ICODES)                                     \
-  {MIRNEXT_X86_OPCODE(ICODE), "r 0 r", "X 0F AF r0 R2"},      /* imul r0,r1*/     \
-    {MIRNEXT_X86_OPCODE(ICODE), "r 0 m3", "X 0F AF r0 m2"},   /* imul r0,m1*/     \
-    {MIRNEXT_X86_OPCODE(ICODE), "r r i2", "X 69 r0 R1 I2"},   /* imul r0,r1,i32*/ \
-    {MIRNEXT_X86_OPCODE(ICODE), "r m3 i2", "X 69 r0 m1 I2"},  /* imul r0,m1,i32*/ \
-    {MIRNEXT_X86_OPCODE(ICODES), "r 0 r", "Y 0F AF r0 R2"},   /* imul r0,r1*/     \
-    {MIRNEXT_X86_OPCODE(ICODES), "r 0 m2", "Y 0F AF r0 m2"},  /* imul r0,m1*/     \
-    {MIRNEXT_X86_OPCODE(ICODES), "r r i2", "Y 69 r0 R1 I2"},  /* imul r0,r1,i32*/ \
-    {MIRNEXT_X86_OPCODE(ICODES), "r m2 i2", "Y 69 r0 m1 I2"}, /* imul r0,m1,i32*/
+#define IMULL(ICODE, ICODES)                                                       \
+  {MIRNEXT_X86_OPCODE (ICODE), "r 0 r", "X 0F AF r0 R2"},      /* imul r0,r1*/     \
+    {MIRNEXT_X86_OPCODE (ICODE), "r 0 m3", "X 0F AF r0 m2"},   /* imul r0,m1*/     \
+    {MIRNEXT_X86_OPCODE (ICODE), "r r i2", "X 69 r0 R1 I2"},   /* imul r0,r1,i32*/ \
+    {MIRNEXT_X86_OPCODE (ICODE), "r m3 i2", "X 69 r0 m1 I2"},  /* imul r0,m1,i32*/ \
+    {MIRNEXT_X86_OPCODE (ICODES), "r 0 r", "Y 0F AF r0 R2"},   /* imul r0,r1*/     \
+    {MIRNEXT_X86_OPCODE (ICODES), "r 0 m2", "Y 0F AF r0 m2"},  /* imul r0,m1*/     \
+    {MIRNEXT_X86_OPCODE (ICODES), "r r i2", "Y 69 r0 R1 I2"},  /* imul r0,r1,i32*/ \
+    {MIRNEXT_X86_OPCODE (ICODES), "r m2 i2", "Y 69 r0 m1 I2"}, /* imul r0,m1,i32*/
 
   IMULL (Mul, Muls)
 
-    {MIRNEXT_X86_OPCODE(Mul), "r r s", "X 8D r0 ap"}, /* lea r0,(,r1,s2)*/
-  {MIRNEXT_X86_OPCODE(Muls), "r r s", "Y 8D r0 ap"},  /* lea r0,(,r1,s2)*/
+    {MIRNEXT_X86_OPCODE (Mul), "r r s", "X 8D r0 ap"}, /* lea r0,(,r1,s2)*/
+  {MIRNEXT_X86_OPCODE (Muls), "r r s", "Y 8D r0 ap"},  /* lea r0,(,r1,s2)*/
 
   IMULL (Mulo, Mulos)
 
-    {MIRNEXT_X86_OPCODE(UMulo), "h0 0 r", "X F7 /4 R2"}, /* mul rax,r1*/
-  {MIRNEXT_X86_OPCODE(UMulo), "h0 0 m3", "X F7 /4 m2"},  /* mul rax,m1*/
-  {MIRNEXT_X86_OPCODE(UMulos), "h0 0 r", "Y F7 /4 R2"},  /* mul rax,r1*/
-  {MIRNEXT_X86_OPCODE(UMulos), "h0 0 m2", "Y F7 /4 m2"}, /* mul rax,m1*/
+    {MIRNEXT_X86_OPCODE (UMulo), "h0 0 r", "X F7 /4 R2"}, /* mul rax,r1*/
+  {MIRNEXT_X86_OPCODE (UMulo), "h0 0 m3", "X F7 /4 m2"},  /* mul rax,m1*/
+  {MIRNEXT_X86_OPCODE (UMulos), "h0 0 r", "Y F7 /4 R2"},  /* mul rax,r1*/
+  {MIRNEXT_X86_OPCODE (UMulos), "h0 0 m2", "Y F7 /4 m2"}, /* mul rax,m1*/
 
-  {MIRNEXT_X86_OPCODE(Div), "h0 h0 r", "X 99; X F7 /7 R2"},  /* cqo; idiv r2*/
-  {MIRNEXT_X86_OPCODE(Div), "h0 h0 m3", "X 99; X F7 /7 m2"}, /* cqo; idiv m2*/
-  {MIRNEXT_X86_OPCODE(Divs), "h0 h0 r", "99; Y F7 /7 R2"},   /* cdq; idiv r2*/
-  {MIRNEXT_X86_OPCODE(Divs), "h0 h0 m2", "99; Y F7 /7 m2"},  /* cdq; idiv m2*/
+  {MIRNEXT_X86_OPCODE (Div), "h0 h0 r", "X 99; X F7 /7 R2"},  /* cqo; idiv r2*/
+  {MIRNEXT_X86_OPCODE (Div), "h0 h0 m3", "X 99; X F7 /7 m2"}, /* cqo; idiv m2*/
+  {MIRNEXT_X86_OPCODE (Divs), "h0 h0 r", "99; Y F7 /7 R2"},   /* cdq; idiv r2*/
+  {MIRNEXT_X86_OPCODE (Divs), "h0 h0 m2", "99; Y F7 /7 m2"},  /* cdq; idiv m2*/
 
-  {MIRNEXT_X86_OPCODE(UDiv), "h0 h0 r", "31 D2; X F7 /6 R2"},   /* xorl edx,edx; div r2*/
-  {MIRNEXT_X86_OPCODE(UDiv), "h0 h0 m3", "31 D2; X F7 /6 m2"},  /* xorl edx,edx; div m2*/
-  {MIRNEXT_X86_OPCODE(UDivs), "h0 h0 r", "31 D2; Y F7 /6 R2"},  /* xorl edx,edx; div r2*/
-  {MIRNEXT_X86_OPCODE(UDivs), "h0 h0 m2", "31 D2; Y F7 /6 m2"}, /* xorl edx,edx; div m2*/
+  {MIRNEXT_X86_OPCODE (UDiv), "h0 h0 r", "31 D2; X F7 /6 R2"},   /* xorl edx,edx; div r2*/
+  {MIRNEXT_X86_OPCODE (UDiv), "h0 h0 m3", "31 D2; X F7 /6 m2"},  /* xorl edx,edx; div m2*/
+  {MIRNEXT_X86_OPCODE (UDivs), "h0 h0 r", "31 D2; Y F7 /6 R2"},  /* xorl edx,edx; div r2*/
+  {MIRNEXT_X86_OPCODE (UDivs), "h0 h0 m2", "31 D2; Y F7 /6 m2"}, /* xorl edx,edx; div m2*/
 
-  {MIRNEXT_X86_OPCODE(Mod), "h2 h0 r", "X 99; X F7 /7 R2"},  /* cqo; idiv r2*/
-  {MIRNEXT_X86_OPCODE(Mod), "h2 h0 m3", "X 99; X F7 /7 m2"}, /* cqo; idiv m2*/
-  {MIRNEXT_X86_OPCODE(Mods), "h2 h0 r", "99; Y F7 /7 R2"},   /* cdq; idiv r2*/
-  {MIRNEXT_X86_OPCODE(Mods), "h2 h0 m2", "99; Y F7 /7 m2"},  /* cdq; idiv m2*/
+  {MIRNEXT_X86_OPCODE (Mod), "h2 h0 r", "X 99; X F7 /7 R2"},  /* cqo; idiv r2*/
+  {MIRNEXT_X86_OPCODE (Mod), "h2 h0 m3", "X 99; X F7 /7 m2"}, /* cqo; idiv m2*/
+  {MIRNEXT_X86_OPCODE (Mods), "h2 h0 r", "99; Y F7 /7 R2"},   /* cdq; idiv r2*/
+  {MIRNEXT_X86_OPCODE (Mods), "h2 h0 m2", "99; Y F7 /7 m2"},  /* cdq; idiv m2*/
 
-  {MIRNEXT_X86_OPCODE(UMod), "h2 h0 r", "31 D2; X F7 /6 R2"},   /* xorl edx,edx; div r2*/
-  {MIRNEXT_X86_OPCODE(UMod), "h2 h0 m3", "31 D2; X F7 /6 m2"},  /* xorl edx,edx; div m2*/
-  {MIRNEXT_X86_OPCODE(UMods), "h2 h0 r", "31 D2; Y F7 /6 R2"},  /* xorl edx,edx; div r2*/
-  {MIRNEXT_X86_OPCODE(UMods), "h2 h0 m2", "31 D2; Y F7 /6 m2"}, /* xorl edx,edx; div m2*/
+  {MIRNEXT_X86_OPCODE (UMod), "h2 h0 r", "31 D2; X F7 /6 R2"},   /* xorl edx,edx; div r2*/
+  {MIRNEXT_X86_OPCODE (UMod), "h2 h0 m3", "31 D2; X F7 /6 m2"},  /* xorl edx,edx; div m2*/
+  {MIRNEXT_X86_OPCODE (UMods), "h2 h0 r", "31 D2; Y F7 /6 R2"},  /* xorl edx,edx; div r2*/
+  {MIRNEXT_X86_OPCODE (UMods), "h2 h0 m2", "31 D2; Y F7 /6 m2"}, /* xorl edx,edx; div m2*/
 
-  IOP (And, "23", "21", "83 /4", "81 /4")                                            /*ands*/
+  IOP (And, "23", "21", "83 /4", "81 /4")                                        /*ands*/
   IOP (Or, "0B", "09", "83 /1", "81 /1") IOP (Xor, "33", "31", "83 /6", "81 /6") /*(x)ors*/
 
   FOP (FAdd, "F3 Y 0F 58") DOP (DAdd, "F2 Y 0F 58") FOP (FSub, "F3 Y 0F 5C") /**/
   DOP (DSub, "F2 Y 0F 5C") FOP (FMul, "F3 Y 0F 59") DOP (DMul, "F2 Y 0F 59") /**/
-  FOP (FDiv, "F3 Y 0F 5E") DOP (DDiv, "F2 Y 0F 5E")                              /**/
+  FOP (FDiv, "F3 Y 0F 5E") DOP (DDiv, "F2 Y 0F 5E")                          /**/
 
   LDOP (LDAdd, "DE C1") LDOP (LDSub, "DE E9") /* long double adds/subs */
   LDOP (LDMul, "DE C9") LDOP (LDDiv, "DE F9") /* long double muls/divs */
 
   SHOP (Lsh, "D3 /4", "C1 /4") SHOP (Rsh, "D3 /7", "C1 /7") /* arithm shifts */
-  SHOP (URsh, "D3 /5", "C1 /5")                                 /* logical shifts */
+  SHOP (URsh, "D3 /5", "C1 /5")                             /* logical shifts */
 
   SHOPS (Lshs, "D3 /4", "C1 /4") SHOPS (Rshs, "D3 /7", "C1 /7") /* arithm shifts */
-  SHOPS (URshs, "D3 /5", "C1 /5")                                   /* logical shifts */
+  SHOPS (URshs, "D3 /5", "C1 /5")                               /* logical shifts */
 
   CMP (Eq, "0F 94") CMP (Ne, "0F 95") CMP (Lt, "0F 9C")   /* 1.int cmps */
   CMP (ULt, "0F 92") CMP (Le, "0F 9E") CMP (ULe, "0F 96") /* 2.int cmps */
   CMP (Gt, "0F 9F") CMP (UGt, "0F 97") CMP (Ge, "0F 9D")  /* 3.int cmps */
-  CMP (UGe, "0F 93")                                              /* 4.int cmps */
+  CMP (UGe, "0F 93")                                      /* 4.int cmps */
 
   CMPS (Eqs, "0F 94") CMPS (Nes, "0F 95") CMPS (Lts, "0F 9C")   /* 1.short cmps */
   CMPS (ULts, "0F 92") CMPS (Les, "0F 9E") CMPS (ULes, "0F 96") /* 2.short cmps */
   CMPS (Gts, "0F 9F") CMPS (UGts, "0F 97") CMPS (Ges, "0F 9D")  /* 3.short cmps */
-  CMPS (UGes, "0F 93")                                                  /* 4.short cmps */
+  CMPS (UGes, "0F 93")                                          /* 4.short cmps */
 
   FEQ (FEq, "V0", "0F 9B") DEQ (DEq, "V0", "0F 9B")   /* 1. fp cmps */
   LDEQ (LDEq, "V0", "0F 9B") FEQ (FNe, "V1", "0F 9A") /* 2. fp cmps */
@@ -361,28 +412,28 @@ MIRNEXT_X86_TABLE = {
   FCMP (FGt, "0F 97") DCMP (DGt, "0F 97") LDCMP (LDGt, "0F 97") /*6*/
   FCMP (FGe, "0F 93") DCMP (DGe, "0F 93") LDCMP (LDGe, "0F 93") /*7*/
 
-  {MIRNEXT_X86_OPCODE(Jmp), "L", "E9 L0"}, /* 32-bit offset jmp */
-  {MIRNEXT_X86_OPCODE(Jmp), "l", "EB l0"}, /* 8-bit offset jmp */
+  {MIRNEXT_X86_OPCODE (Jmp), "L", "E9 L0"}, /* 32-bit offset jmp */
+  {MIRNEXT_X86_OPCODE (Jmp), "l", "EB l0"}, /* 8-bit offset jmp */
 
-  {MIRNEXT_X86_OPCODE(LAddr), "r L", "X 8D r0 q L1"}, /* ip-relative addressing */
-  {MIRNEXT_X86_OPCODE(JmpIndirect), "r", "Y FF /4 R0"},      /* jmp *r */
-  {MIRNEXT_X86_OPCODE(JmpIndirect), "m3", "Y FF /4 m0"},     /* jmp *m0 */
+  {MIRNEXT_X86_OPCODE (LAddr), "r L", "X 8D r0 q L1"},    /* ip-relative addressing */
+  {MIRNEXT_X86_OPCODE (JmpIndirect), "r", "Y FF /4 R0"},  /* jmp *r */
+  {MIRNEXT_X86_OPCODE (JmpIndirect), "m3", "Y FF /4 m0"}, /* jmp *m0 */
 
   /* lea table_offset(rip),r11; jmp *(r11,r,8); TableContent */
-  {MIRNEXT_X86_OPCODE(Switch), "r $", "X 8D hB T; Y FF /4 mT"},
+  {MIRNEXT_X86_OPCODE (Switch), "r $", "X 8D hB T; Y FF /4 mT"},
 
   BRS (Bt, "75") BRS (Bf, "74")     /* short branches */
   BR (Bt, "0F 85") BR (Bf, "0F 84") /* branches */
 
-  {MIRNEXT_X86_OPCODE(Bo), "l", "70 l0"},   /* 8-bit offset jmp on signed overflow */
-  {MIRNEXT_X86_OPCODE(UBo), "l", "72 l0"},  /* 8-bit offset jmp on unsigned overflow */
-  {MIRNEXT_X86_OPCODE(Bno), "l", "71 l0"},  /* 8-bit offset jmp on signed non-overflow */
-  {MIRNEXT_X86_OPCODE(UBno), "l", "73 l0"}, /* 8-bit offset jmp on unsigned non-overflow */
+  {MIRNEXT_X86_OPCODE (Bo), "l", "70 l0"},   /* 8-bit offset jmp on signed overflow */
+  {MIRNEXT_X86_OPCODE (UBo), "l", "72 l0"},  /* 8-bit offset jmp on unsigned overflow */
+  {MIRNEXT_X86_OPCODE (Bno), "l", "71 l0"},  /* 8-bit offset jmp on signed non-overflow */
+  {MIRNEXT_X86_OPCODE (UBno), "l", "73 l0"}, /* 8-bit offset jmp on unsigned non-overflow */
 
-  {MIRNEXT_X86_OPCODE(Bo), "L", "0F 80 L0"},   /* 32-bit offset jmp on signed overflow */
-  {MIRNEXT_X86_OPCODE(UBo), "L", "0F 82 L0"},  /* 32-bit offset jmp on unsigned overflow */
-  {MIRNEXT_X86_OPCODE(Bno), "L", "0F 81 L0"},  /* 32-bit offset jmp on signed non-overflow */
-  {MIRNEXT_X86_OPCODE(UBno), "L", "0F 83 L0"}, /* 32-bit offset jmp on unsigned non-overflow */
+  {MIRNEXT_X86_OPCODE (Bo), "L", "0F 80 L0"},   /* 32-bit offset jmp on signed overflow */
+  {MIRNEXT_X86_OPCODE (UBo), "L", "0F 82 L0"},  /* 32-bit offset jmp on unsigned overflow */
+  {MIRNEXT_X86_OPCODE (Bno), "L", "0F 81 L0"},  /* 32-bit offset jmp on signed non-overflow */
+  {MIRNEXT_X86_OPCODE (UBno), "L", "0F 83 L0"}, /* 32-bit offset jmp on unsigned non-overflow */
 
   BCMPS (Beq, "74") BCMPS (Bne, "75")  /* 1. int compare and branch */
   BCMPS (Blt, "7C") BCMPS (UBlt, "72") /* 2. int compare and branch */
@@ -423,32 +474,38 @@ MIRNEXT_X86_TABLE = {
   DBCMP (DBge, "0F 83") LDBCMP (LDBge, "0F 83") /* fp cmp and branch */
 
   /* we don't have short branch patterns for NE as the label will be in two branches: */
-  {MIRNEXT_X86_OPCODE(FBeq), "l r r", "Y 0F 2E r1 R2; 7A v2; 74 l0"},    /* ucomiss r0,r1;jp l;je rel32 l: */
-  {MIRNEXT_X86_OPCODE(DBeq), "l r r", "66 Y 0F 2E r1 R2; 7A v2; 74 l0"}, /* ucomisd r0,r1;jp l;je rel32 l: */
+  {MIRNEXT_X86_OPCODE (FBeq), "l r r",
+   "Y 0F 2E r1 R2; 7A v2; 74 l0"}, /* ucomiss r0,r1;jp l;je rel32 l: */
+  {MIRNEXT_X86_OPCODE (DBeq), "l r r",
+   "66 Y 0F 2E r1 R2; 7A v2; 74 l0"}, /* ucomisd r0,r1;jp l;je rel32 l: */
   /* fld m2;fld m1;fucomip st,st1;fstp st;jp l;je rel32 l: */
-  {MIRNEXT_X86_OPCODE(LDBeq), "l mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 7A v2; 74 l0"},
+  {MIRNEXT_X86_OPCODE (LDBeq), "l mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 7A v2; 74 l0"},
 
-  {MIRNEXT_X86_OPCODE(FBeq), "L r r", "Y 0F 2E r1 R2; 7A v6; 0F 84 L0"},    /* ucomiss r0,r1;jp L;je rel32 L: */
-  {MIRNEXT_X86_OPCODE(DBeq), "L r r", "66 Y 0F 2E r1 R2; 7A v6; 0F 84 L0"}, /* ucomisd r0,r1;jp L;je rel32 L: */
+  {MIRNEXT_X86_OPCODE (FBeq), "L r r",
+   "Y 0F 2E r1 R2; 7A v6; 0F 84 L0"}, /* ucomiss r0,r1;jp L;je rel32 L: */
+  {MIRNEXT_X86_OPCODE (DBeq), "L r r",
+   "66 Y 0F 2E r1 R2; 7A v6; 0F 84 L0"}, /* ucomisd r0,r1;jp L;je rel32 L: */
   /* fld m2;fld m1;fucomip st,st1;fstp st;jp L;je rel32 L: */
-  {MIRNEXT_X86_OPCODE(LDBeq), "L mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 7A v6; 0F 84 L0"},
-  {MIRNEXT_X86_OPCODE(FBne), "L r r", "Y 0F 2E r1 R2; 0F 8A L0; 0F 85 L0"}, /* ucomiss r0,r1;jp rel32;jne rel32*/
-  {MIRNEXT_X86_OPCODE(DBne), "L r r", "66 Y 0F 2E r1 R2; 0F 8A L0; 0F 85 L0"}, /* ucomisd r0,r1;jp rel32;jne rel32*/
+  {MIRNEXT_X86_OPCODE (LDBeq), "L mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 7A v6; 0F 84 L0"},
+  {MIRNEXT_X86_OPCODE (FBne), "L r r",
+   "Y 0F 2E r1 R2; 0F 8A L0; 0F 85 L0"}, /* ucomiss r0,r1;jp rel32;jne rel32*/
+  {MIRNEXT_X86_OPCODE (DBne), "L r r",
+   "66 Y 0F 2E r1 R2; 0F 8A L0; 0F 85 L0"}, /* ucomisd r0,r1;jp rel32;jne rel32*/
   /* fld m2;fld m1;fucomip st,st1;fstp st;jp rel32;jne rel32 */
-  {MIRNEXT_X86_OPCODE(LDBne), "L mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 0F 8A L0; 0F 85 L0"},
+  {MIRNEXT_X86_OPCODE (LDBne), "L mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 0F 8A L0; 0F 85 L0"},
 
-  {MIRNEXT_X86_OPCODE(Call), "X i3 $", "FF /2 P1"},  /* call *rel32(rip)  */
-  {MIRNEXT_X86_OPCODE(Call), "X r $", "Y FF /2 R1"}, /* call *r1 */
-  {MIRNEXT_X86_OPCODE(Ret), "$", "C3"},              /* ret ax, dx, xmm0, xmm1, st0, st1  */
+  {MIRNEXT_X86_OPCODE (Call), "X i3 $", "FF /2 P1"},  /* call *rel32(rip)  */
+  {MIRNEXT_X86_OPCODE (Call), "X r $", "Y FF /2 R1"}, /* call *r1 */
+  {MIRNEXT_X86_OPCODE (Ret), "$", "C3"},              /* ret ax, dx, xmm0, xmm1, st0, st1  */
 
-  {MIRNEXT_X86_OPCODE(JCall), "X i3 $", "FF /4 P1"},  /* jmp *rel32(rip)  */
-  {MIRNEXT_X86_OPCODE(JCall), "X r $", "Y FF /4 R1"}, /* jmp *r */
-  {MIRNEXT_X86_OPCODE(JRet), "r $", "Y FF /4 R0"},    /* jmp *r  */
+  {MIRNEXT_X86_OPCODE (JCall), "X i3 $", "FF /4 P1"},  /* jmp *rel32(rip)  */
+  {MIRNEXT_X86_OPCODE (JCall), "X r $", "Y FF /4 R1"}, /* jmp *r */
+  {MIRNEXT_X86_OPCODE (JRet), "r $", "Y FF /4 R0"},    /* jmp *r  */
   /* JRET enters without a stacked return PC. FP-relative vector slots can
      therefore be only eight-byte aligned; never issue MOVDQA for those. */
-  {MIRNEXT_X86_PRIVATE(UnalignedMove), "r r", "F3 Y 0F 6F r0 R1"},
-  {MIRNEXT_X86_PRIVATE(UnalignedMove), "r md", "F3 Y 0F 6F r0 m1"},
-  {MIRNEXT_X86_PRIVATE(UnalignedMove), "md r", "F3 Y 0F 7F r1 m0"},
+  {MIRNEXT_X86_PRIVATE (UnalignedMove), "r r", "F3 Y 0F 6F r0 R1"},
+  {MIRNEXT_X86_PRIVATE (UnalignedMove), "r md", "F3 Y 0F 6F r0 m1"},
+  {MIRNEXT_X86_PRIVATE (UnalignedMove), "md r", "F3 Y 0F 7F r1 m0"},
 };
 
 #undef IOP0

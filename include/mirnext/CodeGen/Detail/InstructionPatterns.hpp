@@ -2,5 +2,6 @@
 #pragma once
 #include "mirnext/CodeGen/MachineIR.hpp"
 namespace mirnext::codegen::detail {
-bool instruction_pattern_matches(const target::TargetMachine &, MachineOpcode, std::span<const MachineOperand>);
+bool instruction_pattern_matches (const target::TargetMachine &, MachineOpcode,
+                                  std::span<const MachineOperand>);
 }

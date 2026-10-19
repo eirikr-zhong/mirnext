@@ -3,25 +3,45 @@
 #include "mirnext/Serialization/Format.hpp"
 namespace mirnext::test {
 // Original loop builder expressed with owning C++ blocks, labels and DSL.
-inline Result<std::unique_ptr<ir::Context>> classic_loop() {
+inline Result<std::unique_ptr<ir::Context>> classic_loop () {
   using namespace ir;
-  auto context = std::make_unique<Context>();
-  auto module = context->create_module("m"); if (!module) return module.error();
-  auto function = (*module)->create_function("loop",{{Type::i64()},{Type::i64()}}); if (!function) return function.error();
-  auto entry = (*function)->create_block("entry"), loop = (*function)->create_block("loop"), done = (*function)->create_block("done");
-  if (!entry) return entry.error(); if (!loop) return loop.error(); if (!done) return done.error();
-  auto again = (*function)->create_label(**loop,"again"), finish = (*function)->create_label(**done,"finish");
-  if (!again) return again.error(); if (!finish) return finish.error();
-  auto count = (*function)->create_register(Type::i64(),"count"); if (!count) return count.error();
-  auto limit = (*function)->arguments()[0]; IRBuilder body(**entry);
-  auto assigned = body.assign(**count,0); if (!assigned) return assigned.error();
-  auto branch = body.branch(Comparison::GreaterEqual,body.expression(**count),body.expression(*limit),**finish); if (!branch) return branch.error();
-  auto point = body.set_insert_point(**loop); if (!point) return point.error();
-  assigned = body.assign(**count,body.expression(**count)+body.literal(1)); if (!assigned) return assigned.error();
-  branch = body.branch(Comparison::Less,body.expression(**count),body.expression(*limit),**again); if (!branch) return branch.error();
-  point = body.set_insert_point(**done); if (!point) return point.error();
-  auto returned = body.ret(Operand(**count)); if (!returned) return returned.error();
-  auto valid = context->verify(); if (!valid) return valid.error(); return context;
+  auto context = std::make_unique<Context> ();
+  auto module = context->create_module ("m");
+  if (!module) return module.error ();
+  auto function = (*module)->create_function ("loop", {{Type::i64 ()}, {Type::i64 ()}});
+  if (!function) return function.error ();
+  auto entry = (*function)->create_block ("entry"), loop = (*function)->create_block ("loop"),
+       done = (*function)->create_block ("done");
+  if (!entry) return entry.error ();
+  if (!loop) return loop.error ();
+  if (!done) return done.error ();
+  auto again = (*function)->create_label (**loop, "again"),
+       finish = (*function)->create_label (**done, "finish");
+  if (!again) return again.error ();
+  if (!finish) return finish.error ();
+  auto count = (*function)->create_register (Type::i64 (), "count");
+  if (!count) return count.error ();
+  auto limit = (*function)->arguments ()[0];
+  IRBuilder body (**entry);
+  auto assigned = body.assign (**count, 0);
+  if (!assigned) return assigned.error ();
+  auto branch = body.branch (Comparison::GreaterEqual, body.expression (**count),
+                             body.expression (*limit), **finish);
+  if (!branch) return branch.error ();
+  auto point = body.set_insert_point (**loop);
+  if (!point) return point.error ();
+  assigned = body.assign (**count, body.expression (**count) + body.literal (1));
+  if (!assigned) return assigned.error ();
+  branch
+    = body.branch (Comparison::Less, body.expression (**count), body.expression (*limit), **again);
+  if (!branch) return branch.error ();
+  point = body.set_insert_point (**done);
+  if (!point) return point.error ();
+  auto returned = body.ret (Operand (**count));
+  if (!returned) return returned.error ();
+  auto valid = context->verify ();
+  if (!valid) return valid.error ();
+  return context;
 }
 inline constexpr std::string_view classic_hi_text = R"mir(
 m_hi:    module
@@ -143,13 +163,21 @@ ex100:    func
           endmodule
 )mir";
 // Parameter changes affect workload sizes only; original loop/memory/alias edges remain.
-inline std::string classic_sieve_text(std::size_t flags = 8190,unsigned iterations = 2,bool odd = false) {
-  std::string text(odd ? classic_readme_text : classic_sieve_template);
-  for (std::size_t at = 0; (at = text.find("8190",at)) != std::string::npos;) {
-    auto replacement = std::to_string(flags); text.replace(at,4,replacement); at += replacement.size();
+inline std::string classic_sieve_text (std::size_t flags = 8190, unsigned iterations = 2,
+                                       bool odd = false) {
+  std::string text (odd ? classic_readme_text : classic_sieve_template);
+  for (std::size_t at = 0; (at = text.find ("8190", at)) != std::string::npos;) {
+    auto replacement = std::to_string (flags);
+    text.replace (at, 4, replacement);
+    at += replacement.size ();
   }
-  if (odd) { auto at = text.find("r, 200"); if (at != std::string::npos) text.replace(at,6,"r, "+std::to_string(iterations)); }
-  else { auto at = text.find("iter, 2"); if (at != std::string::npos) text.replace(at,7,"iter, "+std::to_string(iterations)); }
+  if (odd) {
+    auto at = text.find ("r, 200");
+    if (at != std::string::npos) text.replace (at, 6, "r, " + std::to_string (iterations));
+  } else {
+    auto at = text.find ("iter, 2");
+    if (at != std::string::npos) text.replace (at, 7, "iter, " + std::to_string (iterations));
+  }
   return text;
 }
-}
+}  // namespace mirnext::test

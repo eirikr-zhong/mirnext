@@ -2,5 +2,7 @@
 #pragma once
 #include "mirnext/Execution/Value.hpp"
 namespace mirnext::execution::detail {
-struct alignas(long double) HardwareSlot { ScalarValue::Storage bytes{}; };
-}
+struct alignas (long double) HardwareSlot {
+  ScalarValue::Storage bytes{};
+};
+}  // namespace mirnext::execution::detail

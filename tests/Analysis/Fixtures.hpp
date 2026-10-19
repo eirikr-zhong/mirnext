@@ -1,18 +1,18 @@
-/* Licensed under the MIT License. Shared inputs for native and isolated C analyses. */
+/* Licensed under the MIT License. Shared function analysis fixtures. */
 #pragma once
 #include <string>
 #include <vector>
 #include <random>
 #include <sstream>
 namespace mirnext::test {
-inline std::vector<std::string> analysis_fixtures() {
+inline std::vector<std::string> analysis_fixtures () {
 #if defined(__x86_64__) || defined(_M_X64)
   constexpr auto hardware = "rdx";
 #else
   constexpr auto hardware = "r5";
 #endif
   return {
-R"(m: module
+    R"(m: module
 entry: func i64, i64:condition
 local i64:value, i64:answer
 mov value, 10
@@ -27,7 +27,7 @@ ret answer
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64, i64:limit
 local i64:i, i64:j, i64:sum
 mov i, 0
@@ -44,7 +44,7 @@ ret sum
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64, i64:selector
 local i64:value
 switch selector, yes, no, yes
@@ -58,7 +58,7 @@ ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64, i64:condition
 local i64:value
 bt right, condition
@@ -74,7 +74,7 @@ ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64
 local i64:address, i64:value
 laddr address, target
@@ -89,7 +89,7 @@ ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64
 local i64:value
 mov value, 0
@@ -101,7 +101,7 @@ ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64
 local i64:value
 mov value, 42
@@ -117,7 +117,7 @@ ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64, i64:address, i64:index
 local i64:value
 mov value, i64:8(address, index, 4)
@@ -126,17 +126,18 @@ ret value
 endfunc
 endmodule
 )",
-std::string(R"(m: module
+    std::string (R"(m: module
 entry: func i64
 local i64:value
-global i64:bound:)") + hardware + R"(
+global i64:bound:)")
+      + hardware + R"(
 mov value, 42
 mov bound, 13
 ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64, i64:condition1, i64:condition2
 local i64:value
 bt left, condition1
@@ -153,7 +154,7 @@ ret value
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 entry: func i64, i64:condition
 local i64:value
 mov value, 42
@@ -167,7 +168,7 @@ endfunc
 difference: lref first, second, 7
 endmodule
 )",
-R"(m: module
+    R"(m: module
 import target
 pj: proto
 entry: func i64
@@ -177,29 +178,35 @@ ret 42
 endfunc
 endmodule
 )",
-R"(m: module
+    R"(m: module
 import target
 pj: proto
 entry: func
 jcall pj, target
 endfunc
 endmodule
-)"
-  };
+)"};
 }
-inline std::vector<std::string> random_analysis_fixtures() {
-  std::mt19937 random(0xc6f5aa); std::vector<std::string> inputs;
+inline std::vector<std::string> random_analysis_fixtures () {
+  std::mt19937 random (0xc6f5aa);
+  std::vector<std::string> inputs;
   for (unsigned n = 0; n < 128; ++n) {
-    unsigned count = 3 + random() % 14; std::ostringstream out;
+    unsigned count = 3 + random () % 14;
+    std::ostringstream out;
     out << "m: module\nentry: func i64, i64:condition\nlocal i64:value\nmov value, 0\n";
     for (unsigned b = 0; b < count; ++b) {
-      out << "b" << b << ":\nadd value, value, " << random() % 17 << '\n';
-      if (b + 1 == count) out << "ret value\n";
-      else if (random() % 3 == 0) out << "switch condition, b" << random() % count << ", b" << random() % count << ", b" << random() % count << '\n';
-      else out << (random() % 2 ? "bt" : "bf") << " b" << random() % count << ", condition\n";
+      out << "b" << b << ":\nadd value, value, " << random () % 17 << '\n';
+      if (b + 1 == count)
+        out << "ret value\n";
+      else if (random () % 3 == 0)
+        out << "switch condition, b" << random () % count << ", b" << random () % count << ", b"
+            << random () % count << '\n';
+      else
+        out << (random () % 2 ? "bt" : "bf") << " b" << random () % count << ", condition\n";
     }
-    out << "endfunc\nendmodule\n"; inputs.push_back(out.str());
+    out << "endfunc\nendmodule\n";
+    inputs.push_back (out.str ());
   }
   return inputs;
 }
-}
+}  // namespace mirnext::test

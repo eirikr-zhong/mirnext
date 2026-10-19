@@ -10,17 +10,21 @@ struct EncodedLabel {
   std::optional<std::size_t> source_ordinal;
 };
 struct CompiledFunctionData {
-  std::string module_,name_;
+  std::string module_, name_;
   target::Architecture architecture_;
   MachineFrameLayout frame_;
   std::vector<std::uint8_t> bytes_;
   std::vector<EncodedLabel> labels_;
   std::vector<CodeRelocation> relocations_;
   std::vector<ConstantPoolEntry> constants_;
-  CompiledFunctionData(std::string module,std::string name,target::Architecture architecture,MachineFrameLayout frame)
-    : module_(std::move(module)),name_(std::move(name)),architecture_(architecture),frame_(std::move(frame)) {}
+  CompiledFunctionData (std::string module, std::string name, target::Architecture architecture,
+                        MachineFrameLayout frame)
+    : module_ (std::move (module)),
+      name_ (std::move (name)),
+      architecture_ (architecture),
+      frame_ (std::move (frame)) {}
 };
 struct ArtifactBuilder {
-  static Result<CompiledFunction> finish(CompiledFunctionData);
+  static Result<CompiledFunction> finish (CompiledFunctionData);
 };
-}
+}  // namespace mirnext::codegen::detail

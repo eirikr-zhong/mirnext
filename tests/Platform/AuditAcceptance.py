@@ -6,11 +6,10 @@ import itertools
 import json
 from pathlib import Path
 import platform
-import re
-import subprocess
 import sys
-import tempfile
 import xml.etree.ElementTree as ET
+
+from SourceFingerprint import source_fingerprint
 
 PLATFORMS = {
     "linux-x86_64": ("linux", "x86_64", "x86_64-sysv"),
@@ -22,7 +21,8 @@ PLATFORMS = {
 SCENES = {("original-interpreter", 0)} | set(itertools.product(
     ("optimized-interpreter", "eager", "lazy", "bbv", "mixed"), range(4)))
 LINKAGES = ("static", "shared")
-IDENTITY_FIELDS = ("source_fingerprint", "configuration", "c_reference")
+DEFAULT_PLATFORMS = tuple(name for name in PLATFORMS if not name.startswith("windows-"))
+IDENTITY_FIELDS = ("source_fingerprint", "configuration")
 
 
 class InvalidEvidence(ValueError):
@@ -45,18 +45,6 @@ def load_json(path):
         return json.load(stream, object_pairs_hook=unique)
 
 
-def source_fingerprint(source):
-    with tempfile.TemporaryDirectory(prefix="mirnext-evidence-") as work:
-        output = Path(work) / "source.txt"
-        result = subprocess.run([
-            "cmake", "-DSOURCE_DIR=" + str(source), "-DOUTPUT_FILE=" + str(output),
-            "-P", str(source / "tests/Platform/SourceFingerprint.cmake")],
-            text=True, capture_output=True)
-        require(result.returncode == 0, "source fingerprint failed: " + result.stderr)
-        digest = output.read_text().strip()
-        require(re.fullmatch(r"[0-9a-f]{64}", digest), "invalid source fingerprint")
-        return digest
-
 
 def count(obj, key, expected=None):
     value = obj.get(key)
@@ -65,15 +53,15 @@ def count(obj, key, expected=None):
     return value
 
 
-def validate_receipt(receipt, fingerprint):
-    require(type(receipt) is dict and type(receipt.get("schema")) is int and receipt["schema"] == 2, "unsupported receipt schema")
+def validate_receipt(receipt, fingerprint, *, allow_unconfigured=False):
+    require(type(receipt) is dict and type(receipt.get("schema")) is int and receipt["schema"] == 3, "unsupported receipt schema")
     require(receipt.get("status") == "passed", "receipt did not pass")
     require(receipt.get("source_fingerprint") == fingerprint, "stale or different source fingerprint")
     require(receipt.get("translated") is False, "translated or unknown execution")
     require(receipt.get("diagnostic") == "", "receipt contains a diagnostic")
     require(receipt.get("linkage") in LINKAGES, "invalid linkage")
-    require(type(receipt.get("c_reference")) is bool, "missing reference build identity")
-    require(receipt.get("configuration") in ("Debug", "Release", "RelWithDebInfo", "MinSizeRel"), "invalid configuration")
+    require(receipt.get("configuration") in ("Debug", "Release", "RelWithDebInfo", "MinSizeRel")
+            or (allow_unconfigured and receipt.get("configuration") == ""), "invalid configuration")
     host = (receipt.get("host_system"), receipt.get("host_architecture"), receipt.get("target"))
     names = [name for name, identity in PLATFORMS.items() if identity == host]
     require(len(names) == 1, "host and target ABI do not match")
@@ -103,23 +91,22 @@ def validate_receipt(receipt, fingerprint):
         require(adapters > 0 and count(scene, "adapter_legalizations") == adapters
                 and count(scene, "adapter_frames") == adapters, "incomplete native adapter stages")
     require(seen == SCENES and len(fingerprints) == 1, "scene input or coverage differs")
-    return (names[0], receipt["configuration"], receipt["c_reference"], receipt["linkage"])
+    return (names[0], receipt["configuration"], receipt["linkage"])
 
 
 def marker(receipt):
-    return "Native acceptance source {} configuration {} linkage {} c-reference {}".format(
-        receipt["source_fingerprint"], receipt["configuration"], receipt["linkage"],
-        str(receipt["c_reference"]).lower())
+    return "Native acceptance source {} configuration {} linkage {}".format(
+        receipt["source_fingerprint"], receipt["configuration"], receipt["linkage"])
 
 
 def validate_suite(manifest, junit, receipt):
-    require(type(manifest) is dict and type(manifest.get("schema")) is int and manifest["schema"] == 1, "unsupported test manifest")
-    require(type(manifest.get("c_reference")) is bool and all(manifest.get(key) == receipt[key] for key in IDENTITY_FIELDS), "test manifest build differs")
+    require(type(manifest) is dict and type(manifest.get("schema")) is int and manifest["schema"] == 2, "unsupported test manifest")
+    require(all(manifest.get(key) == receipt[key] for key in IDENTITY_FIELDS), "test manifest build differs")
     expected = manifest.get("tests")
     require(type(expected) is list and all(type(name) is str for name in expected)
             and len(expected) == len(set(expected)), "invalid test manifest")
     critical = {"mirnext-native-host", "mirnext-unified-architecture"}
-    critical.update("mirnext-native-acceptance-" + linkage for linkage in LINKAGES)
+    critical.add("mirnext-native-acceptance-" + receipt["linkage"])
     require(critical <= set(expected), "test manifest omits native or architecture checks")
     cases = list(junit.iter("testcase"))
     require(junit.tag == "testsuite" and int(junit.get("tests", "-1")) == len(cases), "partial JUnit suite")
@@ -155,12 +142,12 @@ def audit(roots, fingerprint, required):
         found[identity] = (str(path), digest)
     missing = required - set(found)
     require(not missing, "missing native evidence: " + ", ".join(map(str, sorted(missing))))
-    # Both linkage variants must exercise exactly the same fixture in a build.
+    # Separate static and shared builds must exercise exactly the same fixture.
     inputs = {}
     for identity, (path, _) in found.items():
         fixture = load_json(Path(path))["scenes"][0]["input_fingerprint"]
-        require(identity[:3] not in inputs or inputs[identity[:3]] == fixture, "linkage input fingerprints differ")
-        inputs[identity[:3]] = fixture
+        require(identity[:2] not in inputs or inputs[identity[:2]] == fixture, "linkage input fingerprints differ")
+        inputs[identity[:2]] = fixture
     return {"schema": 1, "status": "passed", "source_fingerprint": fingerprint,
             "required": [list(row) for row in sorted(required)],
             "receipts": [{"identity": list(key), "path": found[key][0]} for key in sorted(required)]}
@@ -180,13 +167,12 @@ def main(argv=None):
     parser.add_argument("--source", required=True, type=Path, help="source tree being accepted")
     parser.add_argument("--platform", action="append", choices=tuple(PLATFORMS) + ("native",))
     parser.add_argument("--configuration", action="append", choices=("Debug", "Release", "RelWithDebInfo", "MinSizeRel"))
-    parser.add_argument("--reference", choices=("on", "off", "both"), default="both")
+    parser.add_argument("--linkage", action="append", choices=LINKAGES, help="required linkage (default: both)")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     try:
-        platforms = {native_platform() if name == "native" else name for name in (args.platform or PLATFORMS)}
-        references = (True, False) if args.reference == "both" else (args.reference == "on",)
-        required = set(itertools.product(platforms, args.configuration or ("Debug", "Release"), references, LINKAGES))
+        platforms = {native_platform() if name == "native" else name for name in (args.platform or DEFAULT_PLATFORMS)}
+        required = set(itertools.product(platforms, args.configuration or ("Debug", "Release"), args.linkage or LINKAGES))
         report = audit(args.roots, source_fingerprint(args.source.resolve()), required)
         output = json.dumps(report, indent=2) + "\n"
         if args.output:

@@ -21,7 +21,7 @@ struct ControlFlowGraph {
 struct ControlFlowAnalysis {
   using Result = ControlFlowGraph;
   static constexpr Dependency dependencies = Dependency::ControlFlow;
-  static mirnext::Result<Result> run(const ir::Function &);
+  static mirnext::Result<Result> run (const ir::Function &);
 };
 struct RegisterOccurrence {
   enum class Part { Value, MemoryBase, MemoryIndex };
@@ -36,6 +36,6 @@ struct RegisterUseIndex {
 struct RegisterUseAnalysis {
   using Result = RegisterUseIndex;
   static constexpr Dependency dependencies = Dependency::Instructions | Dependency::Registers;
-  static mirnext::Result<Result> run(const ir::Function &);
+  static mirnext::Result<Result> run (const ir::Function &);
 };
-} // namespace mirnext::analysis
+}  // namespace mirnext::analysis

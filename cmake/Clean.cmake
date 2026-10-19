@@ -1,6 +1,0 @@
-if(EXISTS "${BINARY_DIR}/CMakeCache.txt")
-  execute_process(COMMAND "${CMAKE_COMMAND}" --build "${BINARY_DIR}" --config "${CONFIG}" --target clean RESULT_VARIABLE status)
-  if(NOT status EQUAL 0)
-    message(FATAL_ERROR "Native product clean failed: ${status}")
-  endif()
-endif()

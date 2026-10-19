@@ -2,11 +2,22 @@
 #pragma once
 #include "mirnext/CodeGen/MachineIR.hpp"
 namespace mirnext::codegen {
-bool aarch64_instruction_ok(MachineOpcode, std::span<const MachineOperand>);
+bool aarch64_instruction_ok (MachineOpcode, std::span<const MachineOperand>);
 enum class AArch64Overflow { Default, Subtract, Multiply };
-enum class AArch64FieldKind : std::uint8_t { Register, IndexedMemory, DisplacedMemory,
-  RightShift, LeftShift, WideImmediate, ArithmeticImmediate, ImmediateR, ImmediateS,
-  ShortLabel, Label, SwitchTable };
+enum class AArch64FieldKind : std::uint8_t {
+  Register,
+  IndexedMemory,
+  DisplacedMemory,
+  RightShift,
+  LeftShift,
+  WideImmediate,
+  ArithmeticImmediate,
+  ImmediateR,
+  ImmediateS,
+  ShortLabel,
+  Label,
+  SwitchTable
+};
 struct AArch64Field {
   AArch64FieldKind kind;
   std::uint8_t parameter = 0, shift = 0, flags = 0;
@@ -21,6 +32,8 @@ struct AArch64Recipe {
 };
 // Static, densely compiled encoding fields from the same declaration table as
 // legalization. No template-string parsing occurs in the encoder.
-std::optional<AArch64Recipe> aarch64_encoding_recipe(MachineOpcode, std::span<const MachineOperand>, AArch64Overflow = AArch64Overflow::Default);
-Result<std::uint32_t> aarch64_branch_displacement(std::int64_t,bool short_branch);
-}
+std::optional<AArch64Recipe> aarch64_encoding_recipe (MachineOpcode,
+                                                      std::span<const MachineOperand>,
+                                                      AArch64Overflow = AArch64Overflow::Default);
+Result<std::uint32_t> aarch64_branch_displacement (std::int64_t, bool short_branch);
+}  // namespace mirnext::codegen

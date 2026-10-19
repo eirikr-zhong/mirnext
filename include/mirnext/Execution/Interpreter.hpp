@@ -2,7 +2,9 @@
 #pragma once
 #include "mirnext/Execution/Linker.hpp"
 namespace mirnext::execution {
-namespace detail { struct LoadedProgram; }
+namespace detail {
+struct LoadedProgram;
+}
 struct InterpreterOptions {
   LinkOptions link;
   // Zero means unlimited. Limits apply to the whole nested invocation.
@@ -17,16 +19,20 @@ struct InterpreterOptions {
   // adapts the host ABI; function bodies still execute in the interpreter.
   bool native_entries = false;
 };
-struct InterpreterStatistics { std::size_t functions = 0, instructions = 0; };
+struct InterpreterStatistics {
+  std::size_t functions = 0, instructions = 0;
+};
 class InterpretedFunction {
-public:
-  std::string_view module_name() const;
-  std::string_view name() const;
-  const ir::Signature &signature() const;
-  bool is_jump_return() const;
-private:
+ public:
+  std::string_view module_name () const;
+  std::string_view name () const;
+  const ir::Signature &signature () const;
+  bool is_jump_return () const;
+
+ private:
   friend class InterpretedProgram;
-  InterpretedFunction(std::shared_ptr<detail::LoadedProgram> owner,std::size_t index) : owner_(std::move(owner)),index_(index) {}
+  InterpretedFunction (std::shared_ptr<detail::LoadedProgram> owner, std::size_t index)
+    : owner_ (std::move (owner)), index_ (index) {}
   std::shared_ptr<detail::LoadedProgram> owner_;
   std::size_t index_;
 };
@@ -35,29 +41,33 @@ private:
 // native_entries separately enables host-callable interpreted entries.
 // Calls/global mutation require external synchronization.
 class InterpretedProgram {
-public:
-  static Result<InterpretedProgram> create(const ir::Context &,InterpreterOptions = {});
-  static Result<InterpretedProgram> create(const ir::Module &,InterpreterOptions = {});
-  static Result<InterpretedProgram> create(transforms::OptimizedProgram,InterpreterOptions = {});
-  InterpretedProgram(InterpretedProgram &&) noexcept = default;
-  InterpretedProgram &operator=(InterpretedProgram &&) noexcept = default;
-  InterpretedProgram(const InterpretedProgram &) = delete;
-  InterpretedProgram &operator=(const InterpretedProgram &) = delete;
-  const ir::Context &context() const;
-  const InterpreterStatistics &statistics() const;
-  const LinkStatistics &link_statistics() const;
-  std::size_t native_entry_count() const;
-  bool owns(const InterpretedFunction &f) const noexcept { return owner_ && owner_ == f.owner_; }
-  Result<InterpretedFunction> find_function(std::string_view module,std::string_view name) const;
-  Result<LinkedData> find_data(std::string_view module,std::string_view name) const;
-  Result<NativeEntry> native_entry(const InterpretedFunction &) const;
-  Result<std::variant<InterpretedFunction,LinkedData>> find_export(std::string_view name) const;
-  Result<std::vector<ScalarValue>> call(const InterpretedFunction &,std::span<const ExecutionArgument> = {}) const;
-  Result<std::int64_t> call_i64(const InterpretedFunction &,std::span<const std::int64_t> = {}) const;
-private:
+ public:
+  static Result<InterpretedProgram> create (const ir::Context &, InterpreterOptions = {});
+  static Result<InterpretedProgram> create (const ir::Module &, InterpreterOptions = {});
+  static Result<InterpretedProgram> create (transforms::OptimizedProgram, InterpreterOptions = {});
+  InterpretedProgram (InterpretedProgram &&) noexcept = default;
+  InterpretedProgram &operator= (InterpretedProgram &&) noexcept = default;
+  InterpretedProgram (const InterpretedProgram &) = delete;
+  InterpretedProgram &operator= (const InterpretedProgram &) = delete;
+  const ir::Context &context () const;
+  const InterpreterStatistics &statistics () const;
+  const LinkStatistics &link_statistics () const;
+  std::size_t native_entry_count () const;
+  bool owns (const InterpretedFunction &f) const noexcept { return owner_ && owner_ == f.owner_; }
+  Result<InterpretedFunction> find_function (std::string_view module, std::string_view name) const;
+  Result<LinkedData> find_data (std::string_view module, std::string_view name) const;
+  Result<NativeEntry> native_entry (const InterpretedFunction &) const;
+  Result<std::variant<InterpretedFunction, LinkedData>> find_export (std::string_view name) const;
+  Result<std::vector<ScalarValue>> call (const InterpretedFunction &,
+                                         std::span<const ExecutionArgument> = {}) const;
+  Result<std::int64_t> call_i64 (const InterpretedFunction &,
+                                 std::span<const std::int64_t> = {}) const;
+
+ private:
   friend class ExecutionSession;
-  explicit InterpretedProgram(std::shared_ptr<detail::LoadedProgram> owner) : owner_(std::move(owner)) {}
-  static Result<InterpretedProgram> load(std::shared_ptr<const ir::Context>,InterpreterOptions);
+  explicit InterpretedProgram (std::shared_ptr<detail::LoadedProgram> owner)
+    : owner_ (std::move (owner)) {}
+  static Result<InterpretedProgram> load (std::shared_ptr<const ir::Context>, InterpreterOptions);
   std::shared_ptr<detail::LoadedProgram> owner_;
 };
-}
+}  // namespace mirnext::execution
