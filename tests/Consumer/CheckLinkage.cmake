@@ -1,0 +1,17 @@
+set(generator_options -G "${GENERATOR}")
+if(GENERATOR_PLATFORM)
+  list(APPEND generator_options -A "${GENERATOR_PLATFORM}")
+endif()
+if(GENERATOR_TOOLSET)
+  list(APPEND generator_options -T "${GENERATOR_TOOLSET}")
+endif()
+execute_process(COMMAND "${CMAKE_COMMAND}" -S "${SOURCE_DIR}" -B "${BINARY_DIR}"
+  ${generator_options} "-DMIRNext_DIR=${MIRNext_DIR}" "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}"
+  RESULT_VARIABLE status OUTPUT_VARIABLE output ERROR_VARIABLE errors)
+if(status EQUAL 0)
+  message(FATAL_ERROR "Package accepted mixed static/shared core state")
+endif()
+if(NOT "${output}${errors}" MATCHES "INTERFACE_MIRNEXT_LINKAGE")
+  message(FATAL_ERROR "Consumer failed for an unrelated reason: ${output}${errors}")
+endif()
+message(STATUS "Mixed static/shared MIRNext layers rejected during configuration")

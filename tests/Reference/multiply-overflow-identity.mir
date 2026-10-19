@@ -1,0 +1,15 @@
+# Multiplication by one cannot drop the flags consumed by the following branch.
+overflow: module
+cell: i64 0, 0
+entry: func i64
+       local i64:value, i64:copy, i64:address
+       mulo value, 42, 1
+       mov copy, value
+       bo failure
+       mov address, cell
+       mulo i64:8(address), copy, 1
+       bo failure
+       ret i64:8(address)
+failure: ret 0
+       endfunc
+       endmodule

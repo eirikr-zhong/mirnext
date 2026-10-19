@@ -1,0 +1,12 @@
+reference: module
+entry: func i64
+local i64:sum, i64:count
+mov sum, 0
+mov count, 0
+loop:
+add sum, sum, 14
+add count, count, 1
+blt loop, count, 3
+ret sum
+endfunc
+endmodule

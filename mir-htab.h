@@ -75,7 +75,7 @@ DEF_VARR (htab_ind_t)
     T el;                                                  \
   } HTAB_EL (T);                                           \
   DEF_VARR (HTAB_EL (T))                                   \
-  typedef struct {                                         \
+  typedef struct HTAB (T) {                                \
     htab_size_t els_num, els_start, els_bound, collisions; \
     void *arg;                                             \
     htab_hash_t (*hash_func) (T el, void *arg);            \

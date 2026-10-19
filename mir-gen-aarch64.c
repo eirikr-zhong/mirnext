@@ -678,38 +678,6 @@ static int get_builtin (gen_ctx_t gen_ctx, MIR_insn_code_t code, MIR_item_t *pro
   }
 }
 
-struct insn_pattern_info {
-  int start, num;
-};
-
-typedef struct insn_pattern_info insn_pattern_info_t;
-DEF_VARR (insn_pattern_info_t);
-
-struct label_ref {
-  int abs_addr_p, short_p;
-  size_t label_val_disp;
-  union {
-    MIR_label_t label;
-    void *jump_addr; /* absolute addr for BBV */
-  } u;
-};
-
-typedef struct label_ref label_ref_t;
-DEF_VARR (label_ref_t);
-
-struct target_ctx {
-  unsigned char alloca_p, block_arg_func_p, leaf_p, short_bb_branch_p;
-  size_t small_aggregate_save_area;
-  MIR_insn_t temp_jump;
-  const char *temp_jump_replacement;
-  VARR (int) * pattern_indexes;
-  VARR (insn_pattern_info_t) * insn_pattern_info;
-  VARR (uint8_t) * result_code;
-  VARR (label_ref_t) * label_refs;
-  VARR (uint64_t) * abs_address_locs;
-  VARR (MIR_code_reloc_t) * relocs;
-};
-
 #define alloca_p gen_ctx->target_ctx->alloca_p
 #define block_arg_func_p gen_ctx->target_ctx->block_arg_func_p
 #define leaf_p gen_ctx->target_ctx->leaf_p
@@ -1180,8 +1148,6 @@ static void target_make_prolog_epilog (gen_ctx_t gen_ctx, bitmap_t used_hard_reg
   gen_add_insn_before (gen_ctx, anchor, new_insn); /* sp = r10 + (frame_size|t) */
 }
 
-struct pattern {
-  MIR_insn_code_t code;
   /* Pattern elements:
      blank - ignore
      X - match everything
@@ -1232,7 +1198,6 @@ struct pattern {
      Remember we have no float or (long) double immediate at this stage. They are represented
      by a reference to data item.  */
 
-  const char *pattern;
   /* Replacement elements:
      blank - ignore
      ; - insn separation
@@ -1258,538 +1223,11 @@ struct pattern {
      i<one or two hex digits> -- shift value in [10..15]
      I<one or two hex digits> -- shift value in [16..21]
   */
-  const char *replacement;
-};
 
-#define SUB_UBO MIR_INSN_BOUND
-#define SUB_UBNO (SUB_UBO + 1)
-#define MUL_BO (SUB_UBNO + 1)
-#define MUL_BNO (MUL_BO + 1)
-#define ARM_INSN_BOUND (MUL_BNO + 1)
-
-static const struct pattern patterns[] = {
-  {MIR_MOV, "r h31", "91000000:fffffc00 rd0 hn1f"}, /* mov Rd,SP */
-  {MIR_MOV, "h31 r", "91000000:fffffc00 hd1f rn1"}, /* mov SP,Rn */
-  {MIR_MOV, "r r", "aa0003e0:ffe0ffe0 rd0 rm1"},    /* mov Rd,Rm */
-
-  // ??? patterns to extend 32-bit index register
-  {MIR_MOV, "r m3", "f8600800:ffe00c00 rd0 m"}, /* ldr Rd,[Rn,Rm{,#3}] */
-  {MIR_MOV, "m3 r", "f8200800:ffe00c00 rd1 m"}, /* str Rd,[Rn,Rm{,#3}] */
-  {MIR_MOV, "r M3", "f9400000:ffc00000 rd0 M"}, /* ldr Rd,[Rn,{,#imm12}] */
-  {MIR_MOV, "M3 r", "f9000000:ffc00000 rd1 M"}, /* str Rd,[Rn,Rm{,#imm12}] */
-
-  {MIR_MOV, "r mu2", "b8600800:ffe00c00 rd0 m"}, /* ldr Wd,[Rn,Rm{,#2}] */
-  {MIR_MOV, "m2 r", "b8200800:ffe00c00 rd1 m"},  /* str Wd,[Rn,Rm{,#2}] */
-  {MIR_MOV, "r Mu2", "b9400000:ffc00000 rd0 M"}, /* ldr Wd,[Rn{,#imm12}] */
-  {MIR_MOV, "M2 r", "b9000000:ffc00000 rd1 M"},  /* str Wd,[Rn,Rm{,#imm12}] */
-
-  {MIR_MOV, "r ms2", "b8a00800:ffe00c00 rd0 m"}, /* ldrsw Rd,[Rn,Rm{,#2}] */
-  {MIR_MOV, "r Ms2", "b9800000:ffc00000 rd0 M"}, /* ldrsw Rd,[Rn{,#imm12}] */
-
-  {MIR_MOV, "r mu1", "78600800:ffe00c00 rd0 m"}, /* ldrh Wd,[Rn,Rm{,#1}] */
-  {MIR_MOV, "m1 r", "78200800:ffe00c00 rd1 m"},  /* strh Wd,[Rn,Rm{,#1}] */
-  {MIR_MOV, "r Mu1", "79400000:ffc00000 rd0 M"}, /* ldrh Wd,[Rn{,#imm12}] */
-  {MIR_MOV, "M1 r", "79000000:ffc00000 rd1 M"},  /* strh Wd,[Rn,Rm{,#imm12}] */
-
-  {MIR_MOV, "r ms1", "78a00800:ffe00c00 rd0 m"}, /* ldrsh Wd,[Rn,Rm{,#2}] */
-  {MIR_MOV, "r Ms1", "79800000:ffc00000 rd0 M"}, /* ldrsh Wd,[Rn{,#imm12}] */
-
-  {MIR_MOV, "r mu0", "38600800:ffe00c00 rd0 m"}, /* ldrb Wd,[Rn,Rm{,#1}] */
-  {MIR_MOV, "m0 r", "38200800:ffe00c00 rd1 m"},  /* strb Wd,[Rn,Rm{,#1}] */
-  {MIR_MOV, "r Mu0", "39400000:ffc00000 rd0 M"}, /* ldrb Wd,[Rn{,#imm12}] */
-  {MIR_MOV, "M0 r", "39000000:ffc00000 rd1 M"},  /* strb Wd,[Rn,Rm{,#imm12}] */
-
-  {MIR_MOV, "r ms0", "38a00800:ffa00c00 rd0 m"}, /* ldrsb Rd,[Rn,Rm{,#1}] */
-  {MIR_MOV, "r Ms0", "39800000:ffc00000 rd0 M"}, /* ldrsb Rd,[Rn{,#imm12}] */
-
-  {MIR_MOV, "r Z0", "d2800000:ff800000 rd0 Z0"}, /* movz Rd, imm */
-  {MIR_MOV, "r N0", "92800000:ff800000 rd0 N0"}, /* movn Rd, imm */
-  /* movn Rd, imm0, sh0; movk Rd, imm1, sh1: */
-  {MIR_MOV, "r Z1", "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1"},
-  /* movn imm0, sh0; movk Rd, imm1, sh1:  */
-  {MIR_MOV, "r N1", "92800000:ff800000 rd0 N0; f2800000:ff800000 rd0 N1"},
-  /* movz Rd, imm0, sh0; movk Rd, imm1, sh1; movk Rd, imm3, sh3: */
-  {MIR_MOV, "r Z2", "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1; f2800000:ff800000 rd0 Z2"},
-  /* movn Rd, imm0, sh0; movk Rd, imm1, sh1; movk Rd, imm3, sh3: */
-  {MIR_MOV, "r N2", "92800000:ff800000 rd0 N0; f2800000:ff800000 rd0 N1; f2800000:ff800000 rd0 N2"},
-  /* movz Rd, imm0, sh0; movk Rd, imm1, sh1; movk Rd, imm2, sh2; movk Rd, imm3, sh3: */
-  {MIR_MOV, "r Z3",
-   "d2800000:ff800000 rd0 Z0; f2800000:ff800000 rd0 Z1; f2800000:ff800000 rd0 Z2;"
-   "f2800000:ff800000 rd0 Z3"},
-
-  {MIR_FMOV, "r r", "1e204000:fffffc00 vd0 vn1"}, /* fmov Sd,Sn */
-  {MIR_FMOV, "r mf", "bc600800:ff600c00 vd0 m"},  /* ldr Sd,[Rn,Rm{,#2}] */
-  {MIR_FMOV, "mf r", "bc200800:ff600c00 vd1 m"},  /* str Sd,[Rn,Rm{,#2}] */
-  {MIR_FMOV, "r Mf", "bd400000:ffc00000 vd0 M"},  /* ldr Sd,[Rn,{,#imm12}] */
-  {MIR_FMOV, "Mf r", "bd000000:ffc00000 vd1 M"},  /* str Sd,[Rn,Rm{,#imm12}] */
-
-  {MIR_DMOV, "r r", "1e604000:fffffc00 vd0 vn1"}, /* fmov Dd,Dn */
-  {MIR_DMOV, "r md", "fc600800:ff600c00 vd0 m"},  /* ldr Dd,[Rn,Rm{,#3}] */
-  {MIR_DMOV, "md r", "fc200800:ff600c00 vd1 m"},  /* str Dd,[Rn,Rm{,#3}] */
-  {MIR_DMOV, "r Md", "fd400000:ffc00000 vd0 M"},  /* ldr Dd,[Rn,{,#imm12}] */
-  {MIR_DMOV, "Md r", "fd000000:ffc00000 vd1 M"},  /* str Dd,[Rn,Rm{,#imm12}] */
-
-  {MIR_LDMOV, "r r", "4ea01c00:ffe0fc00 vd0 vm1 vn1"}, /* orr Qd.16b,Qm.16b,Qn.16b */
-  {MIR_LDMOV, "r mld", "3ce00800:ffe00c00 vd0 m"},     /* ldr Qd,[Rn,Rm{,#4}] */
-  {MIR_LDMOV, "mld r", "3ca00800:ffe00c00 vd1 m"},     /* str Qd,[Rn,Rm{,#4}] */
-  {MIR_LDMOV, "r Mld", "3dc00000:ffc00000 vd0 M"},     /* ldr Qd,[Rn,{,#imm12}] */
-  {MIR_LDMOV, "Mld r", "3d800000:ffc00000 vd1 M"},     /* str Qd,[Rn,Rm{,#imm12}] */
-
-  {MIR_EXT8, "r r", "93401c00:fffffc00 rd0 rn1"},  /* sxtb rd, wn */
-  {MIR_EXT16, "r r", "93403c00:fffffc00 rd0 rn1"}, /* sxth rd, wn */
-  {MIR_EXT32, "r r", "93407c00:fffffc00 rd0 rn1"}, /* sxtw rd, wn */
-
-  {MIR_UEXT8, "r r", "53001c00:fffffc00 rd0 rn1"},  /* uxtb wd, wn */
-  {MIR_UEXT16, "r r", "53003c00:fffffc00 rd0 rn1"}, /* uxth wd, wn */
-  {MIR_UEXT32, "r r", "2a0003e0:7fe0ffe0 rd0 rm1"}, /* mov wd, wm */
-
-#define IOP(icode, rop, iop, rops, iops)                                         \
-  {icode, "r r r", rop ":ffe0fc00 rd0 rn1 rm2"},       /* extended op Rd,Rn,Rm*/ \
-    {icode, "r r I", iop ":ff000000 rd0 rn1 I"},       /* op Rd,Rn,I,shift */    \
-    {icode##S, "r r r", rops ":ff200000 rd0 rn1 rm2"}, /* op Wd,Wn,Wm*/          \
-    {icode##S, "r r I", iops ":ff000000 rd0 rn1 I"},   /* op Wd,Wn,I,shift */
-
-  IOP (MIR_ADD, "8b206000", "91000000", "0b000000", "11000000")
-    IOP (MIR_ADDO, "ab206000", "b1000000", "2b000000", "31000000")
-
-      {MIR_FADD, "r r r", "1e202800:ffe0fc00 vd0 vn1 vm2"}, /* fadd Sd,Sn,Sm*/
-  {MIR_DADD, "r r r", "1e602800:ffe0fc00 vd0 vn1 vm2"},     /* fadd Dd,Dn,Dm*/
-  // ldadd is implemented through builtin
-
-  IOP (MIR_SUB, "cb206000", "d1000000", "4b000000", "51000000")
-    IOP (MIR_SUBO, "eb206000", "f1000000", "6b000000", "71000000")
-
-      {MIR_FSUB, "r r r", "1e203800:ffe0fc00 vd0 vn1 vm2"}, /* fsub Sd,Sn,Sm*/
-  {MIR_DSUB, "r r r", "1e603800:ffe0fc00 vd0 vn1 vm2"},     /* fsub Dd,Dn,Dm*/
-  // ldsub is implemented through builtin
-
-  {MIR_MUL, "r r r", "9b007c00:ffe0fc00 rd0 rn1 rm2"},  /* mul Rd,Rn,Rm*/
-  {MIR_MULS, "r r r", "1b007c00:ffe0fc00 rd0 rn1 rm2"}, /* mul Wd,Wn,Wm*/
-  {MIR_FMUL, "r r r", "1e200800:ffe0fc00 vd0 vn1 vm2"}, /* fmul Sd,Sn,Sm*/
-  {MIR_DMUL, "r r r", "1e600800:ffe0fc00 vd0 vn1 vm2"}, /* fmul Dd,Dn,Dm*/
-  // ldmul is implemented through builtin
-
-  {MIR_DIV, "r r r", "9ac00c00:ffe0fc00 rd0 rn1 rm2"},   /* sdiv Rd,Rn,Rm*/
-  {MIR_DIVS, "r r r", "1ac00c00:ffe0fc00 rd0 rn1 rm2"},  /* sdiv Wd,Wn,Wm*/
-  {MIR_UDIV, "r r r", "9ac00800:ffe0fc00 rd0 rn1 rm2"},  /* udiv Rd,Rn,Rm*/
-  {MIR_UDIVS, "r r r", "1ac00800:ffe0fc00 rd0 rn1 rm2"}, /* udiv Wd,Wn,Wm*/
-  {MIR_FDIV, "r r r", "1e201800:ffe0fc00 vd0 vn1 vm2"},  /* fdiv Sd,Sn,Sm*/
-  {MIR_DDIV, "r r r", "1e601800:ffe0fc00 vd0 vn1 vm2"},  /* fmul Dd,Dn,Dm*/
-  // lddiv is implemented through builtin
-
-  /* sdiv r8,Rn,Rm;msub Rd,r8,Rm,Rn: */
-  {MIR_MOD, "r r r", "9ac00c00:ffe0fc00 hd8 rn1 rm2;9b008000:ffe08000 rd0 hm8 rn2 ra1"},
-  /* sdiv r8,Wn,Wm;msub Wd,r8,Wm,Wn: */
-  {MIR_MODS, "r r r", "1ac00c00:ffe0fc00 hd8 rn1 rm2;1b008000:ffe08000 rd0 hm8 rn2 ra1"},
-  /* udiv r8,Rn,Rm;msub Rd,r8,Rm,Rn: */
-  {MIR_UMOD, "r r r", "9ac00800:ffe0fc00 hd8 rn1 rm2;9b008000:ffe08000 rd0 hm8 rn2 ra1"},
-  /* udiv r8,Wn,Wm;msub Wd,r8,Wm,Wn: */
-  {MIR_UMODS, "r r r", "1ac00800:ffe0fc00 hd8 rn1 rm2;1b008000:ffe08000 rd0 hm8 rn2 ra1"},
-
-#define CMPR "eb00001f:ff20001f rn1 rm2"
-#define CMPI "f100001f:ff00001f rn1 I"
-#define SCMPR "6b00001f:ff20001f rn1 rm2"
-#define SCMPI "7100001f:ff00001f rn1 I"
-#define FCMP "1e202010:ffe0fc1f vn1 vm2"
-#define DCMP "1e602010:ffe0fc1f vn1 vm2"
-
-#define REQ "9a9f17e0:ffffffe0 rd0"
-#define REQS "1a9f17e0:ffffffe0 rd0"
-  // ??? add extended reg cmp insns:
-  // all ld insn are changed to builtins
-  /* cmp Rn,Rm; cset Rd,eq */
-  {MIR_EQ, "r r r", CMPR "; " REQ},
-  /* cmp Rn,I,shift ; cset Wd,eq */
-  {MIR_EQ, "r r I", CMPI "; " REQ},
-  /* cmp Wn,Wm;cset Rd,eq */
-  {MIR_EQS, "r r r", SCMPR "; " REQS},
-  /* cmp Wn,I,shift; cset Wd,eq */
-  {MIR_EQS, "r r I", SCMPI "; " REQS},
-  /* fcmpe Sn,Sm; cset Rd,mi */
-  {MIR_FEQ, "r r r", FCMP "; " REQ},
-  /* fcmpe Dn,Dm; cset Rd,mi */
-  {MIR_DEQ, "r r r", DCMP "; " REQ},
-  /* fcmpe Sn,0.0; cset Rd,mi */
-  {MIR_FEQ, "r r Zf", "1e202018:fffffc1f vn1 vm2; " REQ},
-  /* fcmpe Dn,0.0; cset Rd,mi */
-  {MIR_DEQ, "r r Zd", "1e602018:fffffc1f vn1 vm2; " REQ},
-
-#define RNE "9a9f07e0:ffffffe0 rd0"
-#define RNES "1a9f07e0:ffffffe0 rd0"
-  /* cmp Rn,Rm; cset Rd,ne */
-  {MIR_NE, "r r r", CMPR "; " RNE},
-  /* cmp Rn,I,shift ; cset Wd,ne */
-  {MIR_NE, "r r I", CMPI "; " RNE},
-  /* cmp Wn,Wm;cset Rd,ne */
-  {MIR_NES, "r r r", SCMPR "; " RNES},
-  /* cmp Wn,I,shift; cset Wd,ne */
-  {MIR_NES, "r r I", SCMPI "; " RNES},
-  /* fcmpe Sn,Sm; cset Rd,ne */
-  {MIR_FNE, "r r r", FCMP "; " RNE},
-  /* fcmpe Dn,Dm; cset Rd,ne */
-  {MIR_DNE, "r r r", DCMP "; " RNE},
-  /* fcmpe Sn,0.0; cset Rd,ne */
-  {MIR_FNE, "r r Zf", "1e202018:fffffc1f vn1 vm2; " RNE},
-  /* fcmpe Dn,0.0; cset Rd,ne */
-  {MIR_DNE, "r r Zd", "1e602018:fffffc1f vn1 vm2; " RNE},
-
-#define RLT "9a9fa7e0:ffffffe0 rd0"
-#define RLTS "1a9fa7e0:ffffffe0 rd0"
-#define RULT "9a9f27e0:ffffffe0 rd0"
-#define RULTS "1a9f27e0:ffffffe0 rd0"
-#define FLTC "9a9f57e0:ffffffe0 rd0"
-  /* cmp Rn,Rm; cset Rd,lt */
-  {MIR_LT, "r r r", CMPR "; " RLT},
-  /* cmp Rn,I,shift ; cset Wd,lt */
-  {MIR_LT, "r r I", CMPI "; " RLT},
-  /* cmp Wn,Wm;cset Rd,lt */
-  {MIR_LTS, "r r r", SCMPR "; " RLTS},
-  /* cmp Wn,I,shift; cset Wd,lt */
-  {MIR_LTS, "r r I", SCMPI "; " RLTS},
-  /* cmp Rn,Rm; cset Rd,ult */
-  {MIR_ULT, "r r r", CMPR "; " RULT},
-  /* cmp Rn,I,shift ; cset Wd,cc */
-  {MIR_ULT, "r r I", CMPI "; " RULT},
-  /* cmp Wn,Wm;cset Rd,cc */
-  {MIR_ULTS, "r r r", SCMPR "; " RULTS},
-  /* cmp Wn,I,shift; cset Wd,cc */
-  {MIR_ULTS, "r r I", SCMPI "; " RULTS},
-  /* fcmpe Sn,Sm; cset Rd,mi */
-  {MIR_FLT, "r r r", FCMP "; " FLTC},
-  /* fcmpe Dn,Dm; cset Rd,mi */
-  {MIR_DLT, "r r r", DCMP "; " FLTC},
-  /* fcmpe Sn,0.0; cset Rd,mi */
-  {MIR_FLT, "r r Zf", "1e202018:fffffc1f vn1 vm2; " FLTC},
-  /* fcmpe Dn,0.0; cset Rd,mi */
-  {MIR_DLT, "r r Zd", "1e602018:fffffc1f vn1 vm2; " FLTC},
-
-#define RGE "9a9fb7e0:ffffffe0 rd0"
-#define RGES "1a9fb7e0:ffffffe0 rd0"
-#define RUGE "9a9f37e0:ffffffe0 rd0"
-#define RUGES "1a9f37e0:ffffffe0 rd0"
-  /* cmp Rn,Rm; cset Rd,ge */
-  {MIR_GE, "r r r", CMPR "; " RGE},
-  /* cmp Rn,I,shift ; cset Wd,ge */
-  {MIR_GE, "r r I", CMPI "; " RGE},
-  /* cmp Wn,Wm;cset Rd,ge */
-  {MIR_GES, "r r r", SCMPR "; " RGES},
-  /* cmp Wn,I,shift; cset Wd,ge */
-  {MIR_GES, "r r I", SCMPI "; " RGES},
-  /* cmp Rn,Rm; cset Rd,cs */
-  {MIR_UGE, "r r r", CMPR "; " RUGE},
-  /* cmp Rn,I,shift ; cset Wd,cs */
-  {MIR_UGE, "r r I", CMPI "; " RUGE},
-  /* cmp Wn,Wm;cset Rd,cs */
-  {MIR_UGES, "r r r", SCMPR "; " RUGES},
-  /* cmp Wn,I,shift; cset Wd,cs */
-  {MIR_UGES, "r r I", SCMPI "; " RUGES},
-  /* fcmpe Sn,Sm; cset Rd,ge */
-  {MIR_FGE, "r r r", FCMP "; " RGE},
-  /* fcmpe Dn,Dm; cset Rd,ge */
-  {MIR_DGE, "r r r", DCMP "; " RGE},
-  /* fcmpe Sn,0.0; cset Rd,ge */
-  {MIR_FGE, "r r Zf", "1e202018:fffffc1f vn1 vm2; " RGE},
-  /* fcmpe Dn,0.0; cset Rd,ge */
-  {MIR_DGE, "r r Zd", "1e602018:fffffc1f vn1 vm2; " RGE},
-
-#define RGT "9a9fd7e0:ffffffe0 rd0"
-#define RGTS "1a9fd7e0:ffffffe0 rd0"
-#define RUGT "9a9f97e0:ffffffe0 rd0"
-#define RUGTS "1a9f97e0:ffffffe0 rd0"
-  /* cmp Rn,Rm; cset Rd,gt */
-  {MIR_GT, "r r r", CMPR "; " RGT},
-  /* cmp Rn,I,shift ; cset Wd,gt */
-  {MIR_GT, "r r I", CMPI "; " RGT},
-  /* cmp Wn,Wm;cset Rd,gt */
-  {MIR_GTS, "r r r", SCMPR "; " RGTS},
-  /* cmp Wn,I,shift; cset Wd,gt */
-  {MIR_GTS, "r r I", SCMPI "; " RGTS},
-  /* cmp Rn,Rm; cset Rd,hi */
-  {MIR_UGT, "r r r", CMPR "; " RUGT},
-  /* cmp Rn,I,shift ; cset Wd,hi */
-  {MIR_UGT, "r r I", CMPI "; " RUGT},
-  /* cmp Wn,Wm;cset Rd,hi */
-  {MIR_UGTS, "r r r", SCMPR "; " RUGTS},
-  /* cmp Wn,I,shift; cset Wd,hi */
-  {MIR_UGTS, "r r I", SCMPI "; " RUGTS},
-  /* fcmpe Sn,Sm; cset Rd,gt */
-  {MIR_FGT, "r r r", FCMP "; " RGT},
-  /* fcmpe Dn,Dm; cset Rd,gt */
-  {MIR_DGT, "r r r", DCMP "; " RGT},
-  /* fcmpe Sn,0.0; cset Rd,gt */
-  {MIR_FGT, "r r Zf", "1e202018:fffffc1f vn1 vm2; " RGT},
-  /* fcmpe Dn,0.0; cset Rd,gt */
-  {MIR_DGT, "r r Zd", "1e602018:fffffc1f vn1 vm2; " RGT},
-
-#define RLE "9a9fc7e0:ffffffe0 rd0"
-#define RLES "1a9fc7e0:ffffffe0 rd0"
-#define RULE "9a9f87e0:ffffffe0 rd0"
-#define RULES "1a9f87e0:ffffffe0 rd0"
-#define FLEC "9a9f87e0:ffffffe0 rd0"
-  /* cmp Rn,Rm; cset Rd,le */
-  {MIR_LE, "r r r", CMPR "; " RLE},
-  /* cmp Rn,I,shift ; cset Wd,le */
-  {MIR_LE, "r r I", CMPI "; " RLE},
-  /* cmp Wn,Wm;cset Rd,le */
-  {MIR_LES, "r r r", SCMPR "; " RLES},
-  /* cmp Wn,I,shift; cset Wd,le */
-  {MIR_LES, "r r I", SCMPI "; " RLES},
-  /* cmp Rn,Rm; cset Rd,ls */
-  {MIR_ULE, "r r r", CMPR "; " RULE},
-  /* cmp Rn,I,shift ; cset Wd,ls */
-  {MIR_ULE, "r r I", CMPI "; " RULE},
-  /* cmp Wn,Wm;cset Rd,ls */
-  {MIR_ULES, "r r r", SCMPR "; " RULES},
-  /* cmp Wn,I,shift; cset Wd,ls */
-  {MIR_ULES, "r r I", SCMPI "; " RULES},
-  /* fcmpe Sn,Sm; cset Rd,ls */
-  {MIR_FLE, "r r r", FCMP "; " FLEC},
-  /* fcmpe Dn,Dm; cset Rd,ls */
-  {MIR_DLE, "r r r", DCMP "; " FLEC},
-  /* fcmpe Sn,0.0; cset Rd,ls */
-  {MIR_FLE, "r r Zf", "1e202018:fffffc1f vn1 vm2; " FLEC},
-  /* fcmpe Dn,0.0; cset Rd,ls */
-  {MIR_DLE, "r r Zd", "1e602018:fffffc1f vn1 vm2; " FLEC},
-
-  {MIR_JMP, "L", "14000000:fc000000 L"}, /* 26-bit offset jmp */
-
-  {MIR_LADDR, "r l", "10000000:ff000000 rd0 l"}, /* adr r, L ip-relative address */
-  {MIR_JMPI, "r", "d61f0000:fffffc00 rn0"},      /* jmp *r */
-
-  {MIR_BT, "l r", "b5000000:ff000000 rd1 l"},  /* cbnz rd,l */
-  {MIR_BTS, "l r", "35000000:ff000000 rd1 l"}, /* cbnz wd,l */
-  {MIR_BF, "l r", "b4000000:ff000000 rd1 l"},  /* cbz rd,l */
-  {MIR_BFS, "l r", "34000000:ff000000 rd1 l"}, /* cbz wd,l */
-
-  {MIR_BO, "l", "54000006:ff00001f l"},  /* b.vs */
-  {MIR_UBO, "l", "54000002:ff00001f l"}, /* b.cs */
-
-  {MIR_BNO, "l", "54000007:ff00001f l"},  /* b.vc */
-  {MIR_UBNO, "l", "54000003:ff00001f l"}, /* b.cc */
-
-#define BEQ "54000000:ff00001f l"
-  // ??? add extended reg cmp insns:
-  // all ld insn are changed to builtins and bt/bts
-  /* cmp Rn,Rm; beq l */
-  {MIR_BEQ, "l r r", CMPR "; " BEQ},
-  /* cmp Rn,I,shift ; beq l */
-  {MIR_BEQ, "l r I", CMPI "; " BEQ},
-  /* cmp Wn,Wm;beq l */
-  {MIR_BEQS, "l r r", SCMPR "; " BEQ},
-  /* cmp Wn,I,shift; beq l */
-  {MIR_BEQS, "l r I", SCMPI "; " BEQ},
-  /* fcmpe Sn,Sm; beq l */
-  {MIR_FBEQ, "l r r", FCMP "; " BEQ},
-  /* fcmpe Dn,Dm; beq l */
-  {MIR_DBEQ, "l r r", DCMP "; " BEQ},
-  /* fcmpe Sn,0.0; beq l */
-  {MIR_FBEQ, "l r Zf", "1e202018:fffffc1f vn1 vm2; " BEQ},
-  /* fcmpe Dn,0.0; beq l */
-  {MIR_DBEQ, "l r Zd", "1e602018:fffffc1f vn1 vm2; " BEQ},
-
-#define BNE "54000001:ff00001f l"
-  /* cmp Rn,Rm; bne l */
-  {MIR_BNE, "l r r", CMPR "; " BNE},
-  /* cmp Rn,I,shift ; bne l */
-  {MIR_BNE, "l r I", CMPI "; " BNE},
-  /* cmp Wn,Wm;bne l */
-  {MIR_BNES, "l r r", SCMPR "; " BNE},
-  /* cmp Wn,I,shift; bne l */
-  {MIR_BNES, "l r I", SCMPI "; " BNE},
-  /* fcmpe Sn,Sm; bne l */
-  {MIR_FBNE, "l r r", FCMP "; " BNE},
-  /* fcmpe Dn,Dm; bne l */
-  {MIR_DBNE, "l r r", DCMP "; " BNE},
-  /* fcmpe Sn,0.0; bne l */
-  {MIR_FBNE, "l r Zf", "1e202018:fffffc1f vn1 vm2; " BNE},
-  /* fcmpe Dn,0.0; bne l */
-  {MIR_DBNE, "l r Zd", "1e602018:fffffc1f vn1 vm2; " BNE},
-
-#define BLT "5400000b:ff00001f l"
-#define UBLT "54000003:ff00001f l"
-  /* cmp Rn,Rm; blt l */
-  {MIR_BLT, "l r r", CMPR "; " BLT},
-  /* cmp Rn,I,shift ; blt l */
-  {MIR_BLT, "l r I", CMPI "; " BLT},
-  /* cmp Wn,Wm;blt l */
-  {MIR_BLTS, "l r r", SCMPR "; " BLT},
-  /* cmp Wn,I,shift; blt l */
-  {MIR_BLTS, "l r I", SCMPI "; " BLT},
-  /* cmp Rn,Rm; bcc l */
-  {MIR_UBLT, "l r r", CMPR "; " UBLT},
-  /* cmp Rn,I,shift ; bcc l */
-  {MIR_UBLT, "l r I", CMPI "; " UBLT},
-  /* cmp Wn,Wm;bcc l */
-  {MIR_UBLTS, "l r r", SCMPR "; " UBLT},
-  /* cmp Wn,I,shift; bcc l */
-  {MIR_UBLTS, "l r I", SCMPI "; " UBLT},
-
-#define BGE "5400000a:ff00001f l"
-#define UBGE "54000002:ff00001f l"
-  /* cmp Rn,Rm; bge l */
-  {MIR_BGE, "l r r", CMPR "; " BGE},
-  /* cmp Rn,I,shift ; bge l */
-  {MIR_BGE, "l r I", CMPI "; " BGE},
-  /* cmp Wn,Wm;bge l */
-  {MIR_BGES, "l r r", SCMPR "; " BGE},
-  /* cmp Wn,I,shift; bge l */
-  {MIR_BGES, "l r I", SCMPI "; " BGE},
-  /* cmp Rn,Rm; bcs l */
-  {MIR_UBGE, "l r r", CMPR "; " UBGE},
-  /* cmp Rn,I,shift ; bcs l */
-  {MIR_UBGE, "l r I", CMPI "; " UBGE},
-  /* cmp Wn,Wm;bcs l */
-  {MIR_UBGES, "l r r", SCMPR "; " UBGE},
-  /* cmp Wn,I,shift; bcs l */
-  {MIR_UBGES, "l r I", SCMPI "; " UBGE},
-  /* fcmpe Sn,Sm; bpl l */
-  {MIR_FBGE, "l r r", FCMP "; " BGE},
-  /* fcmpe Dn,Dm; bpl l */
-  {MIR_DBGE, "l r r", DCMP "; " BGE},
-  /* fcmpe Sn,0.0; bpl l */
-  {MIR_FBGE, "l r Zf", "1e202018:fffffc1f vn1 vm2; " BGE},
-  /* fcmpe Dn,0.0; bpl l */
-  {MIR_DBGE, "l r Zd", "1e602018:fffffc1f vn1 vm2; " BGE},
-
-#define BGT "5400000c:ff00001f l"
-#define UBGT "54000008:ff00001f l"
-  /* cmp Rn,Rm; bgt l */
-  {MIR_BGT, "l r r", CMPR "; " BGT},
-  /* cmp Rn,I,shift ; bgt l */
-  {MIR_BGT, "l r I", CMPI "; " BGT},
-  /* cmp Wn,Wm;bgt l */
-  {MIR_BGTS, "l r r", SCMPR "; " BGT},
-  /* cmp Wn,I,shift; bgt l */
-  {MIR_BGTS, "l r I", SCMPI "; " BGT},
-  /* cmp Rn,Rm; bhi l */
-  {MIR_UBGT, "l r r", CMPR "; " UBGT},
-  /* cmp Rn,I,shift ; bhi l */
-  {MIR_UBGT, "l r I", CMPI "; " UBGT},
-  /* cmp Wn,Wm;bhi l */
-  {MIR_UBGTS, "l r r", SCMPR "; " UBGT},
-  /* cmp Wn,I,shift; bhi l */
-  {MIR_UBGTS, "l r I", SCMPI "; " UBGT},
-  /* fcmpe Sn,Sm; bhi l */
-  {MIR_FBGT, "l r r", FCMP "; " BGT},
-  /* fcmpe Dn,Dm; bhi l */
-  {MIR_DBGT, "l r r", DCMP "; " BGT},
-  /* fcmpe Sn,0.0; bhi l */
-  {MIR_FBGT, "l r Zf", "1e202018:fffffc1f vn1 vm2; " BGT},
-  /* fcmpe Dn,0.0; bhi l */
-  {MIR_DBGT, "l r Zd", "1e602018:fffffc1f vn1 vm2; " BGT},
-
-#define BLE "5400000d:ff00001f l"
-#define UBLE "54000009:ff00001f l"
-  /* cmp Rn,Rm; ble l */
-  {MIR_BLE, "l r r", CMPR "; " BLE},
-  /* cmp Rn,I,shift ; ble l */
-  {MIR_BLE, "l r I", CMPI "; " BLE},
-  /* cmp Wn,Wm;ble l */
-  {MIR_BLES, "l r r", SCMPR "; " BLE},
-  /* cmp Wn,I,shift; ble l */
-  {MIR_BLES, "l r I", SCMPI "; " BLE},
-  /* cmp Rn,Rm; bls l */
-  {MIR_UBLE, "l r r", CMPR "; " UBLE},
-  /* cmp Rn,I,shift ; bls l */
-  {MIR_UBLE, "l r I", CMPI "; " UBLE},
-  /* cmp Wn,Wm;bls l */
-  {MIR_UBLES, "l r r", SCMPR "; " UBLE},
-  /* cmp Wn,I,shift; bls l */
-  {MIR_UBLES, "l r I", SCMPI "; " UBLE},
-
-  // ??? with shift
-  {MIR_NEG, "r r", "cb0003e0:ff2003e0 rd0 rm1"},  /* neg Rd,Rm */
-  {MIR_NEGS, "r r", "4b0003e0:ff2003e0 rd0 rm1"}, /* neg Wd,Wm */
-  {MIR_FNEG, "r r", "1e214000:fffffc00 vd0 vn1"}, /* fneg Sd,Sn */
-  {MIR_DNEG, "r r", "1e614000:fffffc00 vd0 vn1"}, /* fneg Dd,Dn */
-  // ldneg is a builtin
-
-  {MIR_LSH, "r r r", "9ac02000:ffe0fc00 rd0 rn1 rm2"},  /* lsl Rd,Rn,Rm */
-  {MIR_LSHS, "r r r", "1ac02000:ffe0fc00 rd0 rn1 rm2"}, /* lsl Wd,Wn,Wm */
-  {MIR_LSH, "r r SL", "d3400000:ffc00000 rd0 rn1 SL"},  /* ubfm Rd,Rn,immr,imms */
-  {MIR_LSHS, "r r Sl", "53000000:ffc00000 rd0 rn1 Sl"}, /* ubfm Wd,Wn,immr,imms */
-
-  {MIR_RSH, "r r r", "9ac02800:ffe0fc00 rd0 rn1 rm2"},  /* asr Rd,Rn,Rm */
-  {MIR_RSHS, "r r r", "1ac02800:ffe0fc00 rd0 rn1 rm2"}, /* asr Wd,Wn,Wm */
-  {MIR_RSH, "r r SR", "9340fc00:ffc0fc00 rd0 rn1 S"},   /* asr Rd,Rn,S */
-  {MIR_RSHS, "r r Sr", "13007c00:ffc0fc00 rd0 rn1 S"},  /* asr Wd,Wn,S */
-
-  {MIR_URSH, "r r r", "9ac02400:ffe0fc00 rd0 rn1 rm2"},  /* lsr Rd,Rn,Rm */
-  {MIR_URSHS, "r r r", "1ac02400:ffe0fc00 rd0 rn1 rm2"}, /* lsr Wd,Wn,Wm */
-  {MIR_URSH, "r r SR", "d340fc00:ffc0fc00 rd0 rn1 S"},   /* lsr Rd,Rn,S */
-  {MIR_URSHS, "r r Sr", "53007c00:ffc0fc00 rd0 rn1 S"},  /* lsr Wd,Wn,S */
-
-  // ??? adding shift, negate, immediate
-  {MIR_AND, "r r r", "8a000000:ffe0fc00 rd0 rn1 rm2"},  /* and Rd,Rn,Rm */
-  {MIR_ANDS, "r r r", "0a000000:ffe0fc00 rd0 rn1 rm2"}, /* and Wd,Wn,Wm */
-
-  {MIR_OR, "r r r", "aa000000:ffe0fc00 rd0 rn1 rm2"},  /* orr Rd,Rn,Rm */
-  {MIR_ORS, "r r r", "2a000000:ffe0fc00 rd0 rn1 rm2"}, /* orr Wd,Wn,Wm */
-
-  {MIR_XOR, "r r r", "ca000000:ffe0fc00 rd0 rn1 rm2"},  /* eor Rd,Rn,Rm */
-  {MIR_XORS, "r r r", "4a000000:ffe0fc00 rd0 rn1 rm2"}, /* eor Wd,Wn,Wm */
-
-  // ??? can we add scale
-  {MIR_I2F, "r r", "9e220000:ffff0000 vd0 rn1"},  /* scvtf Sd,Rn */
-  {MIR_I2D, "r r", "9e620000:ffff0000 vd0 rn1"},  /* scvtf Dd,Rn */
-  {MIR_UI2F, "r r", "9e230000:ffff0000 vd0 rn1"}, /* ucvtf Sd,Rn */
-  {MIR_UI2D, "r r", "9e630000:ffff0000 vd0 rn1"}, /* ucvtf Dd,Rn */
-  {MIR_F2I, "r r", "9e380000:ffff0000 rd0 vn1"},  /* fcvtzs Rd,Sn */
-  {MIR_D2I, "r r", "9e780000:ffff0000 rd0 vn1"},  /* fcvtzs Rd,Dn */
-  {MIR_F2D, "r r", "1e22c000:fffffc00 vd0 vn1"},  /* fcvt Dd,Sn */
-  {MIR_D2F, "r r", "1e624000:fffffc00 vd0 vn1"},  /* fcvt Sd,Dn */
-  // i2ld, ui2ld, ld2i, f2ld, d2ld, ld2f, ld2d are builtins
-
-  {MIR_CALL, "X r $", "d63f0000:fffffc1f rn1"},   /* blr *Rn */
-  {MIR_CALL, "X L $", "94000000:fc000000 rn1"},   /* bl address */
-  {MIR_INLINE, "X r $", "d63f0000:fffffc1f rn1"}, /* blr *Rn */
-  {MIR_INLINE, "X L $", "94000000:fc000000 rn1"}, /* bl address */
-  {MIR_RET, "$", "d65f0000:fffffc1f hn1e"},       /* ret R30  */
-
-  {MIR_JCALL, "X r $", "d61f0000:fffffc00 rn1"}, /* br r1 */
-  {MIR_JRET, "r $", "d61f0000:fffffc00 rn0"},    /* br r0  */
-
-  /* add r0, r1, 15; and r0, r0, -16; sub sp, sp, r0; mov r0, sp: */
-  {MIR_ALLOCA, "r r",
-   "91003c00:fffffc00 rd0 rn1; 927cec00:fffffc00 rd0 rn0;"         /* add r0,r1,15;and r0,r0,-16
-                                                                    */
-   "cb206000:ffe0fc00 hn1f hd1f rm0; 91000000:fffffc00 rd0 hn1f"}, /* sub sp,sp,r0; mov r0,sp */
-  /* sub sp, sp, roundup (imm, 16); mov r0, sp: */
-  {MIR_ALLOCA, "r Iu", "d1000000:ff000000 hd1f hn1f Iu; 91000000:fffffc00 rd0 hn1f"},
-
-  {MIR_BSTART, "r", "91000000:fffffc00 rd0 hn1f"}, /* Rd = sp */
-  {MIR_BEND, "r", "91000000:fffffc00 hd1f rn0"},   /* sp = Rn */
-
-  /* adr r10,PC-relative TableAddress; ldr r10,(r10,r,8);br r10; TableContent
-     We use r10 as r9 can be used if switch operand is memory. */
-  {MIR_SWITCH, "r $",
-   "10000000:ff000000 hda T; f8607800:ffe0fc00 hda hna rm0; d61f0000:fffffc00 hna;"},
-
-  /* Used only during machine code generation.  Should have the same format as branch on overflow
-     insns */
-  /* unsigned sub sets up carry flag when there is no overflow: */
-  {SUB_UBO, "l", "54000003:ff00001f l"},  /* b.cc */
-  {SUB_UBNO, "l", "54000002:ff00001f l"}, /* b.cs */
-
-  /* MULOS:smull Rd,Wn,Wm; asr r10,Rd,32; cmp W10,Wd,asr 31 */
-  {MIR_MULOS, "r r r",
-   "9b207c00:ffe0fc00 rd0 rn1 rm2; 9340fc00:ffc0fc00 hda rn0 I20; "
-   "6b80001f:ffe0001f hna rm0 i1f"},
-  /* UMULOS:umull Rd,Wn,Wm; cmp xzr,Rd,lsr 32 */
-  {MIR_UMULOS, "r r r", "9ba07c00:ffe0fc00 rd0 rn1 rm2; eb40001f:ffe0001f hn1f rm0 i20"},
-  /* MULO:smulh h11,Rn,Rm; mul Rd,Rn,Rm; cmp h11,Rd,asr 63 (r11 is a scratch reg) */
-  {MIR_MULO, "r r r",
-   "9b407c00:ffe0fc00 hdb rn1 rm2; 9b007c00:ffe0fc00 rd0 rn1 rm2; "
-   "eb80001f:ffe0001f hnb rm0 i3f"},
-  /* UMULO:umulh h11,Rn,Rm; mul Rd,Rn,Rm; cmp xzr,h11 (r11 is a scratch reg) */
-  {MIR_UMULO, "r r r",
-   "9bc07c00:ffe0fc00 hdb rn1 rm2; 9b007c00:ffe0fc00 rd0 rn1 rm2; "
-   "eb00001f:ff20001f hn1f hmb"},
-
-  /* [u]mulo[s] insns uses zero flag to check overflow: */
-  {MUL_BO, "l", BNE},  /* b.ne */
-  {MUL_BNO, "l", BEQ}, /* b.eq */
-};
+#define patterns legacy_patterns
+#include "mir-machine-patterns-aarch64.def"
+#undef patterns
+#define patterns legacy_patterns
 
 static void target_get_early_clobbered_hard_regs (MIR_insn_t insn, MIR_reg_t *hr1, MIR_reg_t *hr2) {
   *hr1 = *hr2 = MIR_NON_VAR;
@@ -1802,14 +1240,14 @@ static void target_get_early_clobbered_hard_regs (MIR_insn_t insn, MIR_reg_t *hr
 
 static int pattern_index_cmp (const void *a1, const void *a2) {
   int i1 = *(const int *) a1, i2 = *(const int *) a2;
-  int c1 = (int) patterns[i1].code, c2 = (int) patterns[i2].code;
+  int c1 = (int) legacy_patterns[i1].code, c2 = (int) legacy_patterns[i2].code;
 
   return c1 != c2 ? c1 - c2 : (long) i1 - (long) i2;
 }
 
 static void patterns_init (gen_ctx_t gen_ctx) {
   MIR_alloc_t alloc = gen_alloc (gen_ctx);
-  int i, ind, n = sizeof (patterns) / sizeof (struct pattern);
+  int i, ind, n = sizeof (legacy_patterns) / sizeof (struct pattern);
   MIR_insn_code_t prev_code, code;
   insn_pattern_info_t *info_addr;
   insn_pattern_info_t pinfo = {0, 0};
@@ -2016,7 +1454,7 @@ static int pattern_match_p (gen_ctx_t gen_ctx, const struct pattern *pat, MIR_in
           v = op.u.u;
         } else if (op.u.ref->item_type == MIR_data_item && op.u.ref->u.data->name != NULL
                    && _MIR_reserved_ref_name_p (ctx, op.u.ref->u.data->name)) {
-          v = (uint64_t) op.u.ref->u.data->u.els;
+          v = (uint64_t) _MIR_data_els(op.u.ref->u.data);
         } else {
           v = (uint64_t) op.u.ref->addr;
         }
@@ -2101,8 +1539,10 @@ static const char *find_insn_pattern_replacement (gen_ctx_t gen_ctx, MIR_insn_t 
 }
 
 static void patterns_finish (gen_ctx_t gen_ctx) {
-  VARR_DESTROY (int, pattern_indexes);
-  VARR_DESTROY (insn_pattern_info_t, insn_pattern_info);
+  {
+    VARR_DESTROY (int, pattern_indexes);
+    VARR_DESTROY (insn_pattern_info_t, insn_pattern_info);
+  }
 }
 
 static int hex_value (int ch) {
@@ -2298,7 +1738,7 @@ static void out_insn (gen_ctx_t gen_ctx, MIR_insn_t insn, const char *replacemen
           v = op.u.u;
         } else if (op.u.ref->item_type == MIR_data_item && op.u.ref->u.data->name != NULL
                    && _MIR_reserved_ref_name_p (ctx, op.u.ref->u.data->name)) {
-          v = (uint64_t) op.u.ref->u.data->u.els;
+          v = (uint64_t) _MIR_data_els(op.u.ref->u.data);
         } else {
           v = (uint64_t) op.u.ref->addr;
         }
@@ -2445,6 +1885,8 @@ static void out_insn (gen_ctx_t gen_ctx, MIR_insn_t insn, const char *replacemen
 static int target_memory_ok_p (gen_ctx_t gen_ctx, MIR_op_t *op_ref) {
   gen_assert (op_ref->mode == MIR_OP_VAR_MEM);
   MIR_context_t ctx = gen_ctx->ctx;
+  if (op_ref->u.var_mem.type == MIR_T_UNDEF || MIR_all_blk_type_p (op_ref->u.var_mem.type))
+    return FALSE;
   size_t size = _MIR_type_size (ctx, op_ref->u.var_mem.type);
   int scale = gen_int_log2 ((int64_t) size);
 
@@ -2452,7 +1894,7 @@ static int target_memory_ok_p (gen_ctx_t gen_ctx, MIR_op_t *op_ref) {
       && ((op_ref->u.var_mem.index == MIR_NON_VAR || op_ref->u.var_mem.scale == 1
            || op_ref->u.var_mem.scale == scale)))
     return TRUE;
-  if (op_ref->u.var_mem.index == MIR_NON_VAR && op_ref->u.var_mem.disp >= 0
+  if (scale != 0 && op_ref->u.var_mem.index == MIR_NON_VAR && op_ref->u.var_mem.disp >= 0
       && op_ref->u.var_mem.disp % scale == 0 && op_ref->u.var_mem.disp / scale < (1 << 12))
     return TRUE;
   return FALSE;
@@ -2531,11 +1973,6 @@ static void target_rebase (gen_ctx_t gen_ctx, uint8_t *base) {
 }
 
 static void target_change_to_direct_calls (MIR_context_t ctx MIR_UNUSED) {}
-
-struct target_bb_version {
-  uint8_t *base;
-  label_ref_t branch_ref; /* label cand used for jump to this bb version */
-};
 
 static void target_init_bb_version_data (target_bb_version_t data) {
   data->base = NULL; /* we don't know origin branch */
@@ -2655,11 +2092,13 @@ static void target_init (gen_ctx_t gen_ctx) {
   MIR_alloc_t alloc = gen_alloc (gen_ctx);
   MIR_context_t ctx = gen_ctx->ctx;
 
-  gen_ctx->target_ctx = gen_malloc (gen_ctx, sizeof (struct target_ctx));
-  VARR_CREATE (uint8_t, result_code, alloc, 0);
-  VARR_CREATE (label_ref_t, label_refs, alloc, 0);
-  VARR_CREATE (uint64_t, abs_address_locs, alloc, 0);
-  VARR_CREATE (MIR_code_reloc_t, relocs, alloc, 0);
+  {
+    gen_ctx->target_ctx = gen_malloc (gen_ctx, sizeof (struct target_ctx));
+    VARR_CREATE (uint8_t, result_code, alloc, 0);
+    VARR_CREATE (label_ref_t, label_refs, alloc, 0);
+    VARR_CREATE (uint64_t, abs_address_locs, alloc, 0);
+    VARR_CREATE (MIR_code_reloc_t, relocs, alloc, 0);
+  }
   patterns_init (gen_ctx);
   temp_jump = MIR_new_insn (ctx, MIR_JMP, MIR_new_label_op (ctx, NULL));
   temp_jump_replacement = find_insn_pattern_replacement (gen_ctx, temp_jump);
@@ -2669,6 +2108,7 @@ static void target_finish (gen_ctx_t gen_ctx) {
   MIR_alloc_t alloc = gen_alloc (gen_ctx);
   patterns_finish (gen_ctx);
   _MIR_free_insn (gen_ctx->ctx, temp_jump);
+
   VARR_DESTROY (uint8_t, result_code);
   VARR_DESTROY (label_ref_t, label_refs);
   VARR_DESTROY (uint64_t, abs_address_locs);

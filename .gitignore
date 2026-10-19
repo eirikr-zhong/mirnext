@@ -9,6 +9,9 @@
 *.a
 /mir-run
 /build
+/build-make/
 /build-msvc
 /.cache
-/docs/
+/docs/*
+!/docs/cpp-architecture.md
+!/docs/native-acceptance.md
