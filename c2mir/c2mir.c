@@ -27,6 +27,7 @@
 #include "time.h"
 
 #include "c2mir.h"
+#include "c2mir-storage.h"
 
 #if defined(__x86_64__) || defined(_M_AMD64)
 #include "x86_64/cx86_64.h"
@@ -135,6 +136,11 @@ DEF_VARR (pos_t);
 
 struct c2m_ctx {
   MIR_context_t ctx;
+  const struct MIR_cpp_c_frontend *cpp_storage;
+  void *cpp_state;
+#ifdef MIR_OPT_TEST_HOOKS
+  size_t legacy_storage;
+#endif
   struct c2mir_options *options;
   jmp_buf env; /* put it first as it might need 16-byte malloc allignment */
   VARR (char_ptr_t) * headers;
@@ -340,7 +346,21 @@ static inline MIR_alloc_t c2m_alloc (c2m_ctx_t c2m_ctx) {
   return MIR_get_alloc (c2m_ctx->ctx);
 }
 
+static void record_legacy_storage(c2m_ctx_t c2m_ctx) {
+#ifdef MIR_OPT_TEST_HOOKS
+  ++c2m_ctx->legacy_storage;
+#else
+  (void)c2m_ctx;
+#endif
+}
+
 static void *reg_malloc (c2m_ctx_t c2m_ctx, size_t s) {
+  if(c2m_ctx->cpp_storage!=NULL) {
+    void *memory=c2m_ctx->cpp_storage->allocate(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state,s);
+    if(memory==NULL)alloc_error(c2m_ctx,"native C frontend allocation failed");
+    return memory;
+  }
+  record_legacy_storage(c2m_ctx);
   MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
   void *mem = MIR_malloc (alloc, s);
 
@@ -350,20 +370,31 @@ static void *reg_malloc (c2m_ctx_t c2m_ctx, size_t s) {
 }
 
 static void reg_memory_pop (c2m_ctx_t c2m_ctx, size_t mark) {
+  if(c2m_ctx->cpp_storage!=NULL) {
+    c2m_ctx->cpp_storage->release(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state,mark);return;
+  }
+  record_legacy_storage(c2m_ctx);
   MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
   while (VARR_LENGTH (void_ptr_t, reg_memory) > mark)
     MIR_free (alloc, VARR_POP (void_ptr_t, reg_memory));
 }
 
 static size_t MIR_UNUSED reg_memory_mark (c2m_ctx_t c2m_ctx) {
+  if(c2m_ctx->cpp_storage!=NULL)return c2m_ctx->cpp_storage->mark(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state);
+  record_legacy_storage(c2m_ctx);
   return VARR_LENGTH (void_ptr_t, reg_memory);
 }
 static void reg_memory_finish (c2m_ctx_t c2m_ctx) {
+  if(c2m_ctx->cpp_storage!=NULL) {
+    c2m_ctx->cpp_storage->close(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state);c2m_ctx->cpp_state=NULL;return;
+  }
   reg_memory_pop (c2m_ctx, 0);
   VARR_DESTROY (void_ptr_t, reg_memory);
 }
 
 static void reg_memory_init (c2m_ctx_t c2m_ctx) {
+  if(c2m_ctx->cpp_storage!=NULL)return;
+  record_legacy_storage(c2m_ctx);
   MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
   VARR_CREATE (void_ptr_t, reg_memory, alloc, 4096);
 }
@@ -388,6 +419,8 @@ static htab_hash_t str_key_hash (tab_str_t str, void *arg MIR_UNUSED) {
 static str_t uniq_cstr (c2m_ctx_t c2m_ctx, const char *str);
 
 static void str_init (c2m_ctx_t c2m_ctx) {
+  if(c2m_ctx->cpp_storage!=NULL) {empty_str=uniq_cstr(c2m_ctx,"");return;}
+  record_legacy_storage(c2m_ctx);
   MIR_alloc_t alloc = c2m_alloc (c2m_ctx);
   HTAB_CREATE (tab_str_t, str_tab, alloc, 1000, str_hash, str_eq, NULL);
   HTAB_CREATE (tab_str_t, str_key_tab, alloc, 200, str_key_hash, str_key_eq, NULL);
@@ -395,6 +428,12 @@ static void str_init (c2m_ctx_t c2m_ctx) {
 }
 
 static int str_exists_p (c2m_ctx_t c2m_ctx, const char *s, size_t len, tab_str_t *tab_str) {
+  if(c2m_ctx->cpp_storage!=NULL) {
+    struct MIR_cpp_c_string record;
+    if(!c2m_ctx->cpp_storage->find(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state,s,len,&record))return FALSE;
+    *tab_str=(tab_str_t){{record.bytes,record.length},record.key,record.flags};return TRUE;
+  }
+  record_legacy_storage(c2m_ctx);
   tab_str_t el, str;
 
   str.str.s = s;
@@ -406,6 +445,14 @@ static int str_exists_p (c2m_ctx_t c2m_ctx, const char *s, size_t len, tab_str_t
 
 static tab_str_t str_add (c2m_ctx_t c2m_ctx, const char *s, size_t len, size_t key, size_t flags,
                           int key_p) {
+  if(c2m_ctx->cpp_storage!=NULL) {
+    struct MIR_cpp_c_string record;
+    if(!c2m_ctx->cpp_storage->intern(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state,s,len,key,flags,key_p,&record)) {
+      alloc_error(c2m_ctx,"native C frontend string storage failed");return (tab_str_t){{NULL,0},0,0};
+    }
+    return (tab_str_t){{record.bytes,record.length},record.key,record.flags};
+  }
+  record_legacy_storage(c2m_ctx);
   char *heap_s;
   tab_str_t el, str;
 
@@ -422,6 +469,8 @@ static tab_str_t str_add (c2m_ctx_t c2m_ctx, const char *s, size_t len, size_t k
 }
 
 static const char *str_find_by_key (c2m_ctx_t c2m_ctx, size_t key) {
+  if(c2m_ctx->cpp_storage!=NULL)return c2m_ctx->cpp_storage->keyword(c2m_ctx->cpp_storage->data,c2m_ctx->cpp_state,key);
+  record_legacy_storage(c2m_ctx);
   tab_str_t el, str;
 
   str.key = key;
@@ -430,6 +479,8 @@ static const char *str_find_by_key (c2m_ctx_t c2m_ctx, size_t key) {
 }
 
 static void str_finish (c2m_ctx_t c2m_ctx) {
+  if(c2m_ctx->cpp_storage!=NULL)return;
+  record_legacy_storage(c2m_ctx);
   HTAB_DESTROY (tab_str_t, str_tab);
   HTAB_DESTROY (tab_str_t, str_key_tab);
 }
@@ -456,12 +507,33 @@ void c2mir_init (MIR_context_t ctx) {
 
 void c2mir_finish (MIR_context_t ctx) {
   struct c2m_ctx **c2m_ctx_ptr = c2m_ctx_loc (ctx), *c2m_ctx = *c2m_ctx_ptr;
-
+  if(c2m_ctx==NULL)return;
   str_finish (c2m_ctx);
   reg_memory_finish (c2m_ctx);
-  free (c2m_ctx);
+  MIR_free(MIR_get_alloc(ctx),c2m_ctx);
   *c2m_ctx_ptr = NULL;
 }
+
+#ifdef MIR_OPT_TEST_HOOKS
+size_t _MIR_opt_test_c2mir_legacy_storage(MIR_context_t ctx) {
+  c2m_ctx_t c2m_ctx=*c2m_ctx_loc(ctx);return c2m_ctx!=NULL?c2m_ctx->legacy_storage:0;
+}
+size_t _MIR_opt_test_c2mir_legacy_tables(MIR_context_t ctx) {
+  c2m_ctx_t c2m_ctx=*c2m_ctx_loc(ctx);return c2m_ctx!=NULL?(str_tab!=NULL)+(str_key_tab!=NULL)+(reg_memory!=NULL):0;
+}
+int _MIR_opt_test_c2mir_intern(MIR_context_t ctx,const char *bytes,size_t size,size_t key,size_t flags,int keyed,struct MIR_cpp_c_string *result) {
+  c2m_ctx_t c2m_ctx=*c2m_ctx_loc(ctx);tab_str_t value=str_add(c2m_ctx,bytes,size,key,flags,keyed);
+  *result=(struct MIR_cpp_c_string){value.str.s,value.str.len,value.key,value.flags};return TRUE;
+}
+int _MIR_opt_test_c2mir_find(MIR_context_t ctx,const char *bytes,size_t size,struct MIR_cpp_c_string *result) {
+  c2m_ctx_t c2m_ctx=*c2m_ctx_loc(ctx);tab_str_t value;if(!str_exists_p(c2m_ctx,bytes,size,&value))return FALSE;
+  *result=(struct MIR_cpp_c_string){value.str.s,value.str.len,value.key,value.flags};return TRUE;
+}
+const char *_MIR_opt_test_c2mir_keyword(MIR_context_t ctx,size_t key) {return str_find_by_key(*c2m_ctx_loc(ctx),key);}
+void *_MIR_opt_test_c2mir_allocate(MIR_context_t ctx,size_t size) {return reg_malloc(*c2m_ctx_loc(ctx),size);}
+size_t _MIR_opt_test_c2mir_mark(MIR_context_t ctx) {return reg_memory_mark(*c2m_ctx_loc(ctx));}
+void _MIR_opt_test_c2mir_release(MIR_context_t ctx,size_t mark) {reg_memory_pop(*c2m_ctx_loc(ctx),mark);}
+#endif
 
 /* New Page */
 
@@ -11637,7 +11709,7 @@ static int cmp_init_el (const void *p1, const void *p2) {
     return 0;
 }
 
-static void move_item_to_module_start (MIR_module_t module, MIR_item_t item) {
+static void move_item_to_module_start (MIR_context_t ctx, MIR_module_t module, MIR_item_t item) {
   DLIST_REMOVE (MIR_item_t, module->items, item);
   DLIST_PREPEND (MIR_item_t, module->items, item);
 }
@@ -11670,8 +11742,8 @@ static void gen_memset (c2m_ctx_t c2m_ctx, MIR_disp_t disp, MIR_reg_t base, mir_
     module = curr_func->module;
     memset_proto = MIR_new_proto_arr (ctx, "memset_p", 1, &ret_type, 3, vars);
     memset_item = MIR_new_import (ctx, "memset");
-    move_item_to_module_start (module, memset_proto);
-    move_item_to_module_start (module, memset_item);
+    move_item_to_module_start (ctx, module, memset_proto);
+    move_item_to_module_start (ctx, module, memset_item);
   }
   args[0] = MIR_new_ref_op (ctx, memset_proto);
   args[1] = MIR_new_ref_op (ctx, memset_item);
@@ -11711,8 +11783,8 @@ static void gen_memcpy (c2m_ctx_t c2m_ctx, MIR_disp_t disp, MIR_reg_t base, op_t
     module = curr_func->module;
     memcpy_proto = MIR_new_proto_arr (ctx, "memcpy_p", 1, &ret_type, 3, vars);
     memcpy_item = MIR_new_import (ctx, "memcpy");
-    move_item_to_module_start (module, memcpy_proto);
-    move_item_to_module_start (module, memcpy_item);
+    move_item_to_module_start (ctx, module, memcpy_proto);
+    move_item_to_module_start (ctx, module, memcpy_item);
   }
   args[0] = MIR_new_ref_op (ctx, memcpy_proto);
   args[1] = MIR_new_ref_op (ctx, memcpy_item);
@@ -11819,7 +11891,7 @@ static MIR_item_t get_mir_str_op_data (c2m_ctx_t c2m_ctx, MIR_str_t str) {
 
   _MIR_get_temp_item_name (ctx, module, buff, sizeof (buff));
   data = MIR_new_string_data (ctx, buff, str);
-  move_item_to_module_start (module, data);
+  move_item_to_module_start (ctx, module, data);
   return data;
 }
 
@@ -11840,7 +11912,7 @@ static MIR_item_t get_string_data (c2m_ctx_t c2m_ctx, node_t n) {
       data = MIR_new_data (ctx, buff, MIR_T_U32, n->u.s.len / 4, n->u.s.s);
     }
   }
-  move_item_to_module_start (module, data);
+  move_item_to_module_start (ctx, module, data);
   return data;
 }
 
@@ -13139,7 +13211,7 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
     }
     while ((insn = DLIST_HEAD (MIR_insn_t, slow_code_part)) != NULL) {
       DLIST_REMOVE (MIR_insn_t, slow_code_part, insn);
-      DLIST_APPEND (MIR_insn_t, curr_func->u.func->insns, insn);
+      MIR_append_insn(ctx,curr_func,insn);
     }
     MIR_finish_func (ctx);
     if (func_decl->decl_spec.linkage == N_EXTERN)
@@ -13193,8 +13265,7 @@ static op_t gen (c2m_ctx_t c2m_ctx, node_t r, MIR_label_t true_label, MIR_label_
         DLIST_REMOVE (MIR_insn_t, curr_func->u.func->insns, insn);
         DLIST_APPEND (MIR_insn_t, slow_code_part, insn);
       }
-      DLIST_APPEND (MIR_insn_t, slow_code_part,
-                    MIR_new_insn (ctx, MIR_JMP, MIR_new_label_op (ctx, end_label)));
+      DLIST_APPEND (MIR_insn_t, slow_code_part, MIR_new_insn(ctx,MIR_JMP,MIR_new_label_op(ctx,end_label)));
     }
     emit_label_insn_opt (c2m_ctx, end_label);
     break;

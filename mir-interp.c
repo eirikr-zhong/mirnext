@@ -6,6 +6,7 @@
 
 #include "mir-alloc.h"
 #include "mir.h"
+#include "mir-runtime-interpreter.h"
 #ifdef MIR_NO_INTERP
 static void interp_init (MIR_context_t ctx) {}
 static void finish_func_interpretation (MIR_item_t func_item, MIR_alloc_t alloc) {}
@@ -40,11 +41,12 @@ void MIR_set_interp_interface (MIR_context_t ctx, MIR_item_t func_item) {}
 
 typedef MIR_val_t *code_t;
 
-typedef struct func_desc {
+typedef struct func_desc *func_desc_t;
+struct func_desc {
   MIR_reg_t nregs;
   MIR_item_t func_item;
   MIR_val_t code[1];
-} *func_desc_t;
+};
 
 static void update_max_nreg (MIR_reg_t reg, MIR_reg_t *max_nreg) {
   if (*max_nreg < reg) *max_nreg = reg;
@@ -56,19 +58,6 @@ static MIR_reg_t get_reg (MIR_op_t op, MIR_reg_t *max_nreg) {
   update_max_nreg (op.u.reg, max_nreg);
   return op.u.reg;
 }
-
-#define IC_EL(i) IC_##i
-#define REP_SEP ,
-typedef enum {
-  IC_LDI8 = MIR_INSN_BOUND,
-  REP6 (IC_EL, LDU8, LDI16, LDU16, LDI32, LDU32, LDI64),
-  REP3 (IC_EL, LDF, LDD, LDLD),
-  REP7 (IC_EL, STI8, STU8, STI16, STU16, STI32, STU32, STI64),
-  REP8 (IC_EL, STF, STD, STLD, MOVI, MOVP, MOVF, MOVD, MOVLD),
-  REP6 (IC_EL, IMM_CALL, IMM_JCALL, MOVFG, FMOVFG, DMOVFG, LDMOVFG),
-  REP5 (IC_EL, MOVTG, FMOVTG, DMOVTG, LDMOVTG, INSN_BOUND),
-} MIR_full_insn_code_t;
-#undef REP_SEP
 
 DEF_VARR (MIR_val_t);
 
@@ -83,28 +72,6 @@ typedef struct ff_interface *ff_interface_t;
 DEF_HTAB (ff_interface_t);
 
 DEF_VARR (_MIR_arg_desc_t);
-
-struct interp_ctx {
-#if DIRECT_THREADED_DISPATCH
-  void *dispatch_label_tab[IC_INSN_BOUND];
-#endif
-  MIR_val_t global_regs[MAX_HARD_REG + 1];
-  VARR (MIR_val_t) * code_varr;
-  VARR (MIR_insn_t) * branches;
-  VARR (MIR_val_t) * arg_vals_varr;
-  MIR_val_t *arg_vals;
-#if MIR_INTERP_TRACE
-  int trace_insn_ident;
-#endif
-  void *(*bstart_builtin) (void);
-  void (*bend_builtin) (void *);
-  void *jret_addr;
-  VARR (MIR_val_t) * call_res_args_varr;
-  MIR_val_t *call_res_args;
-  VARR (_MIR_arg_desc_t) * call_arg_descs_varr;
-  _MIR_arg_desc_t *call_arg_descs;
-  HTAB (ff_interface_t) * ff_interface_tab;
-};
 
 #define dispatch_label_tab interp_ctx->dispatch_label_tab
 #define global_regs interp_ctx->global_regs
@@ -122,6 +89,9 @@ struct interp_ctx {
 #define call_arg_descs_varr interp_ctx->call_arg_descs_varr
 #define call_arg_descs interp_ctx->call_arg_descs
 #define ff_interface_tab interp_ctx->ff_interface_tab
+#define addr_offset8 interp_ctx->addr_offset8
+#define addr_offset16 interp_ctx->addr_offset16
+#define addr_offset32 interp_ctx->addr_offset32
 
 static void get_icode (struct interp_ctx *interp_ctx, MIR_val_t *v, int code) {
 #if DIRECT_THREADED_DISPATCH
@@ -503,12 +473,11 @@ static void generate_icode (MIR_context_t ctx, MIR_item_t func_item) {
 #endif
     }
   }
-  func_item->data = func_desc
-    = MIR_malloc (ctx->alloc, sizeof (struct func_desc) + VARR_LENGTH (MIR_val_t, code_varr) * sizeof (MIR_val_t));
-  if (func_desc == NULL)
-    (*MIR_get_error_func (ctx)) (MIR_alloc_error, "no memory for interpreter code");
-  memmove (func_desc->code, VARR_ADDR (MIR_val_t, code_varr),
-           VARR_LENGTH (MIR_val_t, code_varr) * sizeof (MIR_val_t));
+  mir_assert (max_nreg < MIR_MAX_REG_NUM);
+  func_desc=MIR_malloc(ctx->alloc,sizeof(struct func_desc)+VARR_LENGTH(MIR_val_t,code_varr)*sizeof(MIR_val_t));
+  if(func_desc==NULL)(*MIR_get_error_func(ctx))(MIR_alloc_error,"no memory for interpreter code");
+  memmove(func_desc->code,VARR_ADDR(MIR_val_t,code_varr),VARR_LENGTH(MIR_val_t,code_varr)*sizeof(MIR_val_t));
+  func_item->data=func_desc;func->interpreter_data_p=TRUE;
   for (MIR_lref_data_t lref = func->first_lref; lref != NULL; lref = lref->next) {
     if (lref->label2 == NULL)
       *(void **) lref->load_addr
@@ -530,6 +499,7 @@ static void finish_func_interpretation (MIR_item_t func_item, MIR_alloc_t alloc)
     insn->data = NULL; /* it was used for interpretation preparation */
   MIR_free (alloc, func_item->data);
   func_item->data = NULL;
+  func_item->u.func->interpreter_data_p=FALSE;
 }
 
 static ALWAYS_INLINE void *get_a (MIR_val_t *v) { return v->a; }
@@ -954,8 +924,6 @@ static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, co
   pc += nops + 3; /* nops itself, the call insn, add ff interface address */
   return pc;
 }
-
-static int64_t addr_offset8, addr_offset16, addr_offset32;
 
 static void OPTIMIZE eval (MIR_context_t ctx, func_desc_t func_desc, MIR_val_t *bp,
                            MIR_val_t *results) {
@@ -1543,6 +1511,7 @@ common_addr:;
 
     if (func_addr != setjmp_addr) {
       pc = call_insn_execute (ctx, pc, bp, ops, FALSE);
+      if (pc == NULL) return;
     } else {
       int res;
       int64_t nops = get_i (ops); /* #args w/o nop, insn, and ff interface address */
@@ -1562,6 +1531,7 @@ common_addr:;
 
     if (func_addr != setjmp_addr) {
       pc = call_insn_execute (ctx, pc, bp, ops, TRUE);
+      if (pc == NULL) return;
     } else {
       int res;
       int64_t nops = get_i (ops); /* #args w/o nop, insn, and ff interface address */
@@ -1583,7 +1553,7 @@ common_addr:;
     int (*func_addr) (void *buf) = *get_aop (bp, ops + 4);
     if (func_addr == setjmp_addr)
       (*MIR_get_error_func (ctx)) (MIR_invalid_insn_error, "jcall of setjmp");
-    call_insn_execute (ctx, pc, bp, ops, FALSE);
+    if (call_insn_execute (ctx, pc, bp, ops, FALSE) == NULL) return;
     pc = jret_addr;
     END_INSN;
   }
@@ -1591,7 +1561,7 @@ common_addr:;
     int (*func_addr) (void *buf) = get_a (ops + 4);
     if (func_addr == setjmp_addr)
       (*MIR_get_error_func (ctx)) (MIR_invalid_insn_error, "jcall of setjmp");
-    call_insn_execute (ctx, pc, bp, ops, TRUE);
+    if (call_insn_execute (ctx, pc, bp, ops, TRUE) == NULL) return;
     pc = jret_addr;
     END_INSN;
   }
@@ -1648,8 +1618,11 @@ common_addr:;
     va_block_arg_builtin ((void *) *r, (void *) va, size, *get_iop (bp, ops + 3));
     END_INSN;
   }
-  SCASE (MIR_VA_START, 1, va_start_interp_builtin (ctx, bp[get_i (ops)].a, bp[-1].a));
-  SCASE (MIR_VA_END, 1, va_end_interp_builtin (ctx, bp[get_i (ops)].a));
+  CASE (MIR_VA_START, 1) {
+    va_start_interp_builtin(ctx,bp[get_i(ops)].a,bp[-1].a);
+    END_INSN;
+  }
+  SCASE (MIR_VA_END, 1, va_end_interp_builtin(ctx,bp[get_i(ops)].a));
 
   SCASE (IC_LDI8, 2, LD (iop, int64_t, int8_t));
   SCASE (IC_LDU8, 2, LD (uop, uint64_t, uint8_t));
@@ -1754,6 +1727,8 @@ static void *get_ff_interface (MIR_context_t ctx, size_t arg_vars_num, size_t nr
   ffi_s.arg_descs = arg_descs;
   if (HTAB_DO (ff_interface_t, ff_interface_tab, &ffi_s, HTAB_FIND, tab_ffi))
     return tab_ffi->interface_addr;
+  void *interface_addr = _MIR_get_ff_call (ctx, nres, res_types, nargs, arg_descs, arg_vars_num);
+  if (interface_addr == NULL) return NULL;
   ffi = MIR_malloc (ctx->alloc, sizeof (struct ff_interface) + sizeof (_MIR_arg_desc_t) * nargs
                     + sizeof (MIR_type_t) * nres);
   ffi->arg_vars_num = arg_vars_num;
@@ -1763,8 +1738,7 @@ static void *get_ff_interface (MIR_context_t ctx, size_t arg_vars_num, size_t nr
   ffi->res_types = (MIR_type_t *) ((char *) ffi->arg_descs + nargs * sizeof (_MIR_arg_desc_t));
   memcpy (ffi->res_types, res_types, sizeof (MIR_type_t) * nres);
   memcpy (ffi->arg_descs, arg_descs, sizeof (_MIR_arg_desc_t) * nargs);
-  ffi->interface_addr
-    = _MIR_get_ff_call (ctx, nres, res_types, nargs, call_arg_descs, arg_vars_num);
+  ffi->interface_addr = interface_addr;
   htab_res = HTAB_DO (ff_interface_t, ff_interface_tab, ffi, HTAB_INSERT, tab_ffi);
   mir_assert (!htab_res && ffi == tab_ffi);
   return ffi->interface_addr;
@@ -1823,6 +1797,7 @@ static void call (MIR_context_t ctx, MIR_val_t *bp, MIR_op_t *insn_arg_ops, code
       = get_ff_interface (ctx, arg_vars_num, nres, proto->res_types, nargs, call_arg_descs,
                           proto->vararg_p);
   }
+  if (ff_interface_addr == NULL) return;
 
   for (i = 0; i < nargs; i++) {
     if (i >= arg_vars_num) {
@@ -1874,11 +1849,12 @@ static void interp_init (MIR_context_t ctx) {
   MIR_alloc_t alloc = ctx->alloc;
   struct interp_ctx *interp_ctx;
 
+  if ((interp_ctx = ctx->interp_ctx = MIR_malloc (alloc, sizeof (struct interp_ctx))) == NULL)
+    MIR_get_error_func (ctx) (MIR_alloc_error, "Not enough memory for ctx");
+  mir_assert(MAX_HARD_REG+1==MIR_INTERP_HARD_REG_COUNT);
   addr_offset8 = _MIR_addr_offset (ctx, MIR_ADDR8);
   addr_offset16 = _MIR_addr_offset (ctx, MIR_ADDR16);
   addr_offset32 = _MIR_addr_offset (ctx, MIR_ADDR32);
-  if ((interp_ctx = ctx->interp_ctx = MIR_malloc (alloc, sizeof (struct interp_ctx))) == NULL)
-    MIR_get_error_func (ctx) (MIR_alloc_error, "Not enough memory for ctx");
 #if DIRECT_THREADED_DISPATCH
   eval (ctx, NULL, NULL, NULL);
 #endif
@@ -1898,7 +1874,6 @@ static void interp_init (MIR_context_t ctx) {
   bstart_builtin = _MIR_get_bstart_builtin (ctx);
   bend_builtin = _MIR_get_bend_builtin (ctx);
 }
-
 static void interp_finish (MIR_context_t ctx) {
   struct interp_ctx *interp_ctx = ctx->interp_ctx;
 
@@ -1924,8 +1899,10 @@ static void interp_arr_varg (MIR_context_t ctx, MIR_item_t func_item, MIR_val_t 
   func_desc_t func_desc;
   MIR_val_t *bp;
 
+
   mir_assert (func_item->item_type == MIR_func_item);
   if (func_item->data == NULL) generate_icode (ctx, func_item);
+  if (func_item->data == NULL) { if(func_item->u.func->nres)memset(results,0,func_item->u.func->nres*sizeof(MIR_val_t));return; }
   func_desc = get_func_desc (func_item);
   bp = alloca ((func_desc->nregs + 2) * sizeof (MIR_val_t));
   bp++; /* reserved for setjmp/longjmp */
@@ -1948,6 +1925,7 @@ void MIR_interp (MIR_context_t ctx, MIR_item_t func_item, MIR_val_t *results, si
   va_list argp;
   size_t i;
 
+
   if (VARR_EXPAND (MIR_val_t, arg_vals_varr, nargs))
     arg_vals = VARR_ADDR (MIR_val_t, arg_vals_varr);
   va_start (argp, nargs);
@@ -1964,8 +1942,10 @@ void MIR_interp_arr_varg (MIR_context_t ctx, MIR_item_t func_item, MIR_val_t *re
   func_desc_t func_desc;
   MIR_val_t *bp;
 
+
   mir_assert (func_item->item_type == MIR_func_item);
   if (func_item->data == NULL) generate_icode (ctx, func_item);
+  if (func_item->data == NULL) { if(func_item->u.func->nres)memset(results,0,func_item->u.func->nres*sizeof(MIR_val_t));return; }
   func_desc = get_func_desc (func_item);
   bp = alloca ((func_desc->nregs + 2) * sizeof (MIR_val_t));
   bp++; /* reserved for setjmp/longjmp */
@@ -1993,7 +1973,9 @@ static void interp (MIR_context_t ctx, MIR_item_t func_item, va_list va, MIR_val
   struct interp_ctx *interp_ctx = ctx->interp_ctx;
   size_t nargs;
   MIR_var_t *arg_vars;
-  MIR_func_t func = func_item->u.func;
+  MIR_func_t func;
+
+  func=func_item->u.func;
 
   nargs = func->nargs;
   arg_vars = VARR_ADDR (MIR_var_t, func->vars);
@@ -2027,7 +2009,7 @@ static void interp (MIR_context_t ctx, MIR_item_t func_item, va_list va, MIR_val
 #if defined(__aarch64__) || defined(_WIN32)
       va_block_arg_builtin (arg_vals[i].a, &va, arg_vars[i].size, type - MIR_T_BLK);
 #else
-          va_block_arg_builtin (arg_vals[i].a, va, arg_vars[i].size, type - MIR_T_BLK);
+      va_block_arg_builtin (arg_vals[i].a, va, arg_vars[i].size, type - MIR_T_BLK);
 #endif
       break;
     }
@@ -2044,7 +2026,12 @@ static void redirect_interface_to_interp (MIR_context_t ctx, MIR_item_t func_ite
 }
 
 void MIR_set_interp_interface (MIR_context_t ctx, MIR_item_t func_item) {
-  if (func_item != NULL) redirect_interface_to_interp (ctx, func_item);
+  if (func_item != NULL) {
+    redirect_interface_to_interp (ctx, func_item);
+    /* Data referring to labels must be ready even before the function is called. */
+    if (func_item->u.func->first_lref != NULL && func_item->data == NULL)
+      generate_icode (ctx, func_item);
+  }
 }
 
 #endif /* #ifdef MIR_NO_INTERP */

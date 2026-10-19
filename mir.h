@@ -298,13 +298,16 @@ typedef struct MIR_var {
 DEF_VARR (MIR_var_t);
 
 /* Function definition */
+struct MIR_context;
 typedef struct MIR_func {
   const char *name;
   MIR_item_t func_item;
   size_t original_vars_num;
+  unsigned char insns_saved_p; /* private runtime snapshot state, not serialized */
   DLIST (MIR_insn_t) insns, original_insns;
   uint32_t nres, nargs, last_temp_num, n_inlines;
   MIR_type_t *res_types;
+  unsigned char interpreter_data_p; /* item data contains a prepared interpreter body */
   char vararg_p;                  /* flag of variable number of arguments */
   char expr_p;                    /* flag of that the func can be used as a linker expression */
   char jret_p;                    /* flag of jcall/jret func, set up after MIR_func_finish */
@@ -333,6 +336,10 @@ typedef struct MIR_data {
     uint8_t els[1];
   } u;
 } *MIR_data_t;
+
+static inline uint8_t *_MIR_data_els(MIR_data_t data) {
+  return data->u.els;
+}
 
 typedef struct MIR_ref_data {
   const char *name;    /* can be NULL */
@@ -621,6 +628,7 @@ extern void MIR_scan_string (MIR_context_t ctx, const char *str);
 extern MIR_item_t MIR_get_global_item (MIR_context_t ctx, const char *name);
 extern void MIR_load_module (MIR_context_t ctx, MIR_module_t m);
 extern void MIR_load_external (MIR_context_t ctx, const char *name, void *addr);
+
 extern void MIR_link (MIR_context_t ctx, void (*set_interface) (MIR_context_t ctx, MIR_item_t item),
                       void *(*import_resolver) (const char *) );
 
