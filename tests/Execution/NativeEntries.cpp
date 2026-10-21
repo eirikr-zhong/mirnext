@@ -161,7 +161,7 @@ TEST_CASE("fixed native entries preserve the interpreter callback priority over 
   auto f = s.find_function("m","host"); REQUIRE(f); std::array<std::int64_t,1> args{42}; auto result = s.call_i64(*f,args); REQUIRE(result); CHECK(*result == 42);
   auto e = s.native_entry(*f); REQUIRE(e); ExecutionInvocation invocation; CHECK(reinterpret_cast<std::int64_t (*)(std::int64_t)>(e->address())(42) == 42); CHECK(invocation.status());
 }
-TEST_CASE("native entries pass all block classes by value and return large C++ structs through RBLK") {
+TEST_CASE("native entries pass all block classes by value and write RBLK buffers") {
   if (!native()) return;
   struct Pair { std::int64_t x,y; };
   for (unsigned category = 0; category <= 4; ++category) {
@@ -170,11 +170,15 @@ TEST_CASE("native entries pass all block classes by value and return large C++ s
     auto s = session(*c); auto e = entry(s,"m","f"); Pair p{42,7}; ExecutionInvocation invocation;
     CHECK(reinterpret_cast<std::int64_t (*)(Pair)>(e.address())(p) == 42); CHECK(p.x == 42); CHECK(invocation.status());
   }
-  // RBLK is an explicit hidden-pointer convention; use an actual C++ sret-sized
-  // aggregate in a separate function to verify the host compiler's x8 rule.
+  // AArch64 RBLK follows the host compiler's x8 convention. On x86 MIR passes
+  // an explicit output pointer but does not promise the C++ sret pointer in AX.
   auto source = parse("m:module\nf:func rblk:24(buffer),i64:n\nmov i64:0(buffer),n\nadd n,n,1\nmov i64:8(buffer),n\nadd n,n,1\nmov i64:16(buffer),n\nret\nendfunc\nendmodule\n");
   auto large = session(*source); auto le = entry(large,"m","f"); struct Large { std::int64_t x,y,z; };
-  ExecutionInvocation invocation; auto result = reinterpret_cast<Large (*)(std::int64_t)>(le.address())(20); CHECK(result.x == 20); CHECK(result.y == 21); CHECK(result.z == 22); CHECK(invocation.status());
+  ExecutionInvocation invocation; Large result{};
+  if (target::TargetMachine::native()->architecture() == target::Architecture::X86_64)
+    reinterpret_cast<void (*)(Large *,std::int64_t)>(le.address())(&result,20);
+  else result = reinterpret_cast<Large (*)(std::int64_t)>(le.address())(20);
+  CHECK(result.x == 20); CHECK(result.y == 21); CHECK(result.z == 22); CHECK(invocation.status());
 }
 TEST_CASE("native callback diagnostics are scoped first errors and do not poison later entries") {
   if (!native()) return;

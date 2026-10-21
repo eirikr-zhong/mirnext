@@ -104,6 +104,30 @@ TEST_CASE("raw native gates forward exhausted register banks aggregates and unkn
   auto effect = reinterpret_cast<void (*)()>(gate(moved,reinterpret_cast<std::uintptr_t>(&floating_effect))); effect();
   CHECK(std::fegetround() == FE_UPWARD); CHECK(std::fetestexcept(FE_INEXACT)); REQUIRE(std::fesetenv(&env) == 0);
 }
+TEST_CASE("raw x86 native boundary return-slot restoration preserves result flags") {
+  auto target = target::TargetMachine::native(); REQUIRE(target);
+  if (target->architecture() != target::Architecture::X86_64) return;
+  auto boundary = Boundary::create(); REQUIRE(boundary);
+  const bool windows = target->abi() == target::ABI::X86Windows;
+  // Load requested flags from the first argument, then return through the
+  // real leave callback. Two patterns detect a return PC substituted as flags.
+  const std::array<std::uint8_t,3> callee{std::uint8_t(windows ? 0x51 : 0x57),0x9d,0xc3};
+  auto reserved = CodeMemory().reserve(std::array<std::size_t,2>{callee.size(),26}); REQUIRE(reserved);
+  auto address = reserved->address(0); REQUIRE(address);
+  const auto entry = gate(*boundary,*address);
+  // Save host flags, provide aligned home space, call the gate, and capture
+  // flags immediately. Restore host flags before returning even on failure.
+  const auto shadow = windows ? 32u : 0u;
+  std::vector<std::uint8_t> probe{0x9c,0x48,0x83,0xec,std::uint8_t(shadow),0x49,0xbb};
+  for (unsigned n = 0; n < 8; ++n) probe.push_back(std::uint8_t(entry>>(n*8)));
+  probe.insert(probe.end(),{0x41,0xff,0xd3,0x9c,0x58,0x48,0x83,0xc4,std::uint8_t(shadow),0x9d,0xc3});
+  const std::array<std::span<const std::uint8_t>,2> bytes{callee,probe};
+  auto code = reserved->publish(bytes); REQUIRE(code);
+  auto call = reinterpret_cast<std::uint64_t (*)(std::uint64_t)>((*code)[1].address());
+  for (unsigned n = 0; n < 8; ++n) for (auto requested : {0x202u,0xad7u}) {
+    auto flags = call(requested); CHECK((flags&0x408d5) == (requested&0x408d5)); CHECK(state().depth == 0);
+  }
+}
 TEST_CASE("raw BBV entries recover before prologues and inside dynamic frames then retry at O0-O3") {
   for (unsigned level = 0; level < 4; ++level) for (bool at_entry : {true,false}) {
     CAPTURE(level); CAPTURE(at_entry); auto boundary = Boundary::create(); REQUIRE(boundary); bool fail = true; unsigned destroyed = 0;

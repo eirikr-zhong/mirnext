@@ -4,6 +4,7 @@
 #include "mirnext/CodeGen/InvocationEntry.hpp"
 #include "mirnext/CodeGen/NativeBoundary.hpp"
 #include "mirnext/CodeGen/Detail/X86RuntimeEntry.hpp"
+#include <algorithm>
 namespace mirnext::codegen {
 namespace detail {
 Result<X86ResolverFrame> x86_resolver_frame(target::ABI abi) {
@@ -210,7 +211,10 @@ Result<NativeBoundaryCode> detail::make_x86_native_boundary_entries(const target
   c.state(0x8b,10,80); c.emit({0x41,0xff,0xe2}); // original argument stack, target r10
   auto outgoing = x86_block_resolver_frame(target.abi()); if (!outgoing) return outgoing.error(); auto &saved = outgoing->saved;
   Code out;
-  if (outgoing->red_zone_bytes) out.memory(0x8d,4,std::size_t(0)-outgoing->red_zone_bytes);
+  // The leave callback restores the original return slot. On Windows that
+  // slot is immediately below SP after RET, so keep saved flags below it.
+  const auto leave_stack_bytes = std::max<std::size_t>(outgoing->red_zone_bytes,8);
+  out.memory(0x8d,4,std::size_t(0)-leave_stack_bytes);
   out.emit({0x9c,0x49,0x89,0xe3,0x48,0x83,0xe4,0xf0}); out.stack(false,saved.frame_bytes); out.memory(0x89,11,saved.metadata_offset);
   for (auto &reg : saved.saves) out.memory(0x89,unsigned(reg.reg),reg.offset);
   out.fx(false,saved.fx_offset); out.address(11,leave); out.emit({0x41,0xff,0xd3}); out.move(11,0);
@@ -218,7 +222,7 @@ Result<NativeBoundaryCode> detail::make_x86_native_boundary_entries(const target
   out.fx(true,saved.fx_offset);
   for (auto &reg : saved.saves) out.memory(0x8b,unsigned(reg.reg),reg.offset);
   out.memory(0x8b,4,saved.metadata_offset); out.emit({0x9d});
-  if (outgoing->red_zone_bytes) out.memory(0x8d,4,outgoing->red_zone_bytes);
+  out.memory(0x8d,4,leave_stack_bytes);
   out.emit({0x41,0xff,0xe3});
   return NativeBoundaryCode{std::move(c.bytes),std::move(out.bytes)};
 }

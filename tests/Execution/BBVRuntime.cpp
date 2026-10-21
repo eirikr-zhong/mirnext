@@ -126,14 +126,23 @@ TEST_CASE("owning BBV runtime retries observer and symbol errors without publish
   CHECK(first.error().message.find("observer rejected") != std::string::npos); CHECK(r->entry_address() == entry); CHECK(r->remaining_code_bytes() == remaining);
   CHECK_FALSE(r->artifact(id)); CHECK(r->statistics().compiled_blocks == 0);
   fail = false; REQUIRE(r->compile(id)); CHECK(observations == 2); CHECK(r->statistics().compilation_attempts == 2); CHECK(call(*r,42) == 42);
-  CHECK(r->statistics().compilation_attempts == 2);
+  // Windows can put the function entry and body in separate blocks.
+  CHECK(r->statistics().compilation_attempts == r->statistics().compiled_blocks+1);
+  CHECK(observations == r->statistics().compilation_attempts);
+  auto attempts = r->statistics().compilation_attempts; CHECK(call(*r,42) == 42); CHECK(r->statistics().compilation_attempts == attempts);
   bool known = false; std::uint64_t value = 1234;
   auto symbols = runtime("m:module\nf:func i64,i64:x\nlocal i64:r\nmov r,data\nret r\nendfunc\ndata:bss 8\nendmodule\n",0,{.resolve=[&](auto &request) -> Result<std::uint64_t> {
     REQUIRE(request.symbol); CHECK(request.symbol->name == "data"); if (!known) return Error{ErrorCode::UnknownName,"unresolved test symbol"}; return value;
   }});
-  auto failed = symbols->compile(symbols->entry_version().id()); REQUIRE_FALSE(failed); CHECK(failed.error().code == ErrorCode::UnknownName);
-  CHECK_FALSE(symbols->artifact(symbols->entry_version().id())); CHECK(symbols->statistics().compiled_blocks == 0);
-  known = true; CHECK(call(*symbols,0) == 1234); CHECK(symbols->statistics().compilation_attempts == 2);
+  auto symbol_block = symbols->entry_version().id(); auto failed = symbols->compile(symbol_block);
+  while (failed) {
+    auto artifact = symbols->artifact(symbol_block); REQUIRE(artifact); REQUIRE(artifact->successors().size() == 1);
+    symbol_block = artifact->successors()[0].target; failed = symbols->compile(symbol_block);
+  }
+  CHECK(failed.error().code == ErrorCode::UnknownName); CHECK_FALSE(symbols->artifact(symbol_block));
+  auto compiled = symbols->statistics().compiled_blocks;
+  known = true; REQUIRE(symbols->compile(symbol_block)); CHECK(symbols->statistics().compiled_blocks == compiled+1);
+  CHECK(call(*symbols,0) == 1234); CHECK(symbols->statistics().compilation_attempts == symbols->statistics().compiled_blocks+1);
 }
 TEST_CASE("owning BBV runtime retries platform errors at the same address without leaking arena pages") {
   for (unsigned kind = 0; kind < 3; ++kind) {
@@ -144,7 +153,7 @@ TEST_CASE("owning BBV runtime retries platform errors at the same address withou
     auto after = r->remaining_code_bytes(); CHECK(before-after == provider->page_size()); CHECK_FALSE(r->artifact(r->entry_version().id()));
     REQUIRE(r->compile(r->entry_version().id())); CHECK(r->remaining_code_bytes() == after); CHECK(call(*r,42) == 42);
     CHECK(provider->allocations == 1); CHECK(provider->written[1].data == provider->written[2].data); CHECK(r->entry_address() == entry);
-    CHECK(r->statistics().compiled_blocks == 1); CHECK(r->statistics().compilation_attempts == 2);
+    CHECK(r->statistics().compilation_attempts == r->statistics().compiled_blocks+1);
   }
 }
 TEST_CASE("owning BBV runtime reports exhaustion and invalid recovery before executing any partial block") {

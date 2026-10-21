@@ -112,6 +112,13 @@ foreach(name IN ITEMS loop layout scopes-branch scopes-switch scopes-indirect in
       endif()
       execute_process(COMMAND "${PROBE}" "${input}" "${level}" "${mode}"
         RESULT_VARIABLE status OUTPUT_VARIABLE snapshot ERROR_VARIABLE errors)
+      # Text/binary roundtrips above cover this fixture on every host. The C
+      # Windows ABI rejects multiple results even in its interpreter shims;
+      # require that diagnostic instead of invoking an unsupported native ABI.
+      if(WIN32 AND name STREQUAL "calls-results" AND NOT status EQUAL 0
+          AND errors MATCHES "Windows x86-64 doesn't support multiple return values")
+        continue()
+      endif()
       if(NOT status EQUAL 0 OR NOT snapshot MATCHES "result:i64=${expected_result}")
         message(FATAL_ERROR "Formatted ${name} changed execution at O${level} (${mode}): ${status}\n${snapshot}\n${errors}")
       endif()

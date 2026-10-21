@@ -141,9 +141,12 @@ TEST_CASE("motion rewriter rejects invalid anchors phases and owners before muta
   auto c = parse(text), foreign = parse(text); auto &f = entry(*c); FunctionAnalysisManager a(f), other(entry(*foreign));
   auto before = dump(f); CHECK_FALSE(LICMPass().run(f, a)); CHECK_FALSE(PressureReliefPass().run(f, a)); CHECK(dump(f) == before);
   prepare(f, a); auto rewriter = SSARewriter::get(f); REQUIRE(rewriter); before = dump_ssa(f);
-  auto &first = *f.blocks().begin(); auto &i = *first.instructions().begin(); auto &yes = const_cast<BasicBlock &>(f.find_label("yes")->block());
+  auto blocks = f.blocks();
+  auto nonempty = std::find_if(blocks.begin(), blocks.end(), [](auto &block) { return block.size() != 0; }); REQUIRE(nonempty != blocks.end());
+  auto &first = *nonempty; auto &i = *first.instructions().begin(); auto &yes = const_cast<BasicBlock &>(f.find_label("yes")->block());
+  auto other_block = std::find_if(std::next(nonempty), blocks.end(), [](auto &block) { return block.size() != 0; }); REQUIRE(other_block != blocks.end());
   CHECK_FALSE(rewriter->move_before(i, *entry(*foreign).blocks().begin()));
-  CHECK_FALSE(rewriter->move_before(i, first, &*yes.instructions().begin()));
+  CHECK_FALSE(rewriter->move_before(i, first, &*other_block->instructions().begin()));
   CHECK_FALSE(rewriter->move_before(i, yes, &i));
   CHECK_FALSE(rewriter->move_before(*const_cast<Instruction *>(first.terminator()), yes));
   CHECK_FALSE(rewriter->split_fallthrough(yes, first));

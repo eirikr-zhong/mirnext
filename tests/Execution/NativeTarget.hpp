@@ -2,6 +2,7 @@
 #pragma once
 #include <doctest/doctest.h>
 #include "mirnext/Execution/Session.hpp"
+#include "mirnext/CodeGen/Compilation.hpp"
 namespace mirnext::test {
 inline bool native_execution_available() { return bool(target::TargetMachine::native()); }
 inline std::string native_hardware_text(std::string_view text) {
@@ -19,8 +20,17 @@ inline bool check_native_result_limit(const ir::Context &context,execution::Exec
   bool multiple = false;
   for (auto &module : context.modules()) for (auto &function : module.functions()) if (function.signature().results.size() > 1) multiple = true;
   if (!multiple) return false;
-  REQUIRE(context.verify()); auto rejected = execution::ExecutionSession::create(context,std::move(options));
-  REQUIRE_FALSE(rejected); CHECK(rejected.error().message.find("Windows does not support multiple return values") != std::string::npos);
+  REQUIRE(context.verify()); const auto compilation = options.link.compilation;
+  auto rejected = execution::ExecutionSession::create(context,std::move(options));
+  if (rejected) {
+    // Lazy sessions defer body validation. Compile the unsupported signature
+    // directly so fixtures with arbitrary arguments need not execute to fail.
+    REQUIRE(compilation == execution::JITCompilation::Lazy);
+    for (auto &module : rejected->context().modules()) for (auto &function : module.functions()) if (function.signature().results.size() > 1) {
+      auto compiled = codegen::compile_function(function,*target::TargetMachine::native()); REQUIRE_FALSE(compiled);
+      CHECK(compiled.error().message.find("Windows does not support multiple return values") != std::string::npos);
+    }
+  } else CHECK(rejected.error().message.find("Windows does not support multiple return values") != std::string::npos);
   return true;
 }
 }
