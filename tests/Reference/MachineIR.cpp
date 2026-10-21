@@ -40,13 +40,13 @@ namespace {
 // Bound declarations are assigned their fixed locations before priority
 // allocation. C qsort leaves equal-priority bindings in an unspecified order;
 // normalize only that prefix, preserving the decision order of free registers.
-template<class Range, class Name, class Bound>
-void allocation_order(std::ostream &out, const Range &range, Name name, Bound bound) {
+template<class Range, class Name, class Bound, class Active>
+void allocation_order(std::ostream &out, const Range &range, Name name, Bound bound, Active active) {
   std::vector<std::string> fixed;
-  for (auto r : range) if (bound(r)) fixed.push_back(name(r));
+  for (auto r : range) if (active(r) && bound(r)) fixed.push_back(name(r));
   std::sort(fixed.begin(), fixed.end());
   out << "allocation-order"; for (auto &r : fixed) out << ' ' << r;
-  for (auto r : range) if (!bound(r)) out << ' ' << name(r);
+  for (auto r : range) if (active(r) && !bound(r)) out << ' ' << name(r);
   out << '\n';
 }
 template<class T> std::string bits(T value) {
@@ -309,7 +309,8 @@ void record_cfg(std::ostream &out,const std::vector<std::vector<std::size_t>> &o
   }
 }
 std::string lowered_native(const MachineFunction &f, const MachineLiveRanges *ranges = nullptr, bool raw = false,
-    const MachineAllocation *allocation = nullptr, const MachineRewriteResult *rewrite = nullptr, const MachineControlFlow *topology = nullptr,bool normalize_aliases = false) {
+    const MachineAllocation *allocation = nullptr, const MachineRewriteResult *rewrite = nullptr, const MachineControlFlow *topology = nullptr,bool normalize_aliases = false,
+    const std::vector<bool> *input_aliases = nullptr) {
   std::ostringstream out; std::map<const MachineVirtualRegister *, std::size_t> regs;
   auto reg = [&](MachineRegister r) {
     if (auto h = std::get_if<target::PhysicalRegister>(&r)) return "h" + std::to_string(h->encoding());
@@ -355,11 +356,12 @@ std::string lowered_native(const MachineFunction &f, const MachineLiveRanges *ra
   auto cfg = MachineControlFlow::build(f); REQUIRE(cfg);
   if (topology) cfg = *topology;
   std::vector<std::vector<std::size_t>> outgoing(cfg->blocks.size()),incoming(cfg->blocks.size()); std::vector<bool> aliases(cfg->blocks.size());
+  if (input_aliases) REQUIRE(input_aliases->size() == cfg->blocks.size());
   for (std::size_t b = 0; b < cfg->blocks.size(); ++b) {
     for (auto e : cfg->outgoing[b]) outgoing[b].push_back(cfg->edges[e].destination);
     for (auto e : cfg->incoming[b]) incoming[b].push_back(cfg->edges[e].source);
     auto block = cfg->blocks[b];
-    aliases[b] = normalize_aliases && block && !block->labels().empty() && block->instructions().begin() == block->instructions().end()
+    aliases[b] = input_aliases ? (*input_aliases)[b] : normalize_aliases && block && !block->labels().empty() && block->instructions().begin() == block->instructions().end()
       && b+1 < cfg->blocks.size() && cfg->blocks[b+1] && !cfg->blocks[b+1]->labels().empty();
   }
   record_cfg(out,outgoing,incoming,aliases);
@@ -397,7 +399,8 @@ std::string lowered_native(const MachineFunction &f, const MachineLiveRanges *ra
       if (value != "none" || *length) values.emplace(reg(&r), value + ':' + std::to_string(*length));
     }
     for (auto &[name, value] : values) out << "location " << name << ':' << value << '\n';
-    allocation_order(out, allocation->order(), reg, [](auto r) { return r->binding().has_value(); });
+    allocation_order(out, allocation->order(), reg, [](auto r) { return r->binding().has_value(); },
+      [&](auto r) { return values.contains(reg(r)); });
     for (unsigned busy = 0; busy < 2; ++busy) {
       auto points = busy ? allocation->busy() : allocation->used();
       for (std::size_t p = 0; p < points.size(); ++p) {
@@ -707,7 +710,11 @@ struct LoweredReference {
       std::map<std::string, std::string> values;
       for (auto &[r, value] : assigned.locations) if (r >= physical && (value.first != MIR_NON_VAR || value.second)) values.emplace(reg(r), location(value.first) + ':' + std::to_string(value.second));
       for (auto &[name, value] : values) out << "location " << name << ':' << value << '\n';
-      allocation_order(out, assigned.order, reg, [&](auto r) { return MIR_reg_hard_reg_name(ctx, _MIR_opt_test_var_register(r), item->u.func) != nullptr; });
+      // The C Windows VA_BLOCK_ARG path creates an unused temporary. It has
+      // neither a location nor a lifetime, so makes no allocation decision.
+      allocation_order(out, assigned.order, reg,
+        [&](auto r) { return MIR_reg_hard_reg_name(ctx, _MIR_opt_test_var_register(r), item->u.func) != nullptr; },
+        [&](auto r) { auto at = assigned.locations.find(r); return at != assigned.locations.end() && (at->second.first != MIR_NON_VAR || at->second.second); });
       for (unsigned busy = 0; busy < 2; ++busy) {
         if (busy && self.level < 2) continue;
         for (int p = 0; p <= self.points; ++p) { out << "occupied " << p << ':' << busy; for (auto r : assigned.points[{p, busy}]) out << ' ' << location(r); out << '\n'; }
@@ -761,6 +768,17 @@ void compare(const Context &source, unsigned level, bool lower = false, bool leg
   transforms::OptimizationOptions options; options.level = static_cast<transforms::OptimizationLevel>(level);
   auto optimized = transforms::optimize(source, options); INFO((optimized ? "" : optimized.error().message)); REQUIRE(optimized);
   const auto &machine_source = run_optimization ? optimized->context() : source;
+  auto target = target::TargetMachine::native(); REQUIRE(target);
+  if (lower && target->abi() == target::ABI::X86Windows) {
+    bool unsupported = false;
+    for (auto &module : machine_source.modules()) for (auto &function : module.functions()) if (function.signature().results.size() > 1) {
+      auto rejected = prepare_machine_function(function,*target,{.optimization_level=level}); REQUIRE_FALSE(rejected);
+      CHECK(rejected.error().message.find("Windows does not support multiple return values") != std::string::npos); unsupported = true;
+    }
+    // C terminates the process for this ABI limitation; verify the C++
+    // diagnostic while retaining preparation and interpreter coverage elsewhere.
+    if (unsupported) return;
+  }
   auto text = serialization::write_text(machine_source); REQUIRE(text); auto c = MIR_init();
   // The C scanner canonicalizes an L-suffixed value to double on these hosts,
   // but forgets to canonicalize its data directive. Adjust only that directive
@@ -785,7 +803,6 @@ void compare(const Context &source, unsigned level, bool lower = false, bool leg
   // Prepare exactly the label environment, with no executable/runtime state.
   for (auto m = DLIST_HEAD(MIR_module_t, *MIR_get_module_list(c)); m; m = DLIST_NEXT(MIR_module_t, m)) _MIR_opt_test_prepare_module_lrefs(c, m);
   MIR_gen_init(c);
-  auto target = target::TargetMachine::native(); REQUIRE(target);
   for (auto &module : machine_source.modules()) for (auto &function : module.functions()) {
     MIR_item_t item = nullptr;
     for (auto m = DLIST_HEAD(MIR_module_t, *MIR_get_module_list(c)); m; m = DLIST_NEXT(MIR_module_t, m)) if (module.name() == m->name)
@@ -853,13 +870,21 @@ void compare(const Context &source, unsigned level, bool lower = false, bool leg
       compared_post_deletions += native_post->statistics().dead_instructions;
       if (!level) post_snapshot = lowered_native(**machine,nullptr,false,nullptr,nullptr,&input_cfg);
       if (post >= 3) {
+        // Frame insertion can populate an empty label alias with a prologue.
+        // Keep the input alias identities when comparing the saved input CFG.
+        std::vector<bool> frame_aliases(input_cfg.blocks.size());
+        for (std::size_t b = 0; b < input_cfg.blocks.size(); ++b) {
+          auto block = input_cfg.blocks[b];
+          frame_aliases[b] = bbv && block && !block->labels().empty() && block->instructions().begin() == block->instructions().end()
+            && b+1 < input_cfg.blocks.size() && input_cfg.blocks[b+1] && !input_cfg.blocks[b+1]->labels().empty();
+        }
         auto before = lowered_native(**machine,nullptr,false,nullptr,nullptr,&input_cfg,bbv);
         if (post == 3) { INFO("C frame input:\n",lowered.frame_input_snapshot,"\nC++ frame input:\n",before); CHECK(before == lowered.frame_input_snapshot); }
         auto framed = form_frame(**machine,std::move(*native_post),{.preserve_host_registers=preserve_host}); INFO((framed ? "" : framed.error().message)); REQUIRE(framed);
         native_post.reset(); native_frame.emplace(std::move(*framed)); REQUIRE(native_frame->cfg().verify(**machine));
         compared_frames += native_frame->layout().frame_bytes != 0;
         compared_frame_saves += native_frame->layout().callee_saves.size();
-        post_snapshot = lowered_native(**machine,nullptr,false,nullptr,nullptr,&input_cfg,bbv);
+        post_snapshot = lowered_native(**machine,nullptr,false,nullptr,nullptr,&input_cfg,bbv,&frame_aliases);
         if (bbv) {
           REQUIRE_FALSE(remove_properties); REQUIRE(post == 3); REQUIRE_FALSE(frame_facts);
           auto p = BBVPreparation::prepare(function,*target,{.optimization_level=level,.preserve_host_registers=preserve_host}); INFO((p ? "" : p.error().message)); REQUIRE(p);

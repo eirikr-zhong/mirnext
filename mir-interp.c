@@ -925,6 +925,11 @@ static code_t call_insn_execute (MIR_context_t ctx, code_t pc, MIR_val_t *bp, co
   return pc;
 }
 
+#ifdef _MSC_VER
+/* BEND deliberately rewinds the native stack, discarding ALLOCA storage.
+   MSVC's debug alloca chain would retain pointers to those discarded headers. */
+#pragma runtime_checks ("s", off)
+#endif
 static void OPTIMIZE eval (MIR_context_t ctx, func_desc_t func_desc, MIR_val_t *bp,
                            MIR_val_t *results) {
   struct interp_ctx *interp_ctx = ctx->interp_ctx;
@@ -1676,6 +1681,9 @@ default: mir_assert (FALSE);
 #endif
 }
 
+#ifdef _MSC_VER
+#pragma runtime_checks ("s", restore)
+#endif
 static inline func_desc_t get_func_desc (MIR_item_t func_item) {
   mir_assert (func_item->item_type == MIR_func_item);
   return func_item->data;

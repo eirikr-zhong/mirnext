@@ -19,6 +19,9 @@
 #include "mirnext/Transforms/PrepareCFG.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
 #include "mirnext/Serialization/Format.hpp"
+#include "mirnext/Target/X86ABI.hpp"
+#include "../Execution/NativeTarget.hpp"
+#include "mirnext/Execution/Interpreter.hpp"
 #include "../Analysis/Fixtures.hpp"
 #include "../IR/PublicInstructions.hpp"
 #include "../Transforms/AddressFixtures.hpp"
@@ -116,7 +119,7 @@ struct NativeSnapshot {
     }
     if (auto m = o.get<Memory>()) {
       auto base = reg(m->base), index = reg(m->index);
-      return "m" + std::to_string(type_code(m->type)) + ':' + std::to_string(m->type.is_block() ? m->type.block_size() : m->displacement)
+      return "m" + std::to_string(type_code(m->type)) + ':' + (m->type.is_block() ? std::to_string(m->type.block_size()) : std::to_string(m->displacement))
         + ':' + std::to_string(base) + ':' + std::to_string(index) + ':' + std::to_string(m->index ? m->scale : 1) + ':' + m->alias + ':' + m->nonalias;
     }
     if (auto v = o.get<std::int64_t>()) return "i" + bits(*v);
@@ -352,6 +355,12 @@ void compare(std::string_view text, bool rename, unsigned level, bool addresses 
 }
 // Address fixtures bind r19/r12 globally, so MIR deliberately changes that
 // register across returns. Preserve the host caller's value in this boundary.
+#if defined(_MSC_VER) && defined(_M_X64)
+extern "C" std::int64_t mirnext_reference_invoke(std::int64_t (*)(), std::int64_t *);
+std::int64_t invoke(std::int64_t (*code)(), std::int64_t *hardware = nullptr) {
+  return mirnext_reference_invoke(code, hardware);
+}
+#else
 [[gnu::noinline]] std::int64_t invoke(std::int64_t (*code)(), std::int64_t *hardware = nullptr) {
 #if defined(__aarch64__)
   if (hardware) asm volatile("mov x19, %0" : : "r"(std::int64_t{7}) : "x19");
@@ -368,6 +377,7 @@ void compare(std::string_view text, bool rename, unsigned level, bool addresses 
 #endif
   return result;
 }
+#endif
 std::int64_t execute(std::string_view text, bool jit, unsigned level, std::span<const std::byte> binary = {}, std::vector<std::byte> *state = nullptr, std::int64_t *hardware = nullptr) {
   auto context = MIR_init(); std::string input(text);
   std::vector<std::byte> nonfinite;
@@ -405,6 +415,22 @@ std::int64_t execute(std::string_view text, bool jit, unsigned level, std::span<
         }
   }
   MIR_finish(context); return result;
+}
+std::int64_t interpreted_result(const Context &context) {
+  auto program = execution::InterpretedProgram::create(context); REQUIRE(program);
+  auto entry = program->find_function("m","entry"); REQUIRE(entry);
+  auto result = program->call_i64(*entry); REQUIRE(result); return *result;
+}
+void compare_limited_results(const Context &original,const Context &transformed,std::int64_t expected) {
+  CHECK(interpreted_result(transformed) == expected);
+  for (unsigned level : {0, 1, 2, 3}) {
+    CAPTURE(level);
+    for (auto context : {&original,&transformed}) {
+      auto optimized = optimize(*context,{.level=static_cast<OptimizationLevel>(level)}); REQUIRE(optimized);
+      CHECK(interpreted_result(optimized->context()) == expected);
+      CHECK(test::check_native_result_limit(*context,{.optimization=OptimizationOptions{.level=static_cast<OptimizationLevel>(level)}}));
+    }
+  }
 }
 }
 namespace {
@@ -839,13 +865,23 @@ TEST_CASE("native GVN preserves interpreter and O0 through O3 JIT results") {
   for (auto &source : inputs) {
     CAPTURE(source); auto parsed = serialization::parse_text(source); REQUIRE(parsed);
     if (!(*parsed)->modules().begin()->find_symbol("entry")->function()->arguments().empty()) continue;
-    auto expected = execute(source, false, 0);
+    // The C interpreter also uses native ABI shims for internal calls. Its
+    // Windows implementation cannot execute a multiple-result callee.
+    const bool limited = test::check_native_result_limit(**parsed);
+    auto expected = limited ? interpreted_result(**parsed) : execute(source, false, 0);
+    if (limited) CHECK(expected == 43);
     FunctionPassManager passes; passes.add<SimplifyPass>(); passes.add<PrepareCFGPass>(); passes.add<BuildSSAPass>();
     passes.add<GVNPass>(); passes.add<ConventionalSSAPass>(); passes.add<DestroySSAPass>();
     auto status = passes.run(**parsed); INFO((status ? "" : status.error().message)); REQUIRE(status);
     auto text = serialization::write_text(**parsed); REQUIRE(text); auto binary = serialization::write_binary(**parsed); REQUIRE(binary);
-    CHECK(execute(*text, false, 0, *binary) == expected);
-    for (unsigned level : {0, 1, 2, 3}) { CAPTURE(level); CHECK(execute(source, true, level) == expected); CHECK(execute(*text, true, level, *binary) == expected); }
+    if (limited) {
+      auto original = serialization::parse_text(source); REQUIRE(original);
+      auto decoded = serialization::read_binary(*binary); REQUIRE(decoded);
+      compare_limited_results(**original,**decoded,expected);
+    } else {
+      CHECK(execute(*text, false, 0, *binary) == expected);
+      for (unsigned level : {0, 1, 2, 3}) { CAPTURE(level); CHECK(execute(source, true, level) == expected); CHECK(execute(*text, true, level, *binary) == expected); }
+    }
   }
 }
 TEST_CASE("native GVN folding respects narrow negation without assuming unspecified high bits") {
@@ -903,16 +939,23 @@ TEST_CASE("native address lowering preserves interpreter and all JIT optimizatio
     auto parsed = serialization::parse_text(source); REQUIRE(parsed);
     auto entry = (*parsed)->modules().begin()->find_symbol("entry")->function();
     if (!entry->arguments().empty()) continue;
-    auto expected = execute(source, false, 0);
+    const bool limited = test::check_native_result_limit(**parsed);
+    auto expected = limited ? interpreted_result(**parsed) : execute(source, false, 0);
     FunctionPassManager passes; passes.add<SimplifyPass>(); passes.add<PrepareCFGPass>();
     passes.add<BuildSSAPass>(false); passes.add<AddressTransformPass>();
     passes.add<BuildSSAPass>(); passes.add<ConventionalSSAPass>(); passes.add<DestroySSAPass>();
     auto status = passes.run(**parsed); INFO((status ? "" : status.error().message)); REQUIRE(status);
     auto text = serialization::write_text(**parsed); REQUIRE(text);
     auto binary = serialization::write_binary(**parsed); REQUIRE(binary); REQUIRE(serialization::read_binary(*binary));
-    CHECK(execute(*text, false, 0) == expected);
-    for (unsigned level : {0, 1, 2, 3}) {
-      CAPTURE(level); CAPTURE(source); CHECK(execute(source, true, level) == expected); CHECK(execute(*text, true, level) == expected);
+    if (limited) {
+      auto original = serialization::parse_text(source); REQUIRE(original);
+      auto decoded = serialization::read_binary(*binary); REQUIRE(decoded);
+      compare_limited_results(**original,**decoded,expected);
+    } else {
+      CHECK(execute(*text, false, 0) == expected);
+      for (unsigned level : {0, 1, 2, 3}) {
+        CAPTURE(level); CAPTURE(source); CHECK(execute(source, true, level) == expected); CHECK(execute(*text, true, level) == expected);
+      }
     }
   }
 }
@@ -928,7 +971,15 @@ TEST_CASE("typed address memory consumers preserve bytes and block ABI with nati
     CHECK(execute(*text, false, 0, *binary) == expected);
     // Original C transform_addrs assumes all memory consumers are scalar moves
     // of the source's register class. O0/O1 do not run that unsafe conversion.
-    for (unsigned level : {0, 1}) { CAPTURE(level); CHECK(execute(source, true, level) == expected); CHECK(execute(*text, true, level, *binary) == expected); }
+    auto host = target::TargetMachine::native(); REQUIRE(host);
+    if (host->architecture() == target::Architecture::X86_64
+        && (source.find("blk3:8") != std::string::npos || source.find("blk4:8") != std::string::npos)) {
+      // Mixed integer/floating SysV classes need two eight-byte fields. The
+      // interpreter can use these opaque blocks; the C JIT asserts on them.
+      auto &read = *(*parsed)->modules().begin()->functions().begin();
+      auto layout = target::layout_x86_arguments(host->abi(), read.signature().parameters);
+      REQUIRE_FALSE(layout); CHECK(layout.error().message.find("invalid block classification") != std::string::npos);
+    } else for (unsigned level : {0, 1}) { CAPTURE(level); CHECK(execute(source, true, level) == expected); CHECK(execute(*text, true, level, *binary) == expected); }
   }
 }
 TEST_CASE("native address lowering preserves stores into previously escaped pointer slots") {

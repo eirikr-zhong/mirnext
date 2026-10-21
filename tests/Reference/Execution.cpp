@@ -120,6 +120,26 @@ void compare(const Context &context,std::string_view module,std::string_view nam
   }
   CHECK(dump(context) == original); CHECK(session->host_entry_count() == initializer_entries+1);
 }
+TEST_CASE("Windows stack block arguments consume copied values before scalar argument setup") {
+  if (!native_available() || target::TargetMachine::native()->abi() != target::ABI::X86Windows) return;
+  for (unsigned size : {8,16,24}) for (bool stack : {false,true}) {
+    CAPTURE(size); CAPTURE(stack);
+    auto prefix = stack ? std::string("i64:a,i64:b,i64:c,i64:d,") : std::string();
+    auto text = "m:module\nbytes:i64 20,0,0\np:proto i64," + prefix + "blk:" + std::to_string(size) + "(block),i64:last\n"
+      "read:func i64," + prefix + "blk:" + std::to_string(size) + "(block),i64:last\nlocal i64:r,i64:t\nmov r,i64:0(block)\n";
+    for (unsigned offset = 8; offset < size; offset += 8)
+      text += "mov t,i64:" + std::to_string(offset) + "(block)\nadd r,r,t\n";
+    if (stack) text += "add r,r,a\nadd r,r,b\nadd r,r,c\nadd r,r,d\n";
+    text += "add r,r,last\nmov i64:0(block),99\nret r\nendfunc\nentry:func i64\nlocal i64:address,i64:r\nmov address,bytes\ncall p,read,r,";
+    if (stack) text += "1,2,3,4,";
+    text += "blk:" + std::to_string(size) + "(address)," + (stack ? "12" : "22") + "\nret r\nendfunc\nendmodule\n";
+    auto source = serialization::parse_text(text); REQUIRE(source);
+    for (unsigned level = 0; level < 4; ++level) {
+      CAPTURE(level); Oracle original(**source,level,false); CHECK(original.call("m","entry") == 42);
+      compare(**source,"m","entry",level,2);
+    }
+  }
+}
 TEST_CASE("owning interpreter scalar and comparison decisions match C interpreter and JIT") {
   for (unsigned fixture = 0; fixture < 3; ++fixture) {
   CAPTURE(fixture);

@@ -100,6 +100,13 @@ int main(int argc, char **argv) {
   if (!text) { fclose(input); return 2; }
   if (fread(text, 1, (size_t) length, input) != (size_t) length) { free(text); fclose(input); return 2; }
   fclose(input); text[length] = 0;
+  /* The C scanner expects LF, including for Windows checkouts and text tools. */
+  size_t written = 0;
+  for (size_t read = 0; read < (size_t) length; ++read) {
+    if (text[read] == '\r' && read + 1 < (size_t) length && text[read + 1] == '\n') continue;
+    text[written++] = text[read];
+  }
+  text[written] = 0;
   MIR_scan_string(ctx, text); free(text);
   }
   if (!strcmp(mode, "encode")) {
