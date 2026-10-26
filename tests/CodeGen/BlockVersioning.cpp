@@ -597,14 +597,18 @@ TEST_CASE (
     REQUIRE (incoming);
     auto &entry = named (*p, "entry");
     REQUIRE_FALSE (entry.instructions ().empty ());
-    CHECK ((entry.instructions ().back ()->opcode () == MachineOpcode (Opcode::Call)) == terminal);
+    // Windows restores its mandatory home space after CALL, so even a call
+    // at the end of a public IR block is not a terminal machine instruction.
+    const bool terminal_machine_call = terminal && host ().abi () != target::ABI::X86Windows;
+    CHECK ((entry.instructions ().back ()->opcode () == MachineOpcode (Opcode::Call))
+           == terminal_machine_call);
     auto program = BBVProgram::create (std::move (*p));
     REQUIRE (program);
     auto version = program->request_version (entry, *incoming);
     REQUIRE (version);
     auto plan = program->specialize (*version->version);
     REQUIRE (plan);
-    CHECK (bool ((*plan)->outgoing ().find (property.location)) == !terminal);
+    CHECK (bool ((*plan)->outgoing ().find (property.location)) == !terminal_machine_call);
     REQUIRE (program->verify ());
   }
 }

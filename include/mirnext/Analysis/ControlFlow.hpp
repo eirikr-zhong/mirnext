@@ -19,6 +19,7 @@ struct ControlFlowGraph {
   std::unordered_map<const ir::BasicBlock *, std::size_t> indices;
 };
 struct ControlFlowAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = ControlFlowGraph;
   static constexpr Dependency dependencies = Dependency::ControlFlow;
   static mirnext::Result<Result> run (const ir::Function &);
@@ -34,6 +35,7 @@ struct RegisterUseIndex {
   std::unordered_map<const ir::Register *, std::vector<RegisterOccurrence>> occurrences;
 };
 struct RegisterUseAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = RegisterUseIndex;
   static constexpr Dependency dependencies = Dependency::Instructions | Dependency::Registers;
   static mirnext::Result<Result> run (const ir::Function &);

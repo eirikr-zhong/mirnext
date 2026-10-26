@@ -3,6 +3,14 @@
 #include <algorithm>
 
 namespace mirnext::analysis {
+const unsigned char *ControlFlowAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
+const unsigned char *RegisterUseAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
 mirnext::Result<ControlFlowGraph> ControlFlowAnalysis::run (const ir::Function &function) {
   auto verified = function.verify ();
   if (!verified) return verified.error ();
@@ -27,8 +35,7 @@ mirnext::Result<ControlFlowGraph> ControlFlowAnalysis::run (const ir::Function &
     for (auto &instruction : block.instructions ())
       if (instruction.opcode () == ir::Opcode::LAddr)
         addressable[graph.indices.at (
-          &(*instruction.operands ()[1].get<const ir::Label *> ())->block ())]
-          = true;
+          &(*instruction.operands ()[1].get<const ir::Label *> ())->block ())] = true;
   for (auto data : function.label_data_uses ())
     if (auto reference = std::get_if<ir::LabelReference> (&data->initializer ())) {
       if (&reference->label->function () == &function)

@@ -1,6 +1,10 @@
 /* Licensed under the MIT License. MIR creates target anchors before visiting their layout. */
 #include "mirnext/Analysis/ConstructionOrder.hpp"
 namespace mirnext::analysis {
+const unsigned char *ConstructionOrderAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
 mirnext::Result<ConstructionOrder> ConstructionOrderAnalysis::run (const ir::Function &function) {
   auto checked = function.require_register_ir ();
   if (!checked) return checked.error ();

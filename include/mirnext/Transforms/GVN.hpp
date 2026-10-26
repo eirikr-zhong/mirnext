@@ -22,6 +22,7 @@ struct GVNResult {
   bool full_escape = false;
 };
 struct GVNAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = GVNResult;
   static constexpr analysis::Dependency dependencies = analysis::Dependency::All;
   static mirnext::Result<Result> run (const ir::Function &);

@@ -10,7 +10,7 @@ the copy.
 
 IR construction, analysis, optimization, machine code generation and execution
 share one owning C++ object model. Supported native targets are Linux and macOS
-on x86_64 and aarch64. Windows is currently deferred.
+on x86_64 and aarch64. Windows x86_64 is validated with MSVC in CI.
 
 ## Architecture
 

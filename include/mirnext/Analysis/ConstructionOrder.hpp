@@ -12,6 +12,7 @@ struct ConstructionOrder {
   std::size_t next_instruction = 1, next_block = 2;
 };
 struct ConstructionOrderAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = ConstructionOrder;
   static constexpr Dependency dependencies = Dependency::All;
   static mirnext::Result<Result> run (const ir::Function &);

@@ -17,10 +17,16 @@ constexpr Dependency operator| (Dependency a, Dependency b) {
 }
 namespace detail {
 template <class Analysis>
-inline constexpr unsigned char analysis_key = 0;
+inline unsigned char analysis_key = 0;
 template <class Analysis>
-constexpr const unsigned char *key () {
-  return &analysis_key<Analysis>;
+const unsigned char *key () noexcept {
+  // Analyses shared across DLLs provide one out-of-line id() in their owning
+  // library. Inline template variables have a separate address in each DLL.
+  // Local extension analyses may use their own token without registration.
+  if constexpr (requires { Analysis::id (); })
+    return Analysis::id ();
+  else
+    return &analysis_key<Analysis>;
 }
 inline bool current (ir::Revisions before, ir::Revisions after, Dependency dependencies) {
   auto mask = static_cast<unsigned> (dependencies);

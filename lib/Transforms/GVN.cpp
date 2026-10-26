@@ -5,6 +5,10 @@
 #include <bit>
 #include <unordered_set>
 namespace mirnext::transforms {
+const unsigned char *GVNAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
 namespace {
 using namespace ir;
 using namespace analysis;

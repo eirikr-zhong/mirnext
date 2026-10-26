@@ -4,6 +4,22 @@
 #include <numeric>
 
 namespace mirnext::analysis {
+const unsigned char *FunctionGraphAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
+const unsigned char *DominatorAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
+const unsigned char *LivenessAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
+const unsigned char *LoopAnalysis::id () noexcept {
+  static unsigned char token;
+  return &token;
+}
 namespace {
 Error owner_error (const ir::Function &function) {
   return {ErrorCode::InvalidArgument,
@@ -33,8 +49,7 @@ mirnext::Result<FunctionGraph> FunctionGraphAnalysis::run (const ir::Function &f
         graph
           .blocks[graph.indices.at (
             &(*instruction.operands ()[1].get<const ir::Label *> ())->block ())]
-          .address_taken
-          = true;
+          .address_taken = true;
   for (auto data : function.label_data_uses ())
     if (auto ref = std::get_if<ir::LabelReference> (&data->initializer ())) {
       if (&ref->label->function () == &function)

@@ -21,6 +21,7 @@ struct FunctionGraph {
   std::unordered_map<const ir::BasicBlock *, std::size_t> indices;
 };
 struct FunctionGraphAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = FunctionGraph;
   static constexpr Dependency dependencies = ControlFlowAnalysis::dependencies;
   static mirnext::Result<Result> run (const ir::Function &, FunctionAnalysisManager &);
@@ -34,6 +35,7 @@ struct DominatorTree {
   bool dominates (std::size_t ancestor, std::size_t block) const;
 };
 struct DominatorAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = DominatorTree;
   static constexpr Dependency dependencies = FunctionGraphAnalysis::dependencies;
   static mirnext::Result<Result> run (const ir::Function &, FunctionAnalysisManager &);
@@ -47,6 +49,7 @@ struct RegisterLiveness {
   bool live_out (std::size_t block, const ir::Register &reg) const;
 };
 struct LivenessAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = RegisterLiveness;
   static constexpr Dependency dependencies
     = Dependency::Instructions | Dependency::ControlFlow | Dependency::Registers;
@@ -62,6 +65,7 @@ struct LoopTree {
   std::size_t depth (std::size_t block) const;
 };
 struct LoopAnalysis {
+  static const unsigned char *id () noexcept;
   using Result = LoopTree;
   static constexpr Dependency dependencies = FunctionGraphAnalysis::dependencies;
   static mirnext::Result<Result> run (const ir::Function &, FunctionAnalysisManager &);
