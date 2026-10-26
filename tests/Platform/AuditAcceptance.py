@@ -21,7 +21,7 @@ PLATFORMS = {
 SCENES = {("original-interpreter", 0)} | set(itertools.product(
     ("optimized-interpreter", "eager", "lazy", "bbv", "mixed"), range(4)))
 LINKAGES = ("static", "shared")
-DEFAULT_PLATFORMS = tuple(name for name in PLATFORMS if not name.startswith("windows-"))
+DEFAULT_PLATFORMS = tuple(PLATFORMS)
 IDENTITY_FIELDS = ("source_fingerprint", "configuration")
 
 
