@@ -232,6 +232,13 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
   for (auto reg : order) {
     result.order_.push_back (reg_at (reg));
     auto type = type_at (reg);
+    // AAPCS64 preserves only the low 64 bits of v8-v15. A value crossing a
+    // call cannot use a partially preserved register for its full type.
+    auto accepts = [&] (target::PhysicalRegister physical) {
+      return f.target ().accepts (physical, type)
+             && (!ranges.call_crossed ().contains (reg) || clobbered (physical)
+                 || !f.target ().call_clobbers (physical, type));
+    };
     if (auto binding = reg_at (reg)->binding ()) {
       result.locations_[reg] = *binding;
       continue;
@@ -245,8 +252,7 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
       }
     std::optional<target::PhysicalRegister> best;
     for (auto &p : f.target ().registers ())
-      if (!p.reserved && f.target ().accepts (p.reg, type)
-          && !conflicts.physical.contains (p.reg.encoding ())) {
+      if (!p.reserved && accepts (p.reg) && !conflicts.physical.contains (p.reg.encoding ())) {
         if (!best || (!clobbered (*best) && clobbered (p.reg))) best = p.reg;
       }
     std::vector<Gap> spilled;
@@ -254,7 +260,7 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
       std::int64_t best_profit = 0;
       std::size_t best_gap = 0;
       for (auto &p : f.target ().registers ()) {
-        if (p.reserved || !f.target ().accepts (p.reg, type)) continue;
+        if (p.reserved || !accepts (p.reg)) continue;
         std::vector<Gap> candidate;
         bool possible = true;
         std::size_t gap_size = 0;

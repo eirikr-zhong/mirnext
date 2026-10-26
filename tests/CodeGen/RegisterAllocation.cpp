@@ -531,3 +531,42 @@ TEST_CASE (
   for (auto &p : allocation->used ())
     for (auto r : globals) CHECK (p.physical.contains (r.encoding ()));
 }
+
+TEST_CASE ("call-crossing allocation respects the preserved width of SIMD registers") {
+  auto target = target::TargetMachine::native ();
+  REQUIRE (target);
+  if (target->architecture () != target::Architecture::AArch64) return;
+  for (unsigned level = 0; level < 4; ++level)
+    for (bool crossing : {false, true})
+      for (auto type : {Type (Type::Kind::F64), Type (Type::Kind::LongDouble)}) {
+        CAPTURE (level);
+        CAPTURE (crossing);
+        auto f = function (false);
+        auto value = f->create_register (type);
+        REQUIRE (value);
+        const bool wide = (*value)->type ().kind () == Type::Kind::LongDouble;
+        auto &block = f->create_block ();
+        MachineRewriter rw (*f);
+        auto proto = f->intern_symbol (
+          {"native", "p", MachineSymbol::Kind::Prototype, Signature{}, false, {}});
+        auto callee
+          = f->intern_symbol ({"native", "ext", MachineSymbol::Kind::Import, {}, false, {}});
+        REQUIRE (proto);
+        REQUIRE (callee);
+        auto define = [&] {
+          emit (rw, block, wide ? Opcode::LDMov : Opcode::DMov,
+                {operand (*value), wide ? MachineOperand (1.25L) : MachineOperand (1.25)});
+        };
+        if (crossing) define ();
+        emit (rw, block, Opcode::Call,
+              {MachineOperand (MachineSymbolReference{*proto}),
+               MachineOperand (MachineSymbolReference{*callee})});
+        if (!crossing) define ();
+        emit (rw, block, MachinePseudoOpcode::Use, {operand (*value)});
+        emit (rw, block, Opcode::Ret, {});
+        auto allocation = allocated (*f, level);
+        auto location = allocation.location (**value);
+        REQUIRE (location);
+        CHECK (std::holds_alternative<StackLocation> (*location) == (wide && crossing));
+      }
+}

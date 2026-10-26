@@ -297,7 +297,7 @@ struct AllocationRewriteEngine {
             if (!r || result.blocks_[block].spill_gen.contains (n)) return;
             auto loc = location (*r);
             auto h = std::get_if<target::PhysicalRegister> (&loc);
-            if (h && f.target ().call_clobbers (*h, Type (K::Undef)) && !saves->contains (n)) {
+            if (h && f.target ().call_clobbers (*h, (*r)->type ()) && !saves->contains (n)) {
               saves->insert (n);
               preserve (*r, i, true, true);
             }
