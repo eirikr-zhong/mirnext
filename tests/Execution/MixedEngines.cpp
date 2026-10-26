@@ -66,10 +66,20 @@ TEST_CASE (
           if (kind == unsigned (test::CallExample::MultipleResults)
               && target::TargetMachine::native ()->abi () == target::ABI::X86Windows) {
             REQUIRE (c->verify ());
-            auto failed = ExecutionSession::create (*c, std::move (options));
-            REQUIRE_FALSE (failed);
-            CHECK (failed.error ().message.find ("Windows does not support multiple return values")
-                   != std::string::npos);
+            auto session = ExecutionSession::create (*c, std::move (options));
+            if (session) {
+              // A lazy callee reports its ABI error when the first call compiles
+              // it; eager and block preparation can diagnose it at creation.
+              REQUIRE (native == ExecutionEngine::LazyJIT);
+              auto failed = find (*session, "entry", "calls").call_i64 ();
+              REQUIRE_FALSE (failed);
+              CHECK (
+                failed.error ().message.find ("Windows does not support multiple return values")
+                != std::string::npos);
+            } else
+              CHECK (
+                session.error ().message.find ("Windows does not support multiple return values")
+                != std::string::npos);
             continue;
           }
           auto s = make (*c, std::move (options));

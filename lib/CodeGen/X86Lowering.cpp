@@ -439,7 +439,12 @@ void X86Lowering::lower_call (Instruction &at) {
       if (type.kind () == K::ReturnBlock) source = address (*source.get<MachineMemory> ());
       auto scalar = type.is_float () ? type : Type::i64 ();
       auto dest = memory (scalar, loc.stack_offset, physical (R::SP));
-      early (move (scalar), {dest, source});
+      // Windows aggregate loads/copies are inserted at the early boundary.
+      // Consume their result at the call, after those producers have run.
+      if (win && loc.aggregate)
+        before (at, move (scalar), {dest, source});
+      else
+        early (move (scalar), {dest, source});
       emit_extension (false);
       ops[start + n] = dest;
     }

@@ -266,7 +266,11 @@ TEST_CASE ("motion rewriter rejects invalid anchors phases and owners before mut
   auto rewriter = SSARewriter::get (f);
   REQUIRE (rewriter);
   before = dump_ssa (f);
-  auto &first = *f.blocks ().begin ();
+  auto blocks = f.blocks ();
+  auto nonempty = std::find_if (blocks.begin (), blocks.end (),
+                                [] (auto &block) { return block.size () != 0; });
+  REQUIRE (nonempty != blocks.end ());
+  auto &first = *nonempty;
   auto &i = *first.instructions ().begin ();
   auto &yes = const_cast<BasicBlock &> (f.find_label ("yes")->block ());
   CHECK_FALSE (rewriter->move_before (i, *entry (*foreign).blocks ().begin ()));
