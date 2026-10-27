@@ -1,0 +1,11 @@
+m:module
+p:proto i32,p:message
+import puts
+main:func i64,i32:argc,p:argv,p:env
+local i64:r,p:s
+mov s,p:8(argv)
+call p,puts,r,s
+add r,argc,40
+ret r
+endfunc
+endmodule

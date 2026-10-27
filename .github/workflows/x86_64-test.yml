@@ -1,0 +1,62 @@
+name: MIRNext x86_64 Linux macOS Windows test
+
+on: [push, workflow_dispatch]
+
+jobs:
+  test:
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel, windows-latest]
+        build_type: [Debug, Release]
+        linkage: [static, shared]
+        include:
+        - os: ubuntu-latest
+          target: x86_64-sysv
+        - os: macos-15-intel
+          target: x86_64-sysv
+        - os: windows-latest
+          target: x86_64-windows
+          cmake_args: -A x64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build and test native C++ core
+      run: |
+        cmake -S . -B build ${{ matrix.cmake_args }} -DBUILD_TESTING=ON -DMIRNEXT_ENABLE_NATIVE_EVIDENCE=ON -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DMIRNEXT_TEST_EXPECTED_TARGET=${{ matrix.target }}
+        cmake --build build --config ${{ matrix.build_type }} --parallel 2
+        ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --parallel 4 --output-junit "${{ github.workspace }}/build/native-tests.xml"
+        python3 tests/Platform/AuditAcceptance.py --source . --platform native --linkage ${{ matrix.linkage }} --configuration ${{ matrix.build_type }} --output build/native-evidence-${{ matrix.build_type }}.json build
+    - name: Build without tests or examples
+      if: matrix.build_type == 'Release'
+      run: |
+        cmake -S . -B build-no-tests ${{ matrix.cmake_args }} -DBUILD_TESTING=OFF -DMIRNEXT_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=Release
+        cmake --build build-no-tests --config Release --parallel 2
+    - name: Verify external CMake consumers
+      run: |
+        cmake -S tests/SourceConsumer -B build-consumer ${{ matrix.cmake_args }} -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        cmake --build build-consumer --config ${{ matrix.build_type }} --parallel 2
+        ctest --test-dir build-consumer -C ${{ matrix.build_type }} --output-on-failure --parallel 4
+    - name: Verify installed native C++ library
+      run: |
+        cmake --install build --config ${{ matrix.build_type }} --prefix "${{ github.workspace }}/install-core-stage"
+        cmake -E rename "${{ github.workspace }}/install-core-stage" "${{ github.workspace }}/install-core"
+        cmake -S tests/Consumer -B build-native-consumer ${{ matrix.cmake_args }} -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/install-core"
+        cmake --build build-native-consumer --config ${{ matrix.build_type }} --parallel 2
+        ctest --test-dir build-native-consumer -C ${{ matrix.build_type }} --output-on-failure --parallel 4
+    - name: Preserve native acceptance evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-${{ matrix.os }}-${{ matrix.build_type }}-${{ matrix.linkage }}
+        path: |
+          build*/native-acceptance-*.json*
+          build*/native-test-manifest-*.json
+          build*/native-evidence-*.json
+          build*/native-tests.xml
+          build*/Testing/Temporary/LastTest.log

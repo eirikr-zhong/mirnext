@@ -7,11 +7,44 @@ jobs:
 
     strategy:
       fail-fast: false
-    runs-on: macos-14
+      matrix:
+        build_type: [Debug, Release]
+        linkage: [static, shared]
+    runs-on: macos-15
     
     steps:
     - uses: actions/checkout@v4
-    - name: make test
+    - name: Build and test native C++ core
       run: |
-         uname -a
-         make test
+        cmake -S . -B build -DBUILD_TESTING=ON -DMIRNEXT_ENABLE_NATIVE_EVIDENCE=ON -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DMIRNEXT_TEST_EXPECTED_TARGET=aarch64-macos
+        cmake --build build --parallel 2
+        ctest --test-dir build --output-on-failure --parallel 4 --output-junit "${{ github.workspace }}/build/native-tests.xml"
+        python3 tests/Platform/AuditAcceptance.py --source . --platform native --linkage ${{ matrix.linkage }} --configuration ${{ matrix.build_type }} --output build/native-evidence-${{ matrix.build_type }}.json build
+    - name: Build without tests or examples
+      if: matrix.build_type == 'Release'
+      run: |
+        cmake -S . -B build-no-tests -DBUILD_TESTING=OFF -DMIRNEXT_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=Release
+        cmake --build build-no-tests --parallel 2
+    - name: Verify external CMake consumers
+      run: |
+        cmake -S tests/SourceConsumer -B build-consumer -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        cmake --build build-consumer --config ${{ matrix.build_type }} --parallel 2
+        ctest --test-dir build-consumer -C ${{ matrix.build_type }} --output-on-failure --parallel 4
+    - name: Verify installed native C++ library
+      run: |
+        cmake --install build --config ${{ matrix.build_type }} --prefix "${{ github.workspace }}/install-core-stage"
+        cmake -E rename "${{ github.workspace }}/install-core-stage" "${{ github.workspace }}/install-core"
+        cmake -S tests/Consumer -B build-native-consumer -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} "-DCMAKE_PREFIX_PATH=${{ github.workspace }}/install-core"
+        cmake --build build-native-consumer --config ${{ matrix.build_type }} --parallel 2
+        ctest --test-dir build-native-consumer -C ${{ matrix.build_type }} --output-on-failure --parallel 4
+    - name: Preserve native acceptance evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: native-aarch64-macos-${{ matrix.build_type }}-${{ matrix.linkage }}
+        path: |
+          build*/native-acceptance-*.json*
+          build*/native-test-manifest-*.json
+          build*/native-evidence-*.json
+          build*/native-tests.xml
+          build*/Testing/Temporary/LastTest.log

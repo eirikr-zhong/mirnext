@@ -1,0 +1,15 @@
+# O2/O3 move the constant return value out of target, leaving only its label.
+# LADDR and label data still require that label after jump_opt.
+addressed: module
+address: lref target
+difference: lref target, target, 7
+entry: func i64
+       local i64:value, i64:pointer
+       mov value, 40
+       laddr pointer, target
+       jmpi pointer
+       ret 0
+target: add value, value, 2
+       ret value
+       endfunc
+       endmodule
