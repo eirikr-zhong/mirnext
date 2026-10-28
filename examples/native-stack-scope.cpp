@@ -1,40 +1,35 @@
-/* Licensed under the MIT License. Canonical C++ IR and read-only serialization. */
-#include <mirnext/Serialization/Format.hpp>
+/* Licensed under the MIT License. Stack scope cleanup follows control flow. */
+#include <mirnext/Execution/Session.hpp>
 #include <iostream>
 int main () {
   using namespace mirnext;
   using namespace mirnext::ir;
-  auto failed = [] (const Error &error) {
-    std::cerr << error.message << '\n';
+  Program program;
+  MIRBuilder builder (program);
+  auto *module = builder.create_module ("scopes");
+  builder.create_function<std::int64_t ()> (module, "answer");
+  auto *scope = builder.begin_stack_scope ("temporary");
+  auto buffer = builder.create_stack_alloc (builder.constant_i64 (16));
+  auto slot = builder.memory (Type::i64 (), buffer);
+  builder.create_store (slot, builder.constant_i64 (42));
+  builder.create_return (builder.create_load (slot));
+  // The return edge restores the scope; this closes its construction scope.
+  builder.end_stack_scope (scope);
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    std::cerr << built.error ().message << '\n';
     return 1;
-  };
-  Context context;
-  auto module = context.create_module ("example");
-  if (!module) return failed (module.error ());
-  auto function = (*module)->create_function ("answer", {{Type::i64 ()}, {}});
-  if (!function) return failed (function.error ());
-  auto entry = (*function)->create_block ();
-  if (!entry) return failed (entry.error ());
-  IRBuilder builder (**entry);
-  auto scope = builder.begin_stack_scope ("temporary");
-  if (!scope) return failed (scope.error ());
-  auto address = builder.allocate_stack (Operand (std::int64_t{16}));
-  if (!address) return failed (address.error ());
-  auto stored = builder.store (Memory{Type::i64 (), *address}, Operand (std::int64_t{42}));
-  if (!stored) return failed (stored.error ());
-  auto returned = builder.ret (Operand (Memory{Type::i64 (), *address}));
-  if (!returned) return failed (returned.error ());
-  auto ended = builder.end_stack_scope (**scope);
-  if (!ended) return failed (ended.error ());
-  auto text = serialization::write_text (context);
-  if (!text) return failed (text.error ());
-  auto bytes = serialization::write_binary (context);
-  if (!bytes) return failed (bytes.error ());
-  auto decoded = serialization::read_binary (*bytes);
-  if (!decoded) return failed (decoded.error ());
-  std::cout << *text;
-  return (*decoded)->verify () && needs_materialization (context)
-             && !needs_materialization (**decoded)
-           ? 0
-           : 1;
+  }
+  auto session = execution::ExecutionSession::create (std::move (program));
+  if (!session.has_value ()) {
+    std::cerr << session.error ().message << '\n';
+    return 1;
+  }
+  auto result = session.value ().call_i64 ("scopes", "answer");
+  if (!result.has_value ()) {
+    std::cerr << result.error ().message << '\n';
+    return 1;
+  }
+  std::cout << result.value () << '\n';
+  return result.value () == 42 ? 0 : 1;
 }

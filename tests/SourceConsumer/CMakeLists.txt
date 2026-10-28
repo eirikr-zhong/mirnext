@@ -14,13 +14,16 @@ add_executable(consumer_session "${MIRNEXT_SOURCE_DIR}/examples/native-session.c
 target_link_libraries(consumer_session PRIVATE MIRNext::MIRNext)
 add_executable(consumer_mixed "${MIRNEXT_SOURCE_DIR}/examples/mixed-engines.cpp")
 target_link_libraries(consumer_mixed PRIVATE MIRNext::MIRNext)
+add_executable(consumer_cross_module "${MIRNEXT_SOURCE_DIR}/examples/native-cross-module.cpp")
+target_link_libraries(consumer_cross_module PRIVATE MIRNext::MIRNext)
 enable_testing()
 add_test(NAME consumer-variables COMMAND consumer_variables)
 add_test(NAME consumer-calls COMMAND consumer_calls)
 add_test(NAME consumer-session COMMAND consumer_session)
 add_test(NAME consumer-mixed COMMAND consumer_mixed)
+add_test(NAME consumer-cross-module COMMAND consumer_cross_module)
 if(WIN32 AND BUILD_SHARED_LIBS)
   string(REPLACE ";" "\\;" consumer_path "$ENV{PATH}")
-  set_tests_properties(consumer-variables consumer-calls consumer-session consumer-mixed PROPERTIES
+  set_tests_properties(consumer-variables consumer-calls consumer-session consumer-mixed consumer-cross-module PROPERTIES
     ENVIRONMENT "PATH=$<TARGET_FILE_DIR:MIRNext::MIRNext>\\;${consumer_path}")
 endif()

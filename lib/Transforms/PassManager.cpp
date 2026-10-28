@@ -1,11 +1,12 @@
 /* Licensed under the MIT License. */
+#include "mirnext/Analysis/Editing.hpp"
 #include "mirnext/Transforms/PassManager.hpp"
 
 namespace mirnext::transforms {
 namespace {
 Result<PassResult> execute (FunctionPass &pass, ir::Function &function,
                             analysis::FunctionAnalysisManager &analyses,
-                            const PassObserver &observer) {
+                            const PassObserver &observer, ir::MIRBuilder *provided = nullptr) {
   auto contextual = [&] (Error error) {
     error.message = std::string (function.module ().name ()) + "/"
                     + std::string (function.symbol ().name ()) + " [" + std::string (pass.name ())
@@ -16,22 +17,37 @@ Result<PassResult> execute (FunctionPass &pass, ir::Function &function,
   if (observer) {
     auto observed
       = observer ({function, pass.name (), PassEvent::Phase::Before, before, before, 0});
-    if (!observed) return contextual (observed.error ());
+    if (!(observed).has_value ()) return contextual (observed.error ());
   }
-  auto result = pass.run (function, analyses);
-  if (!result) {
+  std::optional<ir::MIRBuilder> batch;
+  if (!provided) batch.emplace (function);
+  auto &edit = provided ? *provided : batch.value ();
+  if (edit.function () != &function) edit.set_function (&function);
+  analysis::detail::EditScope editing (analyses);
+  auto result = pass.run (edit, analyses);
+  auto edited = [&] () -> Result<void> {
+    if (batch) return batch->finish ();
+    auto current = edit.status ();
+    if (!current.has_value ()) return current.error ();
+    return function.verify ();
+  }();
+  if (!(edited).has_value ()) {
+    analyses.clear ();
+    return contextual (edited.error ());
+  }
+  if (!(result).has_value ()) {
     analyses.clear ();
     return contextual (result.error ());
   }
-  analyses.invalidate (result->preserved);
+  analyses.invalidate (result.value ().preserved);
   auto checked = function.verify ();
-  if (!checked) return contextual (checked.error ());
+  if (!(checked).has_value ()) return contextual (checked.error ());
   if (observer) {
     auto observed = observer ({function, pass.name (), PassEvent::Phase::After, before,
-                               function.instruction_count (), result->transformations});
-    if (!observed) return contextual (observed.error ());
+                               function.instruction_count (), result.value ().transformations});
+    if (!(observed).has_value ()) return contextual (observed.error ());
   }
-  return std::move (*result);
+  return std::move ((result).value ());
 }
 struct PassScope {
   FunctionPass &pass;
@@ -43,18 +59,20 @@ Result<void> FunctionPassManager::run (ir::Function &function,
                                        PassObserver observer) const {
   if (&analyses.function () != &function)
     return Error{ErrorCode::InvalidArgument, "pass manager: analysis owner mismatch"};
-  auto checked = function.verify ();
-  if (!checked) return checked;
+  auto checked = function.module ().program ().status ();
+  if (!(checked).has_value ()) return checked.error ();
+  checked = function.verify ();
+  if (!(checked).has_value ()) return checked.error ();
   for (auto &pass : passes_) {
     PassScope scope{*pass};
-    auto initialized = pass->initialize (function.module ().context ());
-    if (!initialized) return initialized;
+    auto initialized = pass->initialize (function.module ().program ());
+    if (!(initialized).has_value ()) return initialized;
     auto result = execute (*pass, function, analyses, observer);
-    if (!result) return result.error ();
+    if (!(result).has_value ()) return result.error ();
   }
   return {};
 }
-Result<void> FunctionPassManager::run (ir::Context &context, PassObserver observer) const {
+Result<void> FunctionPassManager::run (ir::Program &context, PassObserver observer) const {
   ModulePassManager pipeline;
   for (auto &pass : passes_) pipeline.add<FunctionPassAdaptor> (*pass);
   return pipeline.run (context, {}, std::move (observer));
@@ -66,6 +84,9 @@ Result<void> FunctionPassManager::run (ir::Module &module, PassObserver observer
   return pipeline.run (module, analyses, {}, std::move (observer));
 }
 Result<PassResult> FunctionPassAdaptor::run (ir::Module &module, ModulePassContext &context) {
+  if (auto status = context.builder.status (); !status.has_value ()) return status.error ();
+  if (&context.builder.program () != &module.program ())
+    return Error{ErrorCode::InvalidArgument, "module pass builder owner mismatch"};
   if (!pass_) return Error{ErrorCode::InvalidArgument, "function pass adaptor requires a pass"};
   if (&context.analyses.module () != &module)
     return Error{ErrorCode::InvalidArgument, "function pass adaptor: analysis owner mismatch"};
@@ -76,21 +97,22 @@ Result<PassResult> FunctionPassAdaptor::run (ir::Module &module, ModulePassConte
   for (auto &function : module.functions ()) functions.push_back (&function);
   for (auto function : functions) {
     auto analyses = context.analyses.function_analyses (*function);
-    if (!analyses) return analyses.error ();
-    auto result = execute (*pass_, *function, **analyses, context.function_observer);
-    if (!result) return result.error ();
-    transformations += result->transformations;
+    if (!(analyses).has_value ()) return analyses.error ();
+    auto result = execute (*pass_, *function, (analyses).value (), context.function_observer,
+                           &context.builder);
+    if (!(result).has_value ()) return result.error ();
+    transformations += result.value ().transformations;
   }
   // Function caches were invalidated with each function's preservation set.
   // Module results survive only if their declared revision dependencies did.
   return PassResult{transformations, analysis::PreservedAnalyses::all ()};
 }
 Result<void> ModulePassManager::run_scope (
-  ir::Context &context, std::span<ir::Module *const> modules,
+  ir::Program &context, std::span<ir::Module *const> modules,
   std::span<analysis::ModuleAnalysisManager *const> analyses, const ModulePassObserver &observer,
   const PassObserver &function_observer) const {
   auto checked = context.verify ();
-  if (!checked) return checked;
+  if (!(checked).has_value ()) return checked.error ();
   auto clear = [&] {
     for (auto manager : analyses) manager->clear ();
   };
@@ -105,7 +127,7 @@ Result<void> ModulePassManager::run_scope (
       return error;
     };
     auto initialized = pass->initialize (context);
-    if (!initialized) {
+    if (!(initialized).has_value ()) {
       clear ();
       return contextual (nullptr, initialized.error ());
     }
@@ -122,27 +144,34 @@ Result<void> ModulePassManager::run_scope (
       if (observer) {
         auto observed
           = observer ({module, pass->name (), PassEvent::Phase::Before, before, before, 0});
-        if (!observed) {
+        if (!(observed).has_value ()) {
           clear ();
           return contextual (&module, observed.error ());
         }
       }
-      ModulePassContext invocation{manager, function_observer};
+      ir::MIRBuilder edits (context);
+      analysis::detail::EditScope editing (manager);
+      ModulePassContext invocation{manager, edits, function_observer};
       auto result = pass->run (module, invocation);
-      if (!result) {
+      auto edited = edits.finish ();
+      if (!(edited).has_value ()) {
+        clear ();
+        return contextual (&module, edited.error ());
+      }
+      if (!(result).has_value ()) {
         clear ();
         return contextual (&module, result.error ());
       }
-      manager.invalidate (result->preserved);
+      manager.invalidate (result.value ().preserved);
       checked = module.verify ();
-      if (!checked) {
+      if (!(checked).has_value ()) {
         clear ();
         return contextual (&module, checked.error ());
       }
       if (observer) {
         auto observed = observer ({module, pass->name (), PassEvent::Phase::After, before, count (),
-                                   result->transformations});
-        if (!observed) {
+                                   result.value ().transformations});
+        if (!(observed).has_value ()) {
           clear ();
           return contextual (&module, observed.error ());
         }
@@ -151,7 +180,7 @@ Result<void> ModulePassManager::run_scope (
     // Inlining can also rename/export definitions in another module.
     for (auto manager : analyses) manager->invalidate (analysis::PreservedAnalyses::all ());
     checked = context.verify ();
-    if (!checked) {
+    if (!(checked).has_value ()) {
       clear ();
       return contextual (nullptr, checked.error ());
     }
@@ -165,9 +194,9 @@ Result<void> ModulePassManager::run (ir::Module &module, analysis::ModuleAnalysi
     return Error{ErrorCode::InvalidArgument, "module pass manager: analysis owner mismatch"};
   ir::Module *modules[] = {&module};
   analysis::ModuleAnalysisManager *managers[] = {&analyses};
-  return run_scope (module.context (), modules, managers, observer, function_observer);
+  return run_scope (module.program (), modules, managers, observer, function_observer);
 }
-Result<void> ModulePassManager::run (ir::Context &context, ModulePassObserver observer,
+Result<void> ModulePassManager::run (ir::Program &context, ModulePassObserver observer,
                                      PassObserver function_observer) const {
   std::vector<ir::Module *> modules;
   std::vector<std::unique_ptr<analysis::ModuleAnalysisManager>> owners;

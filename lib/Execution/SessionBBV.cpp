@@ -14,11 +14,11 @@ Result<void> LoadedProgram::prepare_block_versioning () {
                                           {.optimization_level
                                            = static_cast<unsigned> (optimized->level ()),
                                            .observer = options.link.compilation_observer});
-    if (!prepared) return fail (prepared.error ());
-    auto program = codegen::BBVProgram::create (std::move (*prepared));
-    if (!program) return fail (program.error ());
+    if (!(prepared).has_value ()) return fail (prepared.error ());
+    auto program = codegen::BBVProgram::create (std::move ((prepared).value ()));
+    if (!(program).has_value ()) return fail (program.error ());
     auto runtime
-      = BBVRuntime::create (std::move (*program),
+      = BBVRuntime::create (std::move ((program).value ()),
                             {.code_capacity = options.link.block_versioning.code_capacity,
                              .failure_continuation
                              = native_boundary->recovery ().recovery_address (),
@@ -30,8 +30,8 @@ Result<void> LoadedProgram::prepare_block_versioning () {
                                    {version, compiled});
                                return {};
                              }});
-    if (!runtime) return fail (runtime.error ());
-    record.blocks = std::move (*runtime);
+    if (!(runtime).has_value ()) return fail (runtime.error ());
+    record.blocks = std::move ((runtime).value ());
     record.destination = record.blocks->entry_address ();
     std::vector<const ir::Label *> labels;
     for (auto &label : record.source->labels ()) labels.push_back (&label);

@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Native copy propagation and memory liveness. */
+#include "mirnext/Transforms/AnalysisAccess.hpp"
+#include "mirnext/Transforms/Testing.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -19,14 +23,15 @@ using namespace mirnext::ir;
 using namespace mirnext::analysis;
 using namespace mirnext::transforms;
 namespace {
-std::unique_ptr<Context> parse (std::string_view text) {
+std::unique_ptr<Program> parse (std::string_view text) {
   auto result = serialization::parse_text (text);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<Program> (std::move ((result).value ()));
 }
-Function &entry (Context &context) {
-  return const_cast<Function &> (*context.modules ().begin ()->find_symbol ("entry")->function ());
+Function &entry (Program &context) {
+  return const_cast<Function &> (
+    *context.modules ().begin ()->find_symbol ("entry").get ()->function ().get ());
 }
 void prepare (Function &f, FunctionAnalysisManager &analyses, bool gvn = true) {
   FunctionPassManager passes;
@@ -35,14 +40,14 @@ void prepare (Function &f, FunctionAnalysisManager &analyses, bool gvn = true) {
   passes.add<BuildSSAPass> ();
   if (gvn) passes.add<GVNPass> ();
   auto result = passes.run (f, analyses);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
 }
 void finish (Function &f, FunctionAnalysisManager &analyses) {
   FunctionPassManager passes;
   passes.add<ConventionalSSAPass> ();
   passes.add<DestroySSAPass> ();
-  REQUIRE (passes.run (f, analyses));
+  REQUIRE ((passes.run (f, analyses)).has_value ());
 }
 std::size_t stores (const Function &f) {
   std::size_t result = 0;
@@ -50,7 +55,7 @@ std::size_t stores (const Function &f) {
     for (auto &i : b.instructions ())
       if ((i.opcode () == Opcode::Mov || i.opcode () == Opcode::DMov || i.opcode () == Opcode::FMov
            || i.opcode () == Opcode::LDMov)
-          && i.operands ()[0].get<Memory> ())
+          && mirnext::ir::detail::operand_access (i.operands ()[0]).get<Memory> ())
         ++result;
   return result;
 }
@@ -64,16 +69,16 @@ TEST_CASE ("copy and memory passes retain canonical identities metadata and inde
     auto source = parse (text);
     auto before = dump (*source);
     auto copy = clone (*source);
-    REQUIRE (copy);
-    auto &f = entry (**copy);
+    REQUIRE ((copy).has_value ());
+    auto &f = entry ((copy).value ());
     FunctionAnalysisManager analyses (f);
     prepare (f, analyses);
     auto graph = analyses.get<FunctionGraphAnalysis> ();
-    REQUIRE (graph);
-    auto identity = (*graph)->blocks.data ();
+    REQUIRE ((graph).has_value ());
+    auto identity = graph.value ().blocks.data ();
     auto metadata = analyses.get<GVNAnalysis> ();
-    REQUIRE (metadata);
-    auto memory = (*metadata)->memory.data ();
+    REQUIRE ((metadata).has_value ());
+    auto memory = metadata.value ().memory.data ();
     FunctionPassManager passes;
     passes.add<CopyPropagationPass> ();
     passes.add<DeadStoresPass> ();
@@ -81,35 +86,36 @@ TEST_CASE ("copy and memory passes retain canonical identities metadata and inde
     auto status = passes.run (f, analyses, [&] (const PassEvent &event) -> Result<void> {
       if (event.phase == PassEvent::Phase::After) {
         ++observations;
-        REQUIRE (event.function.ssa_form ()->verify ());
+        REQUIRE ((event.function.ssa_form ().value ().verify ()).has_value ());
         auto updated = analyses.get<GVNAnalysis> ();
-        REQUIRE (updated);
-        CHECK ((*updated)->memory.data () == memory);
-        for (auto &[value, number] : (*updated)->numbers) {
+        REQUIRE ((updated).has_value ());
+        CHECK (updated.value ().memory.data () == memory);
+        for (auto &[value, number] :
+             mirnext::transforms::detail::AnalysisAccess::numbers (((updated)).value ())) {
           (void) number;
-          CHECK (&value->form () == f.ssa_form ());
+          CHECK (&value->form () == f.ssa_form ().get ());
         }
-        for (auto &location : (*updated)->memory)
-          if (location.base) CHECK (location.base->alive ());
+        for (auto &location : updated.value ().memory)
+          if ((location.base).has_value ()) CHECK (location.base.value ().alive ());
         auto cfg = analyses.get<FunctionGraphAnalysis> ();
-        REQUIRE (cfg);
-        CHECK ((*cfg)->blocks.data () == identity);
+        REQUIRE ((cfg).has_value ());
+        CHECK (cfg.value ().blocks.data () == identity);
       }
       return {};
     });
-    INFO ((status ? "" : status.error ().message));
-    REQUIRE (status);
+    INFO (((status).has_value () ? "" : status.error ().message));
+    REQUIRE ((status).has_value ());
     CHECK (observations == 2);
     CHECK (dump (*source) == before);
     finish (f, analyses);
     source.reset ();
-    REQUIRE ((*copy)->verify ());
-    auto binary = serialization::write_binary (**copy);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
-    auto printed = serialization::write_text (**copy);
-    REQUIRE (printed);
-    REQUIRE (serialization::parse_text (*printed));
+    REQUIRE ((copy.value ().verify ()).has_value ());
+    auto binary = serialization::write_binary ((copy).value ());
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
+    auto printed = serialization::write_text ((copy).value ());
+    REQUIRE ((printed).has_value ());
+    REQUIRE ((serialization::parse_text ((printed).value ())).has_value ());
   }
 }
 TEST_CASE ("dead stores disappear only when their memory is not observable") {
@@ -127,10 +133,10 @@ TEST_CASE ("dead stores disappear only when their memory is not observable") {
     FunctionPassManager passes;
     passes.add<CopyPropagationPass> ();
     passes.add<DeadStoresPass> ();
-    REQUIRE (passes.run (f, analyses));
+    REQUIRE ((passes.run (f, analyses)).has_value ());
     // GVN forwards a same-location load, so even the originally read stack slot is dead.
     CHECK (stores (f) == 0);
-    REQUIRE (f.verify ());
+    REQUIRE ((f.verify ()).has_value ());
   }
   auto context = parse (
     "m: module\nstate: i64 0\nentry: func i64, i64:x\nlocal i64:p\nmov p, state\nmov i64:0(p), "
@@ -140,7 +146,7 @@ TEST_CASE ("dead stores disappear only when their memory is not observable") {
   prepare (f, analyses);
   FunctionPassManager passes;
   passes.add<DeadStoresPass> ();
-  REQUIRE (passes.run (f, analyses));
+  REQUIRE ((passes.run (f, analyses)).has_value ());
   CHECK (stores (f) == 1);
 }
 TEST_CASE ("memory pass phase ownership and stale metadata failures are diagnosed before edits") {
@@ -148,33 +154,40 @@ TEST_CASE ("memory pass phase ownership and stale metadata failures are diagnose
   auto &f = entry (*context);
   FunctionAnalysisManager analyses (f), wrong (entry (*foreign));
   auto before = dump (f);
-  CHECK_FALSE (CopyPropagationPass ().run (f, analyses));
-  CHECK_FALSE (DeadStoresPass ().run (f, analyses));
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (CopyPropagationPass (), f, analyses)).has_value ());
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (DeadStoresPass (), f, analyses)).has_value ());
   CHECK (dump (f) == before);
   prepare (f, analyses, false);
   before = dump (f);
-  CHECK_FALSE (DeadStoresPass ().run (f, analyses));
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (DeadStoresPass (), f, analyses)).has_value ());
   CHECK (dump (f) == before);
-  CHECK_FALSE (CopyPropagationPass ().run (f, wrong));
-  CHECK_FALSE (DeadStoresPass ().run (f, wrong));
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (CopyPropagationPass (), f, wrong)).has_value ());
+  CHECK_FALSE ((mirnext::transforms::detail::run_pass (DeadStoresPass (), f, wrong)).has_value ());
   CHECK (dump (f) == before);
   FunctionPassManager standalone;
   standalone.add<CopyPropagationPass> ();
-  REQUIRE (standalone.run (f, analyses));
-  REQUIRE (f.verify ());
+  REQUIRE ((standalone.run (f, analyses)).has_value ());
+  REQUIRE ((f.verify ()).has_value ());
   finish (f, analyses);
   prepare (f, analyses);
   auto value = analyses.get<GVNAnalysis> ();
-  REQUIRE (value);
+  REQUIRE ((value).has_value ());
   auto first = &*f.blocks ().begin ()->instructions ().begin ();
-  auto rewriter = SSARewriter::get (f);
-  REQUIRE (rewriter);
-  auto inputs = f.ssa_form ()->inputs (*first);
+  auto rewriter = SSAUpdater::get (f);
+  REQUIRE ((rewriter).has_value ());
+  auto inputs
+    = mirnext::ir::detail::ReferenceAccess::pointers (f.ssa_form ().get ()->inputs (*first));
   std::vector<SSAValue *> definitions;
   for (auto use : inputs) definitions.push_back (const_cast<SSAValue *> (&use->value ()));
-  REQUIRE (rewriter->replace (*first, first->opcode (), first->operands (), definitions));
+  REQUIRE ((rewriter.value ().replace (*first, first->opcode (), first->operands (), definitions))
+             .has_value ());
   before = dump (f);
-  CHECK_FALSE (DeadStoresPass ().run (f, analyses));
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (DeadStoresPass (), f, analyses)).has_value ());
   CHECK (dump (f) == before);
 }
 TEST_CASE ("stack byte overlap remains conservative across signed displacement overflow") {
@@ -192,10 +205,10 @@ TEST_CASE ("stack byte overlap remains conservative across signed displacement o
     FunctionPassManager passes;
     passes.add<CopyPropagationPass> ();
     passes.add<DeadStoresPass> ();
-    REQUIRE (passes.run (f, analyses));
+    REQUIRE ((passes.run (f, analyses)).has_value ());
     CHECK (stores (f) == (distance == 4 ? 1 : 0));
     finish (f, analyses);
-    REQUIRE (serialization::write_binary (*context));
+    REQUIRE ((serialization::write_binary (*context)).has_value ());
   }
 }
 TEST_CASE ("commuting constant AND maintains inverse SSA operand positions") {
@@ -208,22 +221,25 @@ TEST_CASE ("commuting constant AND maintains inverse SSA operand positions") {
     prepare (f, analyses);
     FunctionPassManager passes;
     passes.add<CopyPropagationPass> ();
-    REQUIRE (passes.run (f, analyses));
+    REQUIRE ((passes.run (f, analyses)).has_value ());
     std::size_t ands = 0;
     for (auto &block : f.blocks ())
       for (auto &i : block.instructions ())
         if (i.opcode () == Opcode::And || i.opcode () == Opcode::Ands) {
           ++ands;
-          for (auto use : f.ssa_form ()->inputs (i)) {
+          for (auto use :
+               mirnext::ir::detail::ReferenceAccess::pointers (f.ssa_form ().get ()->inputs (i))) {
             auto site = std::get_if<SSAInstructionUse> (&use->site ());
             REQUIRE (site);
-            CHECK (*i.operands ()[site->operand].get<const Register *> () == &use->value ().reg ());
+            CHECK (*mirnext::ir::detail::operand_access (i.operands ()[site->operand])
+                      .get<const Register *> ()
+                   == &use->value ().reg ());
           }
         }
     CHECK (ands == 2);
-    REQUIRE (f.ssa_form ()->verify ());
+    REQUIRE ((f.ssa_form ().value ().verify ()).has_value ());
     finish (f, analyses);
-    REQUIRE (f.verify ());
+    REQUIRE ((f.verify ()).has_value ());
   }
 }
 TEST_CASE (
@@ -241,17 +257,18 @@ TEST_CASE (
   prepare (f, analyses, false);
   FunctionPassManager passes;
   passes.add<CopyPropagationPass> ();
-  REQUIRE (passes.run (f, analyses));
-  REQUIRE (f.ssa_form ()->verify ());
+  REQUIRE ((passes.run (f, analyses)).has_value ());
+  REQUIRE ((f.ssa_form ().value ().verify ()).has_value ());
   bool binding_defined = false;
   for (auto &b : f.blocks ())
     for (auto &i : b.instructions ())
       if (i.opcode () == Opcode::Add)
-        for (auto v : f.ssa_form ()->definitions (i))
+        for (auto v :
+             mirnext::ir::detail::ReferenceAccess::pointers (f.ssa_form ().get ()->definitions (i)))
           binding_defined |= v->reg ().hardware_binding () == binding;
   CHECK (binding_defined);
   finish (f, analyses);
-  REQUIRE (serialization::write_binary (*context));
+  REQUIRE ((serialization::write_binary (*context)).has_value ());
   auto rejected = parse ("m: module\nentry: func i64\nglobal i64:h:" + std::string (binding)
                          + "\nlocal i64:a\nmov h, 42\nmov a, h\nret a\nendfunc\nendmodule\n");
   auto &g = entry (*rejected);
@@ -260,14 +277,16 @@ TEST_CASE (
   Instruction *copy = nullptr;
   for (auto &b : g.blocks ())
     for (auto &i : b.instructions ())
-      if (i.opcode () == Opcode::Mov && i.operands ()[1].get<const Register *> ()) copy = &i;
+      if (i.opcode () == Opcode::Mov
+          && mirnext::ir::detail::operand_access (i.operands ()[1]).get<const Register *> ())
+        copy = &i;
   REQUIRE (copy);
-  auto rewriter = SSARewriter::get (g);
-  REQUIRE (rewriter);
+  auto rewriter = SSAUpdater::get (g);
+  REQUIRE ((rewriter).has_value ());
   auto before = dump (g);
-  CHECK_FALSE (rewriter->coalesce_copy (*copy));
+  CHECK_FALSE ((rewriter.value ().coalesce_copy (*copy)).has_value ());
   CHECK (dump (g) == before);
-  REQUIRE (g.ssa_form ()->verify ());
+  REQUIRE ((g.ssa_form ().value ().verify ()).has_value ());
 }
 TEST_CASE ("all public opcodes pass copy propagation and dead store elimination") {
   for (auto &descriptor : instruction_descriptors ()) {
@@ -283,11 +302,11 @@ TEST_CASE ("all public opcodes pass copy propagation and dead store elimination"
     passes.add<ConventionalSSAPass> ();
     passes.add<DestroySSAPass> ();
     auto result = passes.run (*context);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    REQUIRE (context->verify ());
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    REQUIRE ((context->verify ()).has_value ());
     auto binary = serialization::write_binary (*context);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
   }
 }

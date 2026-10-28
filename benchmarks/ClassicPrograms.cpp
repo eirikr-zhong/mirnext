@@ -87,10 +87,10 @@ Result<void> measure (const Options &o, unsigned level) {
     text = test::classic_sieve_text (o.flags, o.passes);
   else {
     auto c = test::classic_loop ();
-    if (!c) return c.error ();
-    auto written = serialization::write_text (**c);
-    if (!written) return written.error ();
-    text = std::move (*written);
+    if (!(c).has_value ()) return c.error ();
+    auto written = serialization::write_text ((c).value ());
+    if (!(written).has_value ()) return written.error ();
+    text = std::move ((written).value ());
   }
   std::string modules;
   auto module = o.sieve ? "m_sieve" : "m";
@@ -103,7 +103,7 @@ Result<void> measure (const Options &o, unsigned level) {
     modules += copy;
   }
   auto context = serialization::parse_text (modules);
-  if (!context) return context.error ();
+  if (!(context).has_value ()) return context.error ();
   auto build_ms = elapsed (start);
   ExecutionOptions configuration{.mode
                                  = o.interpreter ? ExecutionMode::Interpreter : ExecutionMode::JIT};
@@ -112,17 +112,17 @@ Result<void> measure (const Options &o, unsigned level) {
       .level = static_cast<transforms::OptimizationLevel> (level)};
   configuration.native_entries = o.interpreter && o.native_entry;
   start = Clock::now ();
-  auto session = ExecutionSession::create (**context, std::move (configuration));
-  if (!session) return session.error ();
+  auto session = ExecutionSession::create ((context).value (), std::move (configuration));
+  if (!(session).has_value ()) return session.error ();
   auto compile_ms = elapsed (start);
-  auto function = session->find_function ("benchmark" + std::to_string (o.functions - 1),
-                                          o.sieve ? "sieve" : "loop");
-  if (!function) return function.error ();
+  auto function = session.value ().find_function ("benchmark" + std::to_string (o.functions - 1),
+                                                  o.sieve ? "sieve" : "loop");
+  if (!(function).has_value ()) return function.error ();
   std::cout << "workload=" << (o.sieve ? "sieve" : "loop")
             << " engine=" << (o.interpreter ? "interpreter" : "jit") << " level=" << level
             << " functions=" << o.functions << " build_ms=" << build_ms
             << " load_compile_ms=" << compile_ms
-            << " code_bytes=" << session->statistics ().code_bytes;
+            << " code_bytes=" << session.value ().statistics ().code_bytes;
   if (o.compile_only) {
     std::cout << " compile_only=1\n";
     return {};
@@ -130,9 +130,9 @@ Result<void> measure (const Options &o, unsigned level) {
   start = Clock::now ();
   std::optional<NativeEntry> entry;
   if (o.native_entry) {
-    auto e = function->native_entry ();
-    if (!e) return e.error ();
-    entry = std::move (*e);
+    auto e = function.value ().native_entry ();
+    if (!(e).has_value ()) return e.error ();
+    entry = std::move ((e).value ());
   }
   auto entry_ms = elapsed (start);
   std::array arguments{o.iterations};
@@ -146,32 +146,32 @@ Result<void> measure (const Options &o, unsigned level) {
           ? reinterpret_cast<std::int64_t (*) ()> (entry->address ()) ()
           : reinterpret_cast<std::int64_t (*) (std::int64_t)> (entry->address ()) (o.iterations);
     auto status = invocation.status ();
-    if (!status) return status.error ();
+    if (!(status).has_value ()) return status.error ();
   } else
-    value = function->call_i64 (o.sieve ? std::span<const std::int64_t>{}
-                                        : std::span<const std::int64_t> (arguments));
+    value = function.value ().call_i64 (o.sieve ? std::span<const std::int64_t>{}
+                                                : std::span<const std::int64_t> (arguments));
   auto execute_ms = elapsed (start);
-  if (!value) return value.error ();
-  if (*value != expected)
+  if (!(value).has_value ()) return value.error ();
+  if ((value).value () != expected)
     return Error{ErrorCode::InvalidOperand,
-                 "wrong classic benchmark result: " + std::to_string (*value) + ", expected "
-                   + std::to_string (expected)};
+                 "wrong classic benchmark result: " + std::to_string ((value).value ())
+                   + ", expected " + std::to_string (expected)};
   std::cout << " entry=" << (o.native_entry ? "native_abi" : "checked_cpp")
             << " iterations=" << (o.sieve ? o.passes : o.iterations)
-            << " flags=" << (o.sieve ? o.flags : 0) << " result=" << *value
+            << " flags=" << (o.sieve ? o.flags : 0) << " result=" << (value).value ()
             << " entry_prepare_ms=" << entry_ms << " first_call_ms=" << execute_ms << '\n';
   return {};
 }
 }  // namespace
 int main (int argc, char **argv) {
   auto o = options (argc, argv);
-  if (!o) {
+  if (!(o).has_value ()) {
     std::cerr << o.error ().message << '\n';
     return 1;
   }
   for (unsigned level = 0; level < 4; ++level) {
-    auto result = measure (*o, level);
-    if (!result) {
+    auto result = measure ((o).value (), level);
+    if (!(result).has_value ()) {
       std::cerr << result.error ().message << '\n';
       return 1;
     }

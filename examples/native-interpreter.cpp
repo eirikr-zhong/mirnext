@@ -6,30 +6,22 @@ using namespace mirnext;
 using namespace mirnext::ir;
 using namespace mirnext::execution;
 Result<ExecutionSession> build () {
-  Context context;
-  auto m = context.create_module ("counter");
-  if (!m) return m.error ();
-  auto total = (*m)->create_variable ("total", Type::i64 (), 0);
-  if (!total) return total.error ();
-  auto host = (*m)->import ("twice", Signature{{Type::i64 ()}, {Type::i64 ()}});
-  if (!host) return host.error ();
-  auto f = (*m)->create_function ("add", {{Type::i64 ()}, {Type::i64 ()}});
-  if (!f) return f.error ();
-  auto block = (*f)->create_block ();
-  if (!block) return block.error ();
-  IRBuilder body (**block);
-  auto doubled = body.call (**host, {Operand (*(*f)->arguments ()[0])});
-  if (!doubled) return doubled.error ();
-  auto value = doubled->value ();
-  if (!value) return value.error ();
-  auto previous = body.load (**total);
-  if (!previous) return previous.error ();
-  auto next = body.expression (**previous) + body.expression (**value);
-  auto stored = body.store (**total, next);
-  if (!stored) return stored.error ();
-  auto returned = body.ret (next);
-  if (!returned) return returned.error ();
-  return ExecutionSession::create (context,
+  Program program;
+  MIRBuilder builder (program);
+  auto *m = builder.create_module ("counter");
+  auto *total = builder.create_variable (m, "total", std::int64_t{0});
+  auto *host = builder.create_import<std::int64_t (std::int64_t)> (m, "twice");
+  builder.create_function<std::int64_t (std::int64_t)> (m, "add");
+  auto previous = builder.create_load (total);
+  auto doubled = builder.create_call (host, {builder.argument (0)});
+  auto next = builder.create_add (previous, doubled.value ());
+  builder.create_store (total, next);
+  builder.create_return (next);
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    return built.error ();
+  }
+  return ExecutionSession::create (std::move (program),
                                    {.mode = ExecutionMode::Interpreter,
                                     .link = {.resolve = [] (const ImportRequest &request)
                                                -> Result<ExternalSymbol> {
@@ -40,9 +32,10 @@ Result<ExecutionSession> build () {
                                                           {}};
                                       host.interpret = [] (std::span<const ExecutionArgument> args)
                                         -> Result<std::vector<ScalarValue>> {
-                                        auto value = args[0].scalar ()->as_i64 ();
-                                        if (!value) return value.error ();
-                                        return std::vector<ScalarValue>{ScalarValue (*value * 2)};
+                                        auto value = args[0].scalar ().get ()->as_i64 ();
+                                        if (!value.has_value ()) return value.error ();
+                                        return std::vector<ScalarValue>{
+                                          ScalarValue (value.value () * 2)};
                                       };
                                       return host;
                                     }},
@@ -51,21 +44,20 @@ Result<ExecutionSession> build () {
 }
 int main () {
   auto program = build ();
-  if (!program) {
+  if (!program.has_value ()) {
     std::cerr << program.error ().message << '\n';
     return 1;
   }
   // Source IR has been destroyed; the program owns its IR snapshot and globals.
-  auto f = program->find_function ("counter", "add");
-  if (!f) return 1;
+  auto f = program.value ().find_function ("counter", "add");
+  if (!f.has_value ()) return 1;
   for (std::int64_t increment : {10, 11}) {
-    std::array args{increment};
-    auto value = program->call_i64 (*f, args);
-    if (!value) {
+    auto value = f.value ().call_i64 ({increment});
+    if (!value.has_value ()) {
       std::cerr << value.error ().message << '\n';
       return 1;
     }
-    std::cout << "total = " << *value << '\n';
-    if (*value != (increment == 10 ? 20 : 42)) return 1;
+    std::cout << "total = " << value.value () << '\n';
+    if (value.value () != (increment == 10 ? 20 : 42)) return 1;
   }
 }

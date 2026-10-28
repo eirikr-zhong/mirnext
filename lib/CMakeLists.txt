@@ -2,8 +2,9 @@ add_library(mirnext
   IR/Expressions.cpp
   IR/Variables.cpp
   IR/BuilderCalls.cpp
+  IR/Builder.cpp
   IR/IR.cpp
-  IR/IRBuilder.cpp
+  IR/InstructionBuilder.cpp
   IR/SSA.cpp
   IR/Clone.cpp
   IR/Dump.cpp
@@ -35,6 +36,7 @@ add_library(mirnext
   Target/TargetMachine.cpp
   Target/X86ABI.cpp
 
+  CodeGen/Editor.cpp
   CodeGen/MachineIR.cpp
   CodeGen/Prepare.cpp
   CodeGen/GraphAnalysis.cpp
@@ -96,6 +98,7 @@ add_library(mirnext
 )
 add_library(MIRNext::MIRNext ALIAS mirnext)
 set_target_properties(mirnext PROPERTIES EXPORT_NAME MIRNext POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mirnext PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_include_directories(mirnext PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_features(mirnext PUBLIC cxx_std_20)

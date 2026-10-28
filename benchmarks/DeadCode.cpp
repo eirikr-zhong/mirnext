@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Isolated SSA DCE timings and fingerprints. */
+#include "mirnext/Transforms/Testing.hpp"
 #include "mirnext/Transforms/DeadCode.hpp"
 #include "mirnext/Transforms/PrepareCFG.hpp"
 #include "mirnext/Transforms/SSA.hpp"
@@ -42,30 +43,31 @@ int main () {
       std::uint64_t fingerprint = 0;
       for (unsigned rep = 0; rep < repeats; ++rep) {
         auto parsed = serialization::parse_text (text);
-        if (!parsed) return 1;
-        auto &function = *(*parsed)->modules ().begin ()->functions ().begin ();
+        if (!(parsed).has_value ()) return 1;
+        auto &function = *parsed.value ().modules ().begin ()->functions ().begin ();
         FunctionAnalysisManager analyses (function);
         FunctionPassManager prepare;
         prepare.add<PrepareCFGPass> ();
         prepare.add<BuildSSAPass> ();
         auto ready = prepare.run (function, analyses);
-        if (!ready) {
+        if (!(ready).has_value ()) {
           std::cerr << ready.error ().message << '\n';
           return 1;
         }
         measuring = true;
         allocations = 0;
         auto start = std::chrono::steady_clock::now ();
-        auto result = SSADeadCodePass ().run (function, analyses);
+        auto result
+          = ::mirnext::transforms::detail::run_pass (SSADeadCodePass (), function, analyses);
         auto end = std::chrono::steady_clock::now ();
         measuring = false;
-        if (!result || !function.verify ()) return 1;
+        if (!(result).has_value () || !(function.verify ()).has_value ()) return 1;
         std::uint64_t hash = 14695981039346656037ULL;
         for (unsigned char c : dump (function)) hash = (hash ^ c) * 1099511628211ULL;
         for (unsigned char c : dump_ssa (function)) hash = (hash ^ c) * 1099511628211ULL;
-        if (rep && (hash != fingerprint || result->transformations != changes)) return 2;
+        if (rep && (hash != fingerprint || result.value ().transformations != changes)) return 2;
         fingerprint = hash;
-        changes = result->transformations;
+        changes = result.value ().transformations;
         times.push_back (std::chrono::duration<double, std::milli> (end - start).count ());
         counts.push_back (allocations);
       }

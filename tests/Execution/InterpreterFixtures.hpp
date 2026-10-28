@@ -1,15 +1,17 @@
 /* Licensed under the MIT License. Executable public scalar-opcode fixtures. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #pragma once
 #include <doctest/doctest.h>
 #include "mirnext/IR/IR.hpp"
 #include <bit>
 #include <limits>
 namespace mirnext::test {
-inline std::unique_ptr<ir::Context> interpreter_scalars () {
+inline std::unique_ptr<ir::Program> interpreter_scalars () {
   using namespace ir;
-  auto context = std::make_unique<Context> ();
-  auto module = context->create_module ("scalars");
-  REQUIRE (module);
+  auto context = std::make_unique<Program> ();
+  auto module = mirnext::ir::detail::access (*(context)).create_module ("scalars");
+  REQUIRE ((module).has_value ());
   auto type = [] (char role) {
     return Type (role == 'f' || role == 'F'   ? Type::Kind::F32
                  : role == 'd' || role == 'D' ? Type::Kind::F64
@@ -27,29 +29,30 @@ inline std::unique_ptr<ir::Context> interpreter_scalars () {
                    && d.opcode != Opcode::VaArg;
     if (!numeric && !compare) continue;
     for (unsigned variant = 0; variant < 3; ++variant) {
-      auto f = (*module)->create_function ("scalar_" + std::string (d.name) + "_"
-                                             + std::to_string (variant),
-                                           {{compare ? Type::i64 () : type (d.roles[0])}, {}});
-      REQUIRE (f);
-      auto b = (*f)->create_block ();
-      REQUIRE (b);
-      IRBuilder builder (**b);
+      auto f
+        = mirnext::ir::detail::access (((module)).value ())
+            .create_function ("scalar_" + std::string (d.name) + "_" + std::to_string (variant),
+                              {{compare ? Type::i64 () : type (d.roles[0])}, {}});
+      REQUIRE ((f).has_value ());
+      auto b = mirnext::ir::detail::access (((f)).value ()).create_block ();
+      REQUIRE ((b).has_value ());
+      InstructionBuilder builder ((b).value ());
       std::vector<Operand> operands;
       BasicBlock *yes = nullptr, *fallthrough = nullptr;
       if (compare) {
-        auto no = (*f)->create_block ();
-        REQUIRE (no);
-        fallthrough = *no;
-        auto block = (*f)->create_block ();
-        REQUIRE (block);
-        yes = *block;
-        auto label = (*f)->create_label (*yes);
-        REQUIRE (label);
-        operands.emplace_back (**label);
+        auto no = mirnext::ir::detail::access (((f)).value ()).create_block ();
+        REQUIRE ((no).has_value ());
+        fallthrough = &(no).value ();
+        auto block = mirnext::ir::detail::access (((f)).value ()).create_block ();
+        REQUIRE ((block).has_value ());
+        yes = &(block).value ();
+        auto label = mirnext::ir::detail::access (((f)).value ()).create_label (*yes);
+        REQUIRE ((label).has_value ());
+        operands.emplace_back ((label).value ());
       } else {
-        auto r = (*f)->create_register (type (d.roles[0]));
-        REQUIRE (r);
-        operands.emplace_back (**r);
+        auto r = mirnext::ir::detail::access (((f)).value ()).create_register (type (d.roles[0]));
+        REQUIRE ((r).has_value ());
+        operands.emplace_back ((r).value ());
       }
       for (std::size_t n = 1; n < d.roles.size (); ++n) {
         auto t = type (d.roles[n]);
@@ -68,29 +71,29 @@ inline std::unique_ptr<ir::Context> interpreter_scalars () {
           operands.emplace_back (std::int64_t (n == 1 ? first : 2));
         }
       }
-      REQUIRE (builder.emit (d.opcode, operands));
+      REQUIRE ((builder.emit (d.opcode, operands)).has_value ());
       if (compare) {
-        IRBuilder no (*fallthrough);
-        REQUIRE (no.ret (0));
-        IRBuilder target (*yes);
-        REQUIRE (target.ret (1));
+        InstructionBuilder no (*fallthrough);
+        REQUIRE ((no.ret (0)).has_value ());
+        InstructionBuilder target (*yes);
+        REQUIRE ((target.ret (1)).has_value ());
       } else {
         // MIR leaves the high half of a 32-bit result undefined. Observe it only
         // after an explicit extension, including when comparing the two JITs.
         if (d.name.ends_with ('s') && type (d.roles[0]).is_integer ())
-          REQUIRE (builder.emit (Opcode::Ext32, {operands[0], operands[0]}));
-        REQUIRE (builder.ret (operands[0]));
+          REQUIRE ((builder.emit (Opcode::Ext32, {operands[0], operands[0]})).has_value ());
+        REQUIRE ((builder.ret (operands[0])).has_value ());
       }
     }
   }
-  REQUIRE (context->verify ());
+  REQUIRE ((context->verify ()).has_value ());
   return context;
 }
-inline std::unique_ptr<ir::Context> interpreter_ieee () {
+inline std::unique_ptr<ir::Program> interpreter_ieee () {
   using namespace ir;
-  auto c = std::make_unique<Context> ();
-  auto m = c->create_module ("scalars");
-  REQUIRE (m);
+  auto c = std::make_unique<Program> ();
+  auto m = mirnext::ir::detail::access (*(c)).create_module ("scalars");
+  REQUIRE ((m).has_value ());
   for (bool wide : {false, true})
     for (unsigned variant = 0; variant < 3; ++variant) {
       for (auto &d : instruction_descriptors ()) {
@@ -104,27 +107,30 @@ inline std::unique_ptr<ir::Context> interpreter_ieee () {
         bool branch = d.flow == ControlFlow::Branch;
         auto type = wide ? Type (Type::Kind::F64) : Type (Type::Kind::F32);
         auto f
-          = (*m)->create_function ("ieee_" + std::string (d.name) + "_" + std::to_string (variant),
-                                   {{comparison ? Type::i64 () : type}, {}});
-        REQUIRE (f);
-        auto b = (*f)->create_block ();
-        REQUIRE (b);
-        IRBuilder builder (**b);
+          = mirnext::ir::detail::access (((m)).value ())
+              .create_function ("ieee_" + std::string (d.name) + "_" + std::to_string (variant),
+                                {{comparison ? Type::i64 () : type}, {}});
+        REQUIRE ((f).has_value ());
+        auto b = mirnext::ir::detail::access (((f)).value ()).create_block ();
+        REQUIRE ((b).has_value ());
+        InstructionBuilder builder ((b).value ());
         std::vector<Operand> operands;
         BasicBlock *yes = nullptr, *no = nullptr;
         if (branch) {
-          auto n = (*f)->create_block (), y = (*f)->create_block ();
-          REQUIRE (n);
-          REQUIRE (y);
-          no = *n;
-          yes = *y;
-          auto label = (*f)->create_label (*yes);
-          REQUIRE (label);
-          operands.emplace_back (**label);
+          auto n = mirnext::ir::detail::access (((f)).value ()).create_block (),
+               y = mirnext::ir::detail::access (((f)).value ()).create_block ();
+          REQUIRE ((n).has_value ());
+          REQUIRE ((y).has_value ());
+          no = &(n).value ();
+          yes = &(y).value ();
+          auto label = mirnext::ir::detail::access (((f)).value ()).create_label (*yes);
+          REQUIRE ((label).has_value ());
+          operands.emplace_back ((label).value ());
         } else {
-          auto r = (*f)->create_register (comparison ? Type::i64 () : type);
-          REQUIRE (r);
-          operands.emplace_back (**r);
+          auto r = mirnext::ir::detail::access (((f)).value ())
+                     .create_register (comparison ? Type::i64 () : type);
+          REQUIRE ((r).has_value ());
+          operands.emplace_back ((r).value ());
         }
         auto dvalue = variant == 0   ? std::bit_cast<double> (UINT64_C (0x7ff8000000000042))
                       : variant == 1 ? -0.0
@@ -134,22 +140,22 @@ inline std::unique_ptr<ir::Context> interpreter_ieee () {
                                      : std::numeric_limits<float>::infinity ();
         operands.push_back (wide ? Operand (dvalue) : Operand (fvalue));
         if (comparison) operands.push_back (wide ? Operand (0.0) : Operand (0.0f));
-        REQUIRE (builder.emit (d.opcode, operands));
+        REQUIRE ((builder.emit (d.opcode, operands)).has_value ());
         if (branch) {
-          REQUIRE (IRBuilder (*no).ret (0));
-          REQUIRE (IRBuilder (*yes).ret (1));
+          REQUIRE ((InstructionBuilder (*no).ret (0)).has_value ());
+          REQUIRE ((InstructionBuilder (*yes).ret (1)).has_value ());
         } else
-          REQUIRE (builder.ret (operands[0]));
+          REQUIRE ((builder.ret (operands[0])).has_value ());
       }
     }
-  REQUIRE (c->verify ());
+  REQUIRE ((c->verify ()).has_value ());
   return c;
 }
-inline std::unique_ptr<ir::Context> interpreter_overflow () {
+inline std::unique_ptr<ir::Program> interpreter_overflow () {
   using namespace ir;
-  auto c = std::make_unique<Context> ();
-  auto m = c->create_module ("overflow");
-  REQUIRE (m);
+  auto c = std::make_unique<Program> ();
+  auto m = mirnext::ir::detail::access (*(c)).create_module ("overflow");
+  REQUIRE ((m).has_value ());
   const std::pair<std::int64_t, std::int64_t> inputs[]
     = {{0, 0},         {INT64_MAX, 1},  {INT64_MIN, -1}, {-1, 2},
        {INT32_MAX, 1}, {INT32_MIN, -1}, {UINT32_MAX, 2}};
@@ -164,27 +170,31 @@ inline std::unique_ptr<ir::Context> interpreter_overflow () {
             && (branch == Opcode::Bo || branch == Opcode::Bno))
           continue;
         auto f
-          = (*m)->create_function ("flags_" + std::string (instruction_descriptor (op)->name) + "_"
-                                     + std::string (instruction_descriptor (branch)->name) + "_"
-                                     + std::to_string (n),
-                                   {{Type::i64 ()}, {}});
-        REQUIRE (f);
-        auto b = (*f)->create_block (), no = (*f)->create_block (), yes = (*f)->create_block ();
-        REQUIRE (b);
-        REQUIRE (no);
-        REQUIRE (yes);
-        auto label = (*f)->create_label (**yes);
-        auto r = (*f)->create_register (Type::i64 ());
-        REQUIRE (label);
-        REQUIRE (r);
-        IRBuilder builder (**b);
-        REQUIRE (builder.emit (op, {Operand (**r), Operand (inputs[n].first),
-                                    Operand (inputs[n].second)}));
-        REQUIRE (builder.emit (branch, {Operand (**label)}));
-        REQUIRE (IRBuilder (**no).ret (0));
-        REQUIRE (IRBuilder (**yes).ret (1));
+          = mirnext::ir::detail::access (((m)).value ())
+              .create_function ("flags_" + std::string (instruction_descriptor (op).get ()->name)
+                                  + "_" + std::string (instruction_descriptor (branch).get ()->name)
+                                  + "_" + std::to_string (n),
+                                {{Type::i64 ()}, {}});
+        REQUIRE ((f).has_value ());
+        auto b = mirnext::ir::detail::access (((f)).value ()).create_block (),
+             no = mirnext::ir::detail::access (((f)).value ()).create_block (),
+             yes = mirnext::ir::detail::access (((f)).value ()).create_block ();
+        REQUIRE ((b).has_value ());
+        REQUIRE ((no).has_value ());
+        REQUIRE ((yes).has_value ());
+        auto label = mirnext::ir::detail::access (((f)).value ()).create_label ((yes).value ());
+        auto r = mirnext::ir::detail::access (((f)).value ()).create_register (Type::i64 ());
+        REQUIRE ((label).has_value ());
+        REQUIRE ((r).has_value ());
+        InstructionBuilder builder ((b).value ());
+        REQUIRE ((builder.emit (op, {Operand ((r).value ()), Operand (inputs[n].first),
+                                     Operand (inputs[n].second)}))
+                   .has_value ());
+        REQUIRE ((builder.emit (branch, {Operand ((label).value ())})).has_value ());
+        REQUIRE ((InstructionBuilder ((no).value ()).ret (0)).has_value ());
+        REQUIRE ((InstructionBuilder ((yes).value ()).ret (1)).has_value ());
       }
-  REQUIRE (c->verify ());
+  REQUIRE ((c->verify ()).has_value ());
   return c;
 }
 }  // namespace mirnext::test

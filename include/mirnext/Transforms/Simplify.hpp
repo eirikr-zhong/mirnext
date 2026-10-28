@@ -6,6 +6,6 @@ namespace mirnext::transforms {
 class SimplifyPass final : public FunctionPass {
  public:
   std::string_view name () const noexcept override { return "simplify"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 };
 }  // namespace mirnext::transforms

@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Derived from MIR memory liveness and DSE. */
+#include "mirnext/Analysis/Access.hpp"
+#include "mirnext/Transforms/AnalysisAccess.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #include "mirnext/Transforms/DeadStores.hpp"
 #include "mirnext/Transforms/GVN.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
@@ -9,8 +13,12 @@ using namespace ir;
 bool move (Opcode op) {
   return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov;
 }
-bool store (const Instruction &i) { return move (i.opcode ()) && i.operands ()[0].get<Memory> (); }
-bool load (const Instruction &i) { return move (i.opcode ()) && i.operands ()[1].get<Memory> (); }
+bool store (const Instruction &i) {
+  return move (i.opcode ()) && ir::detail::operand_access (i.operands ()[0]).get<Memory> ();
+}
+bool load (const Instruction &i) {
+  return move (i.opcode ()) && ir::detail::operand_access (i.operands ()[1]).get<Memory> ();
+}
 std::size_t size (Type type) {
   switch (type.kind ()) {
   case Type::Kind::I8:
@@ -28,7 +36,7 @@ std::size_t size (Type type) {
 struct State {
   Function &function;
   SSAForm &form;
-  SSARewriter rewriter;
+  SSAUpdater rewriter;
   const analysis::FunctionGraph &graph;
   GVNResult info;
   std::vector<SparseBitSet> in, out, generated, killed;
@@ -52,25 +60,29 @@ struct State {
     }
   }
   unsigned flags (const SSAValue &value) {
-    auto found = info.numbers.find (&value);
-    return found == info.numbers.end () ? 0 : found->second.alloca_flags;
+    auto found = detail::AnalysisAccess::numbers (info).find (&value);
+    return found == detail::AnalysisAccess::numbers (info).end () ? 0 : found->second.alloca_flags;
   }
   unsigned address_flags (const Instruction &i) {
-    for (auto use : form.inputs (i))
+    for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (i)))
       if (auto site = std::get_if<SSAInstructionUse> (&use->site ());
           site && site->operand == 1 && site->part == SSAOperandPart::MemoryBase)
         return flags (use->value ());
     return 0;
   }
   std::size_t location (const Instruction &i) {
-    auto found = info.locations.find (&i);
-    return found == info.locations.end () ? 0 : found->second;
+    auto found = detail::AnalysisAccess::locations (info).find (&i);
+    return found == detail::AnalysisAccess::locations (info).end () ? 0 : found->second;
   }
   void call_live (SparseBitSet &live, const Instruction &i) {
     bool escape = info.full_escape;
-    auto first
-      = i.operands ()[0].get<SymbolReference> ()->symbol->signature ()->results.size () + 1;
-    for (auto use : form.inputs (i))
+    auto first = ir::detail::NodeAccess::symbol (
+                   *(ir::detail::operand_access (i.operands ()[0]).get<SymbolReference> ()))
+                   ->signature ()
+                   .get ()
+                   ->results.size ()
+                 + 1;
+    for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (i)))
       if (auto site = std::get_if<SSAInstructionUse> (&use->site ());
           site && site->operand >= first && flags (use->value ()))
         escape = true;
@@ -79,7 +91,7 @@ struct State {
   bool intersects (std::size_t a, Type type, std::size_t b) {
     auto &x = info.memory[a];
     auto &y = info.memory[b];
-    if (!x.base || !y.base || x.base != y.base) return true;
+    if (!(x.base).has_value () || !(y.base).has_value () || x.base != y.base) return true;
     // Unsigned distances preserve the intervals without signed disp+size overflow.
     return x.displacement - y.displacement < size (y.type)
            || y.displacement - x.displacement < size (type);
@@ -90,7 +102,7 @@ struct State {
       live.union_with (all);
       return;
     }
-    auto &memory = *i.operands ()[1].get<Memory> ();
+    auto &memory = *ir::detail::operand_access (i.operands ()[1]).get<Memory> ();
     bool must = address_flags (i) & 2;
     // Memory classes and stack provenance stay fixed throughout DSE. Share the
     // alias/intersection result between gen/kill setup and the deletion walk.
@@ -113,10 +125,10 @@ struct State {
   }
   Result<void> run () {
     for (auto &block : function.blocks ()) {
-      auto b = graph.indices.at (&block);
+      auto b = analysis::detail::NodeAccess::indices (graph).at (&block);
       for (auto it = block.instructions ().end (); it != block.instructions ().begin ();) {
         auto &i = *--it;
-        if (instruction_descriptor (i.opcode ())->count == OperandCount::Call)
+        if (instruction_descriptor (i.opcode ()).get ()->count == OperandCount::Call)
           call_live (generated[b], i);
         if (store (i)) {
           if (auto p = location (i)) {
@@ -148,12 +160,13 @@ struct State {
       }
     } while (changed);
     for (auto &block : function.blocks ()) {
-      auto live = out[graph.indices.at (&block)];
+      auto live = out[analysis::detail::NodeAccess::indices (graph).at (&block)];
       auto it = block.instructions ().end ();
       while (it != block.instructions ().begin ()) {
         auto &i = *--it;
         bool remove = false;
-        if (instruction_descriptor (i.opcode ())->count == OperandCount::Call) call_live (live, i);
+        if (instruction_descriptor (i.opcode ()).get ()->count == OperandCount::Call)
+          call_live (live, i);
         if (store (i)) {
           if (auto p = location (i)) {
             remove = !live.contains (p);
@@ -164,9 +177,9 @@ struct State {
         if (remove) {
           auto following = it;
           ++following;
-          info.locations.erase (&i);
+          detail::AnalysisAccess::locations (info).erase (&i);
           auto checked = rewriter.erase_instruction (i);
-          if (!checked) return checked;
+          if (!(checked).has_value ()) return checked;
           ++changes;
           it = following;
         }
@@ -176,28 +189,34 @@ struct State {
   }
 };
 }  // namespace
-Result<PassResult> DeadStoresPass::run (ir::Function &function,
+Result<PassResult> DeadStoresPass::run (ir::MIRBuilder &edit,
                                         analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   auto invalid = [&] (std::string reason) {
     return Error{ErrorCode::InvalidArgument,
                  std::string (function.symbol ().name ()) + ": dead-stores: " + reason};
   };
   if (&analyses.function () != &function) return invalid ("analysis owner mismatch");
   auto checked = function.verify ();
-  if (!checked) return checked.error ();
-  auto form = function.ssa_form ();
+  if (!(checked).has_value ()) return checked.error ();
+  auto form = function.ssa_form ().get ();
   if (!form || !form->renamed () || form->conventional ())
     return invalid ("requires renamed nonconventional SSA");
   auto graph = analyses.get<analysis::FunctionGraphAnalysis> ();
-  if (!graph) return graph.error ();
+  if (!(graph).has_value ()) return graph.error ();
   auto info = analyses.take_cached<GVNAnalysis> ();
-  if (!info) return info.error ();
-  if (!*info) return invalid ("requires current GVN memory metadata");
-  State state (function, *const_cast<ir::SSAForm *> (form), **graph, std::move (**info));
+  if (!(info).has_value ()) return info.error ();
+  if (!(info).value ()) return invalid ("requires current GVN memory metadata");
+  State state (function, *const_cast<ir::SSAForm *> (form), (graph).value (),
+               std::move (*(info).value ()));
   checked = state.run ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   checked = analyses.set<GVNAnalysis> (std::move (state.info));
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<GVNAnalysis> ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();

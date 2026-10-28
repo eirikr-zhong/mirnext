@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. MIR corpus execution tests. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/Execution/Session.hpp"
@@ -65,17 +67,17 @@ Result<ExternalSymbol> resolve (Capture &capture, const ImportRequest &request) 
                           false,
                           [&capture] (std::span<const ExecutionArgument> args)
                             -> Result<std::vector<ScalarValue>> {
-                            if (args.empty () || !args[0].scalar ())
+                            if (args.empty () || !args[0].scalar ().get ())
                               return Error{ErrorCode::InvalidArgument,
                                            "missing corpus printf format"};
-                            auto address = args[0].scalar ()->as_u64 ();
-                            if (!address) return address.error ();
-                            Event event{reinterpret_cast<const char *> (*address), {}};
+                            auto address = args[0].scalar ().get ()->as_u64 ();
+                            if (!(address).has_value ()) return address.error ();
+                            Event event{reinterpret_cast<const char *> ((address).value ()), {}};
                             for (auto &arg : args.subspan (1)) {
-                              if (!arg.scalar ())
+                              if (!arg.scalar ().get ())
                                 return Error{ErrorCode::InvalidArgument,
                                              "non-scalar corpus printf argument"};
-                              event.values.push_back (*arg.scalar ());
+                              event.values.push_back (*arg.scalar ().get ());
                             }
                             capture.events.push_back (std::move (event));
                             return std::vector<ScalarValue>{};
@@ -87,11 +89,11 @@ Result<ExternalSymbol> resolve (Capture &capture, const ImportRequest &request) 
                           false,
                           [&capture] (std::span<const ExecutionArgument> args)
                             -> Result<std::vector<ScalarValue>> {
-                            if (args.size () != 1 || !args[0].scalar ())
+                            if (args.size () != 1 || !args[0].scalar ().get ())
                               return Error{ErrorCode::InvalidArgument, "missing corpus exit code"};
-                            auto value = args[0].scalar ()->as_i64 ();
-                            if (!value) return value.error ();
-                            capture.exits.push_back (*value);
+                            auto value = args[0].scalar ().get ()->as_i64 ();
+                            if (!(value).has_value ()) return value.error ();
+                            capture.exits.push_back ((value).value ());
                             return std::vector<ScalarValue>{};
                           }};
   if (request.name == "abort")
@@ -107,16 +109,16 @@ Result<ExternalSymbol> resolve (Capture &capture, const ImportRequest &request) 
   return Error{ErrorCode::UnknownName,
                "unexpected original corpus import: " + std::string (request.name)};
 }
-std::unique_ptr<Context> original (unsigned number) {
+std::unique_ptr<Program> original (unsigned number) {
   auto path = std::string (MIRNEXT_TEST_SOURCE_DIR) + "/tests/Fixtures/Original/test"
               + std::to_string (number) + ".mir";
   std::ifstream file (path);
   REQUIRE (file);
   std::string text ((std::istreambuf_iterator<char> (file)), {});
   auto parsed = serialization::parse_text (text, {.source_name = path});
-  INFO ((parsed ? "" : parsed.error ().message));
-  REQUIRE (parsed);
-  return std::move (*parsed);
+  INFO (((parsed).has_value () ? "" : parsed.error ().message));
+  REQUIRE ((parsed).has_value ());
+  return std::make_unique<Program> (std::move ((parsed).value ()));
 }
 ExecutionOptions options (Capture &capture, unsigned engine, unsigned level,
                           std::string_view entry) {
@@ -147,8 +149,8 @@ void same (const ScalarValue &value, const ScalarValue &expected) {
     if ((a == Type::Kind::F64 && b == Type::Kind::LongDouble)
         || (a == Type::Kind::LongDouble && b == Type::Kind::F64)) {
       auto converted = ScalarValue::from_storage (expected.type (), value.storage ());
-      REQUIRE (converted);
-      normalized = *converted;
+      REQUIRE ((converted).has_value ());
+      normalized = (converted).value ();
     }
   }
   const auto &actual = normalized ? *normalized : value;
@@ -156,24 +158,26 @@ void same (const ScalarValue &value, const ScalarValue &expected) {
   CAPTURE (static_cast<unsigned> (expected.type ().kind ()));
   if (expected.type ().is_integer ()) {
     auto a = actual.as_u64 (), b = expected.as_u64 ();
-    REQUIRE (a);
-    REQUIRE (b);
-    CHECK (*a == *b);
+    REQUIRE ((a).has_value ());
+    REQUIRE ((b).has_value ());
+    CHECK ((a).value () == (b).value ());
   } else if (expected.type ().kind () == Type::Kind::F32) {
     auto a = actual.as_float (), b = expected.as_float ();
-    REQUIRE (a);
-    REQUIRE (b);
-    CHECK (std::bit_cast<std::uint32_t> (*a) == std::bit_cast<std::uint32_t> (*b));
+    REQUIRE ((a).has_value ());
+    REQUIRE ((b).has_value ());
+    CHECK (std::bit_cast<std::uint32_t> ((a).value ())
+           == std::bit_cast<std::uint32_t> ((b).value ()));
   } else if (expected.type ().kind () == Type::Kind::F64) {
     auto a = actual.as_double (), b = expected.as_double ();
-    REQUIRE (a);
-    REQUIRE (b);
-    CHECK (std::bit_cast<std::uint64_t> (*a) == std::bit_cast<std::uint64_t> (*b));
+    REQUIRE ((a).has_value ());
+    REQUIRE ((b).has_value ());
+    CHECK (std::bit_cast<std::uint64_t> ((a).value ())
+           == std::bit_cast<std::uint64_t> ((b).value ()));
   } else {
     auto a = actual.as_long_double (), b = expected.as_long_double ();
-    REQUIRE (a);
-    REQUIRE (b);
-    CHECK (*a == *b);
+    REQUIRE ((a).has_value ());
+    REQUIRE ((b).has_value ());
+    CHECK ((a).value () == (b).value ());
   }
 }
 void event (const Capture &capture, std::size_t index, std::string_view format,
@@ -207,31 +211,36 @@ TEST_CASE ("original MIR corpus executes with native C++ services and checked ex
         Capture capture;
         Activate active (capture);
         auto input = clone (*source);
-        REQUIRE (input);
+        REQUIRE ((input).has_value ());
         if (number == 10) {
           // The original million-iteration case remains compiled/executed by
           // eager JIT. Other engines retain the same IR/stack edges with 32
           // iterations, rather than turning a correctness suite into a timer.
           if (engine != 2)
-            for (auto &f : (*input)->modules ().begin ()->functions ())
+            for (auto &f : input.value ().modules ().begin ()->functions ())
               for (auto &b : f.blocks ())
                 for (auto &i : b.instructions ())
-                  if (i.opcode () == Opcode::Blt && i.operands ().back ().get<std::int64_t> ()
-                      && *i.operands ().back ().get<std::int64_t> () == 1000000)
-                    REQUIRE (IRRewriter (f).replace_operand (i, 2, Operand (32)));
+                  if (i.opcode () == Opcode::Blt
+                      && mirnext::ir::detail::operand_access (i.operands ().back ())
+                           .get<std::int64_t> ()
+                      && *mirnext::ir::detail::operand_access (i.operands ().back ())
+                             .get<std::int64_t> ()
+                           == 1000000)
+                    REQUIRE (
+                      (InstructionRewriter (f).replace_operand (i, 2, Operand (32))).has_value ());
         }
         auto configuration = options (capture, engine, level, entry);
-        if (test::check_native_result_limit (**input, configuration)) continue;
-        auto session = ExecutionSession::create (**input, std::move (configuration));
-        INFO ((session ? "" : session.error ().message));
-        REQUIRE (session);
-        auto function = session->find_function (module.name (), entry);
-        REQUIRE (function);
+        if (test::check_native_result_limit ((input).value (), configuration)) continue;
+        auto session = ExecutionSession::create ((input).value (), std::move (configuration));
+        INFO (((session).has_value () ? "" : session.error ().message));
+        REQUIRE ((session).has_value ());
+        auto function = session.value ().find_function (module.name (), entry);
+        REQUIRE ((function).has_value ());
         auto call = [&] (std::span<const ExecutionArgument> args = {}) {
-          auto result = function->call (args);
-          INFO ((result ? "" : result.error ().message));
-          REQUIRE (result);
-          return std::move (*result);
+          auto result = function.value ().call (args);
+          INFO (((result).has_value () ? "" : result.error ().message));
+          REQUIRE ((result).has_value ());
+          return std::move ((result).value ());
         };
         if (number == 1)
           for (std::int64_t value : {-17, 0, 1, 42}) {
@@ -246,8 +255,8 @@ TEST_CASE ("original MIR corpus executes with native C++ services and checked ex
             auto result = call (args);
             REQUIRE (result.size () == 1);
             auto pointer = result[0].as_u64 ();
-            REQUIRE (pointer);
-            CHECK (*pointer != 0);
+            REQUIRE ((pointer).has_value ());
+            CHECK ((pointer).value () != 0);
           }
         else if (number == 6 || number == 7)
           for (auto value :
@@ -335,21 +344,21 @@ TEST_CASE (
     Capture capture;
     auto configuration = options (capture, 2, level, "ccp2");
     auto compiled = ExecutionSession::create (*source, configuration);
-    INFO ((compiled ? "" : compiled.error ().message));
-    REQUIRE (compiled);
-    auto function = compiled->find_function ("m3", "ccp2");
-    REQUIRE (function);
-    REQUIRE (function->artifact ());
-    CHECK (function->artifact ()->verify ());
+    INFO (((compiled).has_value () ? "" : compiled.error ().message));
+    REQUIRE ((compiled).has_value ());
+    auto function = compiled.value ().find_function ("m3", "ccp2");
+    REQUIRE ((function).has_value ());
+    REQUIRE ((function.value ().artifact ()).has_value ());
+    CHECK ((function.value ().artifact ().value ().verify ()).has_value ());
     for (unsigned engine : {0u, 1u}) {
       configuration = options (capture, engine, level, "ccp2");
       configuration.instruction_limit = 64;
       auto interpreted = ExecutionSession::create (*source, std::move (configuration));
-      REQUIRE (interpreted);
-      auto f = interpreted->find_function ("m3", "ccp2");
-      REQUIRE (f);
-      auto result = f->call ();
-      REQUIRE_FALSE (result);
+      REQUIRE ((interpreted).has_value ());
+      auto f = interpreted.value ().find_function ("m3", "ccp2");
+      REQUIRE ((f).has_value ());
+      auto result = f.value ().call ();
+      REQUIRE_FALSE ((result).has_value ());
       CHECK (result.error ().message.find ("instruction limit") != std::string::npos);
     }
   }

@@ -7,7 +7,7 @@ class PrepareCFGPass final : public FunctionPass {
   explicit PrepareCFGPass (bool remove_unreachable = true)
     : remove_unreachable_ (remove_unreachable) {}
   std::string_view name () const noexcept override { return "prepare-cfg"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 
  private:
   bool remove_unreachable_;

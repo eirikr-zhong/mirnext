@@ -1,57 +1,42 @@
-/* Licensed under the MIT License. Native block-argument DSL, independent of the old runtime. */
-#include <mirnext/Serialization/Format.hpp>
+/* Licensed under the MIT License. Block arguments with checked ABI metadata. */
+#include <mirnext/Execution/Session.hpp>
 #include <iostream>
 int main () {
   using namespace mirnext;
   using namespace mirnext::ir;
-  auto failed = [] (const Error &error) {
-    std::cerr << error.message << '\n';
+  Program program;
+  MIRBuilder builder (program);
+  auto *module = builder.create_module ("example");
+  auto *sum = builder.create_function (module, "sum",
+                                       Signature{.results = {Type::i64 ()},
+                                                 .parameters = {Type::block (16)}});
+  auto pair = builder.argument (0);
+  auto first = builder.create_load (builder.memory (Type::i64 (), pair));
+  auto second = builder.create_load (builder.memory (Type::i64 (), pair, 8));
+  builder.create_return (builder.create_add (first, second));
+  builder.create_function<std::int64_t ()> (module, "entry");
+  auto *scope = builder.begin_stack_scope ();
+  auto buffer = builder.create_stack_alloc (builder.constant_i64 (16));
+  builder.create_store (builder.memory (Type::i64 (), buffer), builder.constant_i64 (20));
+  builder.create_store (builder.memory (Type::i64 (), buffer, 8), builder.constant_i64 (22));
+  auto call = builder.create_call (sum, {builder.block_argument (buffer, Type::block (16))});
+  builder.create_return (call.value ());
+  builder.end_stack_scope (scope);
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    std::cerr << built.error ().message << '\n';
     return 1;
-  };
-  Context context;
-  auto module = context.create_module ("example");
-  if (!module) return failed (module.error ());
-  auto sum = (*module)->create_function ("sum", {{Type::i64 ()}, {Type::block (16)}});
-  if (!sum) return failed (sum.error ());
-  auto body = (*sum)->create_block ();
-  if (!body) return failed (body.error ());
-  IRBuilder calculate (**body);
-  auto pair = (*sum)->arguments ()[0];
-  auto left = calculate.load (Memory{Type::i64 (), pair});
-  if (!left) return failed (left.error ());
-  auto right = calculate.load (Memory{Type::i64 (), pair, nullptr, 8});
-  if (!right) return failed (right.error ());
-  auto total = calculate.binary (Opcode::Add, Operand (**left), Operand (**right));
-  if (!total) return failed (total.error ());
-  auto returned = calculate.ret (Operand (**total));
-  if (!returned) return failed (returned.error ());
-  auto entry = (*module)->create_function ("entry", {{Type::i64 ()}, {}});
-  if (!entry) return failed (entry.error ());
-  auto block = (*entry)->create_block ();
-  if (!block) return failed (block.error ());
-  IRBuilder builder (**block);
-  auto scope = builder.begin_stack_scope ();
-  if (!scope) return failed (scope.error ());
-  auto buffer = builder.allocate_stack (16);
-  if (!buffer) return failed (buffer.error ());
-  auto a = builder.store (Memory{Type::i64 (), *buffer}, 20);
-  if (!a) return failed (a.error ());
-  auto b = builder.store (Memory{Type::i64 (), *buffer, nullptr, 8}, 22);
-  if (!b) return failed (b.error ());
-  auto call = builder.call (**sum, {BlockArgument (**buffer, 16)});
-  if (!call) return failed (call.error ());
-  auto answer = call->value ();
-  if (!answer) return failed (answer.error ());
-  returned = builder.ret (Operand (**answer));
-  if (!returned) return failed (returned.error ());
-  auto ended = builder.end_stack_scope (**scope);
-  if (!ended) return failed (ended.error ());
-  auto text = serialization::write_text (context);
-  if (!text) return failed (text.error ());
-  auto binary = serialization::write_binary (context);
-  if (!binary) return failed (binary.error ());
-  auto decoded = serialization::read_binary (*binary);
-  if (!decoded) return failed (decoded.error ());
-  std::cout << *text;
-  return (*decoded)->verify () ? 0 : 1;
+  }
+  auto session = execution::ExecutionSession::create (std::move (program));
+  if (!session.has_value ()) {
+    std::cerr << session.error ().message << '\n';
+    return 1;
+  }
+  auto answer = session.value ().call_i64 ("example", "entry");
+  if (!answer.has_value ()) {
+    std::cerr << answer.error ().message << '\n';
+    return 1;
+  }
+  std::cout << "block sum = " << answer.value () << '\n';
+  return answer.value () == 42 ? 0 : 1;
 }

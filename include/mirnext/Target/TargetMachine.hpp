@@ -41,7 +41,7 @@ class TargetMachine {
   std::size_t stack_alignment () const { return 16; }
   std::span<const PhysicalRegisterInfo> registers () const { return registers_; }
   Result<PhysicalRegister> find_register (std::string_view) const;
-  const PhysicalRegisterInfo *register_info (PhysicalRegister) const;
+  OptionalRef<const PhysicalRegisterInfo> register_info (PhysicalRegister) const;
   bool accepts (PhysicalRegister, ir::Type) const;
   bool call_clobbers (PhysicalRegister, ir::Type) const;
   Result<TypeLayout> layout (ir::Type) const;

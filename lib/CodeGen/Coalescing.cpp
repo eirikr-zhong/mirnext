@@ -1,3 +1,7 @@
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* Aggressive coalescing derived from MIR, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. Rewrites the sole block-owned instruction body. */
 #include "mirnext/CodeGen/RegisterAllocation.hpp"
@@ -21,8 +25,8 @@ std::optional<std::array<const MachineVirtualRegister *, 2>> move_pair (
       || (*op != ir::Opcode::Mov && *op != ir::Opcode::FMov && *op != ir::Opcode::DMov
           && *op != ir::Opcode::LDMov))
     return {};
-  auto a = i.operands ()[0].get<const MachineVirtualRegister *> (),
-       b = i.operands ()[1].get<const MachineVirtualRegister *> ();
+  auto a = detail::operand_access (i.operands ()[0]).get<const MachineVirtualRegister *> (),
+       b = detail::operand_access (i.operands ()[1]).get<const MachineVirtualRegister *> ();
   if (!a || !b) return {};
   return std::array{*a, *b};
 }
@@ -35,11 +39,11 @@ std::size_t conflict_bit (std::size_t a, std::size_t b, std::size_t dimension) {
 }  // namespace
 Result<MachineRegister> MachineCoalescing::representative (MachineRegister r) const {
   if (!current (*owner_)) return invalid (*owner_, "stale coalescing result");
-  if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+  if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r))) {
     auto at = virtuals_.find (*v);
     if (at != virtuals_.end ()) return representatives_[at->second];
   } else {
-    auto p = std::get<target::PhysicalRegister> (r);
+    auto p = std::get<target::PhysicalRegister> (detail::NodeAccess::storage (r));
     auto at = physicals_.find (p.encoding ());
     if (at != physicals_.end () && registers_[at->second] == r) return representatives_[at->second];
   }
@@ -48,8 +52,8 @@ Result<MachineRegister> MachineCoalescing::representative (MachineRegister r) co
 Result<bool> MachineCoalescing::conflicts (MachineRegister a, MachineRegister b) const {
   if (!current (*owner_)) return invalid (*owner_, "stale coalescing result");
   if (!enabled_) return invalid (*owner_, "conflict scan was not enabled");
-  auto x = std::get_if<const MachineVirtualRegister *> (&a),
-       y = std::get_if<const MachineVirtualRegister *> (&b);
+  auto x = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&a)),
+       y = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&b));
   if (!x || !y || !compact_.contains (*x) || !compact_.contains (*y))
     return invalid (*owner_, "register outside compact conflict scan");
   auto bit = conflict_bit (compact_.at (*x), compact_.at (*y), scan_.size ());
@@ -60,7 +64,7 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
   if (level > 3 || !limit || !graph.current (f))
     return invalid (f, "invalid level, register limit or stale/foreign CFG");
   auto valid = f.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   detail::RegisterIndex index (f);
   MachineCoalescing result;
   result.owner_ = &f;
@@ -74,11 +78,12 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
   };
   std::vector<Move> moves;
   if (level >= 2)
-    for (std::size_t b = 2; b < graph.cfg ().blocks.size (); ++b) {
+    for (std::size_t b = 2; b < detail::NodeAccess::blocks (graph.cfg ()).size (); ++b) {
       std::size_t frequency = 1;
       for (auto depth = graph.loop_depth ()[b]; depth && frequency < SIZE_MAX / 8; --depth)
         frequency *= 5;
-      for (auto &i : const_cast<MachineBasicBlock *> (graph.cfg ().blocks[b])->instructions ()) {
+      for (auto &i : const_cast<MachineBasicBlock *> (detail::NodeAccess::blocks (graph.cfg ())[b])
+                       ->instructions ()) {
         if (move_pair (i)) moves.push_back ({&i, frequency, i.creation_order ()});
       }
     }
@@ -91,7 +96,7 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
     for (auto r : pair) {
       if (!result.compact_.contains (r) && result.scan_.size () < limit) {
         result.compact_.emplace (r, result.scan_.size ());
-        result.scan_.emplace_back (r);
+        result.scan_.emplace_back (detail::NodeAccess::make_MachineRegister (r));
       }
     }
   }
@@ -109,21 +114,22 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
   auto live
     = MachineLiveness::analyze (f, graph,
                                 {.optimization_level = level, .scan_registers = result.scan_});
-  if (!live) return live.error ();
+  if (!(live).has_value ()) return live.error ();
   auto compact = [&] (MachineRegister r) -> std::optional<std::size_t> {
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+    if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r))) {
       auto at = result.compact_.find (*v);
       if (at != result.compact_.end ()) return at->second;
     }
     return {};
   };
-  for (std::size_t b = 2; b < graph.cfg ().blocks.size (); ++b) {
-    auto alive = live->blocks ()[b].out;
-    auto body = graph.cfg ().blocks[b]->instructions ();
+  for (std::size_t b = 2; b < detail::NodeAccess::blocks (graph.cfg ()).size (); ++b) {
+    auto alive = live.value ().blocks ()[b].out;
+    auto body = detail::NodeAccess::blocks (graph.cfg ())[b]->instructions ();
     for (auto at = body.end (); at != body.begin ();) {
       auto &i = *--at;
       auto pair = move_pair (i);
-      auto ignore = pair ? compact ((*pair)[1]) : std::nullopt;
+      auto ignore
+        = pair ? compact (detail::NodeAccess::make_MachineRegister ((*pair)[1])) : std::nullopt;
       detail::visit_registers (i, true, [&] (auto r) {
         if (auto s = compact (r)) {
           alive.for_each ([&] (auto other) {
@@ -139,14 +145,16 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
         if (auto s = compact (r)) alive.insert (*s);
       });
     }
-    if (body.begin () != body.end () && alive != live->blocks ()[b].in)
+    if (body.begin () != body.end () && alive != live.value ().blocks ()[b].in)
       return invalid (f, "compact live-in disagrees with reverse instruction scan");
   }
   std::vector<std::size_t> first (index.values.size ()), next;
   std::iota (first.begin (), first.end (), 0);
   next = first;
   auto bound = [&] (std::size_t r) {
-    return std::get<const MachineVirtualRegister *> (index.values[r])->binding ().has_value ();
+    return std::get<const MachineVirtualRegister *> (detail::NodeAccess::storage (index.values[r]))
+      ->binding ()
+      .has_value ();
   };
   auto conflict = [&] (std::size_t a, std::size_t b) {
     auto r1 = a;
@@ -192,11 +200,12 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
     if (first[*index.find (pair[0])] != first[*index.find (pair[1])]) continue;
     auto &b = const_cast<MachineBasicBlock &> (m.instruction->block ());
     auto erased = rw.erase (*m.instruction);
-    if (!erased) return erased.error ();
+    if (!(erased).has_value ()) return erased.error ();
     ++result.removed_;
-    if (b.instructions ().begin () == b.instructions ().end () && b.labels ().empty ()) {
-      auto l = f.create_label (b);
-      if (!l) return l.error ();
+    if (b.instructions ().begin () == b.instructions ().end ()
+        && ir::detail::ReferenceAccess::pointers (b.labels ()).empty ()) {
+      auto l = detail::access (f).create_label (b);
+      if (!(l).has_value ()) return l.error ();
     }
   }
   auto substitute = [&] (MachineRegister r) { return index.values[first[*index.find (r)]]; };
@@ -214,25 +223,27 @@ Result<MachineCoalescing> coalesce_registers (MachineFunction &f, const MachineG
       operands.reserve (i.operands ().size ());
       for (auto &o : i.operands ()) {
         auto replacement = o;
-        if (auto r = o.get<const MachineVirtualRegister *> ())
-          replacement = MachineOperand (std::get<const MachineVirtualRegister *> (substitute (*r)));
-        else if (auto memory = o.get<MachineMemory> ()) {
+        if (auto r = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+          replacement = detail::NodeAccess::make_MachineOperand (
+            std::get<const MachineVirtualRegister *> (detail::NodeAccess::storage (
+              substitute (detail::NodeAccess::make_MachineRegister (*r)))));
+        else if (auto memory = detail::operand_access (o).get<MachineMemory> ()) {
           auto m = *memory;
           if (m.base) m.base = substitute (*m.base);
           if (m.index) m.index = substitute (*m.index);
-          replacement = MachineOperand (std::move (m));
+          replacement = detail::NodeAccess::make_MachineOperand (std::move (m));
         }
         operands.push_back (std::move (replacement));
       }
       if (changed) {
         auto replaced = rw.replace (i, i.opcode (), std::move (operands));
-        if (!replaced) return replaced.error ();
+        if (!(replaced).has_value ()) return replaced.error ();
       }
     }
   for (std::size_t r = 0; r < first.size (); ++r)
     result.representatives_[r] = index.values[first[r]];
   valid = f.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   result.revision_ = f.revision ();
   return result;
 }

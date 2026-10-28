@@ -1,6 +1,11 @@
 /* Licensed under the MIT License. Native post-allocation semantics and lifetime. */
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
+#include "Navigation.hpp"
 #include "mirnext/CodeGen/PostAllocation.hpp"
 #include "mirnext/CodeGen/Lowering.hpp"
 #include "mirnext/Serialization/Format.hpp"
@@ -11,52 +16,67 @@ using namespace mirnext::ir;
 using namespace mirnext::codegen;
 namespace {
 bool arm () {
-  return target::TargetMachine::native ()->architecture () == target::Architecture::AArch64;
+  return target::TargetMachine::native ().value ().architecture () == target::Architecture::AArch64;
 }
 struct Fixture {
   MachineFunction f{"native", "post", Signature{{Type::i64 ()}, {}},
-                    *target::TargetMachine::native ()};
+                    (target::TargetMachine::native ()).value ()};
   MachineRewriter rw{f};
   std::vector<MachineBasicBlock *> blocks;
   Fixture (unsigned count = 1) {
-    for (unsigned n = 0; n < count; ++n) blocks.push_back (&f.create_block ());
+    for (unsigned n = 0; n < count; ++n)
+      blocks.push_back (&mirnext::codegen::detail::access (f).create_block ());
     auto state = f.state ();
     state.machinized = state.operands_legalized = true;
-    REQUIRE (rw.set_state (state));
+    REQUIRE ((rw.set_state (state)).has_value ());
   }
-  MachineOperand reg (unsigned n) { return MachineOperand (f.target ().registers ()[n].reg); }
-  MachineOperand imm (std::int64_t n) { return MachineOperand (n); }
+  MachineOperand reg (unsigned n) {
+    return mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+      f.target ().registers ()[n].reg);
+  }
+  MachineOperand imm (std::int64_t n) {
+    return mirnext::codegen::detail::NodeAccess::make_MachineOperand (n);
+  }
   MachineOperand mem (unsigned n, std::string alias = {}) {
-    return MachineOperand (MachineMemory{Type::i64 (),
-                                         MachineRegister (f.target ().registers ()[n].reg),
-                                         {},
-                                         0,
-                                         1,
-                                         std::move (alias),
-                                         {}});
+    return mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+      mirnext::codegen::detail::NodeAccess::
+        make_MachineMemory (Type::i64 (),
+                            mirnext::codegen::detail::NodeAccess::make_MachineRegister (
+                              f.target ().registers ()[n].reg),
+                            {}, 0, 1, std::move (alias), {}));
   }
   MachineOperand label (unsigned b) {
-    if (blocks[b]->labels ().empty ()) REQUIRE (f.create_label (*blocks[b]));
-    return MachineOperand (*blocks[b]->labels ()[0]);
+    if (mirnext::ir::detail::ReferenceAccess::pointers (blocks[b]->labels ()).empty ())
+      REQUIRE ((mirnext::codegen::detail::access (f).create_label (*blocks[b])).has_value ());
+    return mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+      *mirnext::ir::detail::ReferenceAccess::pointers (blocks[b]->labels ())[0]);
   }
   MachineInstruction *add (MachineOpcode code, std::vector<MachineOperand> ops = {},
                            unsigned b = 0) {
     auto r = rw.append (*blocks[b], code, std::move (ops));
-    INFO ((r ? "" : r.error ().message));
-    REQUIRE (r);
-    return *r;
+    INFO (((r).has_value () ? "" : r.error ().message));
+    REQUIRE ((r).has_value ());
+    return &(r).value ();
   }
   MachineInstruction *call () {
-    auto proto = f.intern_symbol (
+    auto proto = mirnext::codegen::detail::access (f).intern_symbol (
       {"native", "p", MachineSymbol::Kind::Prototype, Signature{{Type::i64 ()}, {}}, false, {}});
-    REQUIRE (proto);
-    auto ext = f.intern_symbol ({"native", "ext", MachineSymbol::Kind::Import, {}, false, {}});
-    REQUIRE (ext);
-    auto i = add (Opcode::Call, {MachineOperand (MachineSymbolReference{*proto}),
-                                 MachineOperand (MachineSymbolReference{*ext}), reg (1)});
+    REQUIRE ((proto).has_value ());
+    auto ext = mirnext::codegen::detail::access (f).intern_symbol (
+      {"native", "ext", MachineSymbol::Kind::Import, {}, false, {}});
+    REQUIRE ((ext).has_value ());
+    auto i
+      = add (Opcode::Call, {mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+                              mirnext::codegen::detail::NodeAccess::make_MachineSymbolReference (
+                                &(proto).value ())),
+                            mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+                              mirnext::codegen::detail::NodeAccess::make_MachineSymbolReference (
+                                &(ext).value ())),
+                            reg (1)});
     REQUIRE (
-      rw.lower_call (*i, i->opcode (),
-                     std::vector<MachineOperand> (i->operands ().begin (), i->operands ().end ())));
+      (rw.lower_call (*i, i->opcode (),
+                      std::vector<MachineOperand> (i->operands ().begin (), i->operands ().end ())))
+        .has_value ());
     return i;
   }
   bool attached (const MachineInstruction *p) {
@@ -67,28 +87,30 @@ struct Fixture {
   }
   MachineSpillResult spill (unsigned level = 2) {
     auto graph = MachineGraphAnalysis::build (f);
-    REQUIRE (graph);
-    auto live = MachineLiveness::analyze (f, *graph, {.optimization_level = level});
-    REQUIRE (live);
-    auto ranges = MachineLiveRanges::build (f, *graph, *live);
-    REQUIRE (ranges);
-    auto allocation = MachineAllocation::assign (f, *graph, *live, *ranges);
-    REQUIRE (allocation);
-    auto rewritten = rewrite_allocated (f, *graph, *live, *ranges, std::move (*allocation));
-    INFO ((rewritten ? "" : rewritten.error ().message));
-    REQUIRE (rewritten);
-    auto r = split_allocated_spills (f, std::move (*rewritten));
-    REQUIRE (r);
-    return std::move (*r);
+    REQUIRE ((graph).has_value ());
+    auto live = MachineLiveness::analyze (f, (graph).value (), {.optimization_level = level});
+    REQUIRE ((live).has_value ());
+    auto ranges = MachineLiveRanges::build (f, (graph).value (), (live).value ());
+    REQUIRE ((ranges).has_value ());
+    auto allocation
+      = MachineAllocation::assign (f, (graph).value (), (live).value (), (ranges).value ());
+    REQUIRE ((allocation).has_value ());
+    auto rewritten = rewrite_allocated (f, (graph).value (), (live).value (), (ranges).value (),
+                                        std::move ((allocation).value ()));
+    INFO (((rewritten).has_value () ? "" : rewritten.error ().message));
+    REQUIRE ((rewritten).has_value ());
+    auto r = split_allocated_spills (f, std::move ((rewritten).value ()));
+    REQUIRE ((r).has_value ());
+    return std::move ((r).value ());
   }
   MachinePostResult run (unsigned level = 2, MachinePostOptions options = {}) {
     auto r = optimize_allocated_machine (f, spill (level), std::move (options));
-    INFO ((r ? "" : r.error ().message));
-    REQUIRE (r);
-    REQUIRE (r->current (f));
-    REQUIRE (f.verify ());
-    REQUIRE (r->cfg ().verify (f));
-    return std::move (*r);
+    INFO (((r).has_value () ? "" : r.error ().message));
+    REQUIRE ((r).has_value ());
+    REQUIRE (r.value ().current (f));
+    REQUIRE ((f.verify ()).has_value ());
+    REQUIRE ((r.value ().cfg ().verify (f)).has_value ());
+    return std::move ((r).value ());
   }
 };
 }  // namespace
@@ -115,7 +137,7 @@ TEST_CASE (
       expected.insert (expected.end (), {MachinePostStage::Liveness, MachinePostStage::Combine,
                                          MachinePostStage::DeadCode});
     CHECK (phases == expected);
-    REQUIRE (t.f.create_label (*t.blocks[0]));
+    REQUIRE ((mirnext::codegen::detail::access (t.f).create_label (*t.blocks[0])).has_value ());
     CHECK_FALSE (r.current (t.f));
   }
 }
@@ -129,7 +151,7 @@ TEST_CASE ("owning combine substitutes last-use constants and refuses later uses
     t.add (Opcode::Ret, {t.reg (1)});
     auto r = t.run ();
     CHECK (t.attached (def) == later);
-    CHECK (bool (sum->operands ()[2].get<std::int64_t> ()) != later);
+    CHECK (bool ((sum->operands ()[2].get<std::int64_t> ()).has_value ()) != later);
     CHECK (r.statistics ().substitutions == (later ? 0 : 1));
   }
 }
@@ -149,7 +171,8 @@ TEST_CASE ("owning combine retains memory writes calls and explicit stack or var
              if (phase == MachinePostStage::Combine) {
                CHECK (t.attached (load) == (barrier != 0));
                REQUIRE (t.attached (copy));
-               CHECK (bool (copy->operands ()[1].get<MachineMemory> ()) == (barrier == 0));
+               CHECK (bool ((copy->operands ()[1].get<MachineMemory> ()).has_value ())
+                      == (barrier == 0));
              }
              return {};
            }});
@@ -175,7 +198,7 @@ TEST_CASE ("owning combine refuses obsolete register and memory inputs and unenc
              if (phase == MachinePostStage::Combine) {
                CHECK (t.attached (def));
                REQUIRE (t.attached (use));
-               CHECK (use->operands ().back ().get<target::PhysicalRegister> ());
+               CHECK ((use->operands ().back ().get<target::PhysicalRegister> ()).has_value ());
              }
              return {};
            }});
@@ -199,7 +222,7 @@ TEST_CASE (
                         CHECK (def->creation_order () == identity);
                         if (!kind) {
                           CHECK (def->operands ()[0] == t.reg (3));
-                          CHECK (*t.rw.next (*between) == def);
+                          CHECK (&(mirnext::test::neighbor (t.rw.next (*between))).value () == def);
                         }
                       }
                       return {};
@@ -228,7 +251,8 @@ TEST_CASE ("owning combine handles all extension pairs and transfers filtered de
                           if (allowed) {
                             REQUIRE (view.deaths (*use).size () == 1);
                             CHECK (view.deaths (*use)[0]
-                                   == MachineRegister (t.f.target ().registers ()[2].reg));
+                                   == mirnext::codegen::detail::NodeAccess::make_MachineRegister (
+                                     t.f.target ().registers ()[2].reg));
                           }
                         }
                         return {};
@@ -251,7 +275,9 @@ TEST_CASE ("owning combine exchanges integer operands and preserves ordered floa
     Fixture f;
     bool single = op == Opcode::FLt || op == Opcode::FLe || op == Opcode::FGt || op == Opcode::FGe;
     auto def = f.add (single ? Opcode::FMov : Opcode::DMov,
-                      {f.reg (32), single ? MachineOperand (0.0f) : MachineOperand (0.0)});
+                      {f.reg (32),
+                       single ? mirnext::codegen::detail::NodeAccess::make_MachineOperand (0.0f)
+                              : mirnext::codegen::detail::NodeAccess::make_MachineOperand (0.0)});
     auto compare = f.add (op, {f.reg (1), f.reg (32), f.reg (33)});
     f.add (Opcode::Ret, {f.reg (1)});
     auto result = f.run ();
@@ -346,14 +372,14 @@ TEST_CASE ("owning post-allocation DCE honors call arguments global effects and 
   if (!arm ()) return;
   Fixture t;
   auto global = t.f.target ().registers ()[19].reg;
-  REQUIRE (t.rw.set_global_registers (std::span (&global, 1)));
+  REQUIRE ((t.rw.set_global_registers (std::span (&global, 1))).has_value ());
   auto argument = t.add (Opcode::Mov, {t.reg (0), t.imm (42)});
   auto saved = t.add (Opcode::Mov, {t.reg (19), t.imm (42)});
   auto overwritten = t.add (Opcode::Mov, {t.reg (1), t.imm (7)});
   auto unused = t.add (Opcode::Mov, {t.reg (2), t.imm (7)});
   auto call = t.call ();
   auto arg = t.f.target ().registers ()[0].reg;
-  REQUIRE (t.rw.set_call_arguments (*call, std::span (&arg, 1)));
+  REQUIRE ((t.rw.set_call_arguments (*call, std::span (&arg, 1))).has_value ());
   t.add (Opcode::Ret, {t.reg (1)});
   t.run ();
   CHECK (t.attached (argument));
@@ -392,11 +418,11 @@ TEST_CASE (
   t.add (Opcode::Ret, {t.reg (1)});
   auto spill = t.spill ();
   auto before = t.f.dump ();
-  CHECK_FALSE (optimize_allocated_machine (foreign.f, spill));
+  CHECK_FALSE ((optimize_allocated_machine (foreign.f, spill)).has_value ());
   CHECK (t.f.dump () == before);
-  REQUIRE (t.f.create_label (*t.blocks[0]));
+  REQUIRE ((mirnext::codegen::detail::access (t.f).create_label (*t.blocks[0])).has_value ());
   before = t.f.dump ();
-  CHECK_FALSE (optimize_allocated_machine (t.f, spill));
+  CHECK_FALSE ((optimize_allocated_machine (t.f, spill)).has_value ());
   CHECK (t.f.dump () == before);
   for (auto stage : {MachinePostStage::StripProperties, MachinePostStage::Liveness,
                      MachinePostStage::Combine, MachinePostStage::DeadCode}) {
@@ -414,7 +440,7 @@ TEST_CASE (
                                       }
                                       return {};
                                     }});
-    CHECK_FALSE (r);
+    CHECK_FALSE ((r).has_value ());
     REQUIRE (called);
     CHECK (r.error ().code == ErrorCode::InvalidArgument);
     CHECK (r.error ().message.find ("native/post") != std::string::npos);
@@ -428,9 +454,9 @@ TEST_CASE (
   done.add (Opcode::Ret, {done.reg (1)});
   auto input = done.spill ();
   auto r = optimize_allocated_machine (done.f, input);
-  REQUIRE (r);
+  REQUIRE ((r).has_value ());
   before = done.f.dump ();
-  CHECK_FALSE (optimize_allocated_machine (done.f, input));
+  CHECK_FALSE ((optimize_allocated_machine (done.f, input)).has_value ());
   CHECK (done.f.dump () == before);
 }
 TEST_CASE (
@@ -443,38 +469,42 @@ TEST_CASE (
       CAPTURE (text);
       CAPTURE (level);
       auto source = serialization::parse_text (text);
-      REQUIRE (source);
-      auto &function = *(*source)->modules ().begin ()->functions ().begin ();
+      REQUIRE ((source).has_value ());
+      auto &function = *source.value ().modules ().begin ()->functions ().begin ();
       auto target = target::TargetMachine::native ();
-      REQUIRE (target);
-      auto machine = prepare_machine_ir (function, *target);
-      REQUIRE (machine);
-      source->reset ();
-      REQUIRE (machinize (**machine));
-      REQUIRE (legalize_operands (**machine));
-      auto graph = MachineGraphAnalysis::build (**machine);
-      REQUIRE (graph);
-      REQUIRE (coalesce_registers (**machine, *graph, level));
-      graph = MachineGraphAnalysis::build (**machine);
-      REQUIRE (graph);
-      auto live = MachineLiveness::analyze (**machine, *graph, {.optimization_level = level});
-      REQUIRE (live);
-      auto ranges = MachineLiveRanges::build (**machine, *graph, *live);
-      REQUIRE (ranges);
-      auto allocation = MachineAllocation::assign (**machine, *graph, *live, *ranges);
-      REQUIRE (allocation);
-      auto rewrite = rewrite_allocated (**machine, *graph, *live, *ranges, std::move (*allocation));
-      REQUIRE (rewrite);
-      auto spill = split_allocated_spills (**machine, std::move (*rewrite));
-      REQUIRE (spill);
-      auto post = optimize_allocated_machine (**machine, std::move (*spill));
-      INFO ((post ? "" : post.error ().message));
-      REQUIRE (post);
-      REQUIRE (post->current (**machine));
-      REQUIRE (post->cfg ().verify (**machine));
-      substitutions += post->statistics ().substitutions;
-      extensions += post->statistics ().extensions;
-      deletions += post->statistics ().dead_instructions;
+      REQUIRE ((target).has_value ());
+      auto machine = prepare_machine_ir (function, (target).value ());
+      REQUIRE ((machine).has_value ());
+      (source).value () = mirnext::ir::Program{};
+      REQUIRE ((machinize ((machine).value ())).has_value ());
+      REQUIRE ((legalize_operands ((machine).value ())).has_value ());
+      auto graph = MachineGraphAnalysis::build ((machine).value ());
+      REQUIRE ((graph).has_value ());
+      REQUIRE ((coalesce_registers ((machine).value (), (graph).value (), level)).has_value ());
+      graph = MachineGraphAnalysis::build ((machine).value ());
+      REQUIRE ((graph).has_value ());
+      auto live = MachineLiveness::analyze ((machine).value (), (graph).value (),
+                                            {.optimization_level = level});
+      REQUIRE ((live).has_value ());
+      auto ranges
+        = MachineLiveRanges::build ((machine).value (), (graph).value (), (live).value ());
+      REQUIRE ((ranges).has_value ());
+      auto allocation = MachineAllocation::assign ((machine).value (), (graph).value (),
+                                                   (live).value (), (ranges).value ());
+      REQUIRE ((allocation).has_value ());
+      auto rewrite = rewrite_allocated ((machine).value (), (graph).value (), (live).value (),
+                                        (ranges).value (), std::move ((allocation).value ()));
+      REQUIRE ((rewrite).has_value ());
+      auto spill = split_allocated_spills ((machine).value (), std::move ((rewrite).value ()));
+      REQUIRE ((spill).has_value ());
+      auto post = optimize_allocated_machine ((machine).value (), std::move ((spill).value ()));
+      INFO (((post).has_value () ? "" : post.error ().message));
+      REQUIRE ((post).has_value ());
+      REQUIRE (post.value ().current ((machine).value ()));
+      REQUIRE ((post.value ().cfg ().verify ((machine).value ())).has_value ());
+      substitutions += post.value ().statistics ().substitutions;
+      extensions += post.value ().statistics ().extensions;
+      deletions += post.value ().statistics ().dead_instructions;
     }
   CHECK (substitutions > 0);
   CHECK (extensions > 0);

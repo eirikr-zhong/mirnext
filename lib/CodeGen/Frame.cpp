@@ -1,6 +1,10 @@
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* MIR frame rules, Copyright (C) 2020-2024 Vladimir Makarov. MIT License. */
 #include "mirnext/CodeGen/Frame.hpp"
-#include "mirnext/CodeGen/Detail/SpillEmitter.hpp"
+#include "mirnext/CodeGen/SpillEmitter.hpp"
 #include "mirnext/CodeGen/Detail/X86Frame.hpp"
 #include "mirnext/CodeGen/Detail/InstructionPatterns.hpp"
 #include <algorithm>
@@ -32,18 +36,18 @@ struct FrameEngine {
   bool jump_return = false;
   FrameEngine (MachineFunction &f, MachinePostResult post)
     : f (f), rw (f), post (std::move (post)) {}
-  MachineOperand reg (unsigned n) const { return MachineOperand (f.target ().registers ()[n].reg); }
+  MachineOperand reg (unsigned n) const {
+    return detail::NodeAccess::make_MachineOperand (f.target ().registers ()[n].reg);
+  }
   MachineOperand imm (std::size_t n) const {
-    return MachineOperand (static_cast<std::int64_t> (n));
+    return detail::NodeAccess::make_MachineOperand (static_cast<std::int64_t> (n));
   }
   MachineOperand memory (Type type, std::int64_t offset, unsigned base) const {
-    return MachineOperand (MachineMemory{type,
-                                         MachineRegister (f.target ().registers ()[base].reg),
-                                         {},
-                                         offset,
-                                         1,
-                                         {},
-                                         {}});
+    return detail::NodeAccess::make_MachineOperand (
+      detail::NodeAccess::make_MachineMemory (type,
+                                              detail::NodeAccess::make_MachineRegister (
+                                                f.target ().registers ()[base].reg),
+                                              {}, offset, 1, {}, {}));
   }
   void emit (std::vector<Emission> &code, Opcode op, std::vector<MachineOperand> operands) {
     code.push_back ({op, std::move (operands)});
@@ -86,13 +90,13 @@ struct FrameEngine {
     input.has_return = last_return != nullptr;
     input.no_red_zone = options.no_red_zone;
     auto plan = plan_x86_frame (input);
-    if (!plan) return invalid (f, plan.error ().message);
+    if (!(plan).has_value ()) return invalid (f, plan.error ().message);
     auto &layout = result.layout_;
-    layout.frame_bytes = plan->frame_bytes;
+    layout.frame_bytes = plan.value ().frame_bytes;
     layout.spill_bytes = input.spill_bytes;
-    layout.variadic_save_bytes = plan->variadic_save_bytes;
-    layout.saves_frame_pointer = plan->saves_frame_pointer;
-    for (auto &s : plan->saves)
+    layout.variadic_save_bytes = plan.value ().variadic_save_bytes;
+    layout.saves_frame_pointer = plan.value ().saves_frame_pointer;
+    for (auto &s : plan.value ().saves)
       layout.callee_saves.push_back (
         {f.target ().registers ()[static_cast<unsigned> (s.reg)].reg, s.offset, s.size});
     auto convert = [&] (const auto &source, auto &destination) {
@@ -113,8 +117,8 @@ struct FrameEngine {
         destination.push_back (std::move (emission));
       }
     };
-    convert (plan->prologue, prologue);
-    convert (plan->epilogue, epilogue);
+    convert (plan.value ().prologue, prologue);
+    convert (plan.value ().epilogue, epilogue);
     return {};
   }
   Result<void> prepare_aarch64 (MachineFrameOptions options) {
@@ -198,8 +202,10 @@ struct FrameEngine {
     return {};
   }
   Result<MachineFrameResult> run (MachineFrameOptions options) {
-    for (auto b : post.allocation ().loop_alignment_blocks ())
-      for (auto label : b->labels ()) result.aligned_labels_.push_back (label);
+    for (auto b :
+         ir::detail::ReferenceAccess::pointers (post.allocation ().loop_alignment_blocks ()))
+      for (auto label : ir::detail::ReferenceAccess::pointers (b->labels ()))
+        result.aligned_labels_.push_back (label);
     for (auto &b : f.blocks ())
       for (auto &i : b.instructions ()) {
         if (i.opcode () == MachineOpcode (Opcode::Ret)
@@ -212,7 +218,7 @@ struct FrameEngine {
     auto prepared = f.target ().architecture () == target::Architecture::AArch64
                       ? prepare_aarch64 (options)
                       : prepare_x86 (options);
-    if (!prepared) return prepared.error ();
+    if (!(prepared).has_value ()) return prepared.error ();
     // Validate the entire sequence before modifying stable machine nodes.
     // Full vector saves retain LDMOV on ARM and private MOV128 on x86.
     for (auto sequence : {&prologue, &epilogue})
@@ -222,18 +228,18 @@ struct FrameEngine {
     if (!prologue.empty ()) {
       auto &first = *f.blocks ().begin ();
       auto block = &first;
-      if (!first.labels ().empty ()) {
+      if (!ir::detail::ReferenceAccess::pointers (first.labels ()).empty ()) {
         auto r = rw.create_block_before (first);
-        if (!r) return invalid (f, r.error ().message);
-        block = *r;
+        if (!(r).has_value ()) return invalid (f, r.error ().message);
+        block = &(r).value ();
       }
       auto body = block->instructions ();
       auto anchor = body.begin () == body.end () ? nullptr : &*body.begin ();
       for (auto &i : prologue) {
         auto r = anchor ? rw.insert_before (*anchor, i.code, std::move (i.operands))
                         : rw.append (*block, i.code, std::move (i.operands));
-        if (!r) return invalid (f, r.error ().message);
-        result.inserted_.push_back (*r);
+        if (!(r).has_value ()) return invalid (f, r.error ().message);
+        result.inserted_.push_back (&(r).value ());
       }
       // Simplify normally leaves a single RET, but direct machine preparation
       // and multiple JRET exits need a complete frame restoration at each exit.
@@ -241,18 +247,18 @@ struct FrameEngine {
       auto restore = [&] (MachineInstruction &anchor, bool consume) -> Result<void> {
         for (auto &i : epilogue) {
           auto r = rw.insert_before (anchor, i.code, consume ? std::move (i.operands) : i.operands);
-          if (!r) return invalid (f, r.error ().message);
-          result.inserted_.push_back (*r);
+          if (!(r).has_value ()) return invalid (f, r.error ().message);
+          result.inserted_.push_back (&(r).value ());
         }
         return {};
       };
       for (auto anchor : earlier_returns) {
         auto r = restore (*anchor, false);
-        if (!r) return r.error ();
+        if (!(r).has_value ()) return r.error ();
       }
       if (last_return) {
         auto r = restore (*last_return, true);
-        if (!r) return r.error ();
+        if (!(r).has_value ()) return r.error ();
       }
     }
     // MIR's synthetic entry anchor follows incoming ABI copies. Earlier
@@ -269,10 +275,10 @@ struct FrameEngine {
         }
         if (!setup.empty ()) {
           auto before = rw.create_block_before (body);
-          if (!before) return before.error ();
+          if (!(before).has_value ()) return before.error ();
           for (auto i : setup) {
-            auto moved = rw.move_to (*i, **before);
-            if (!moved) return moved.error ();
+            auto moved = rw.move_to (*i, (before).value ());
+            if (!(moved).has_value ()) return moved.error ();
           }
         }
       }
@@ -286,10 +292,10 @@ struct FrameEngine {
       std::get<MachineFunctionState::X86> (state.target).variadic_save_bytes
         = result.layout_.variadic_save_bytes;
     auto committed = rw.set_state (state);
-    if (!committed) return invalid (f, committed.error ().message);
+    if (!(committed).has_value ()) return invalid (f, committed.error ().message);
     auto cfg = MachineControlFlow::build (f);
-    if (!cfg) return invalid (f, cfg.error ().message);
-    result.cfg_ = std::move (*cfg);
+    if (!(cfg).has_value ()) return invalid (f, cfg.error ().message);
+    result.cfg_ = std::move ((cfg).value ());
     result.owner_ = &f;
     result.revision_ = f.revision ();
     return std::move (result);
@@ -304,7 +310,7 @@ Result<MachineFrameResult> form_frame (MachineFunction &f, MachinePostResult pos
   if (!post.current (f) || !f.state ().post_allocation_optimized || f.state ().frame_formed)
     return invalid (f, "stale/foreign input or invalid phase");
   auto verified = f.verify ();
-  if (!verified) return invalid (f, verified.error ().message);
+  if (!(verified).has_value ()) return invalid (f, verified.error ().message);
   detail::FrameEngine engine (f, std::move (post));
   return engine.run (options);
 }

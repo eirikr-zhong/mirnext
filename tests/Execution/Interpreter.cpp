@@ -1,8 +1,10 @@
 /* Licensed under the MIT License. Interpreter execution tests. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
-#include "mirnext/Execution/Interpreter.hpp"
+#include "mirnext/Execution/Session.hpp"
 #include "../IR/Calls.hpp"
 #include "../IR/Variables.hpp"
 #include "../IR/StackScopes.hpp"
@@ -15,28 +17,28 @@ using namespace mirnext::execution;
 namespace {
 auto parse (std::string_view text) {
   auto c = serialization::parse_text (text);
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
-  return std::move (*c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
+  return std::make_unique<Program> (std::move ((c).value ()));
 }
-InterpretedProgram program (const Context &c, InterpreterOptions options = {}) {
-  auto p = InterpretedProgram::create (c, std::move (options));
-  INFO ((p ? "" : p.error ().message));
-  REQUIRE (p);
-  return std::move (*p);
+ExecutionSession program (const Program &c, ExecutionOptions options = {}) {
+  options.mode = ExecutionMode::Interpreter;
+  auto p = ExecutionSession::create (c, std::move (options));
+  INFO (((p).has_value () ? "" : p.error ().message));
+  REQUIRE ((p).has_value ());
+  return std::move ((p).value ());
 }
-InterpretedFunction find (const InterpretedProgram &p, std::string_view module,
-                          std::string_view name) {
+FunctionHandle find (const ExecutionSession &p, std::string_view module, std::string_view name) {
   auto f = p.find_function (module, name);
-  REQUIRE (f);
-  return *f;
+  REQUIRE ((f).has_value ());
+  return (f).value ();
 }
-std::int64_t call (const InterpretedProgram &p, std::string_view module, std::string_view name,
+std::int64_t call (const ExecutionSession &p, std::string_view module, std::string_view name,
                    std::span<const std::int64_t> args = {}) {
   auto v = p.call_i64 (find (p, module, name), args);
-  INFO ((v ? "" : v.error ().message));
-  REQUIRE (v);
-  return *v;
+  INFO (((v).has_value () ? "" : v.error ().message));
+  REQUIRE ((v).has_value ());
+  return (v).value ();
 }
 }  // namespace
 TEST_CASE ("owning interpreter executes original and O0-O3 call and variable fixtures") {
@@ -49,14 +51,15 @@ TEST_CASE ("owning interpreter executes original and O0-O3 call and variable fix
       auto optimized
         = transforms::optimize (*c, {.level = static_cast<transforms::OptimizationLevel> (
                                        level ? level - 1 : 0)});
-      REQUIRE (optimized);
-      auto p = level ? InterpretedProgram::create (std::move (*optimized))
-                     : InterpretedProgram::create (*c);
-      INFO ((p ? "" : p.error ().message));
-      REQUIRE (p);
+      REQUIRE ((optimized).has_value ());
+      auto p = level ? ExecutionSession::create (std::move ((optimized).value ()),
+                                                 {.mode = ExecutionMode::Interpreter})
+                     : ExecutionSession::create (*c, {.mode = ExecutionMode::Interpreter});
+      INFO (((p).has_value () ? "" : p.error ().message));
+      REQUIRE ((p).has_value ());
       CHECK (dump (*c) == before);
       c.reset ();
-      CHECK (call (*p, "calls", "entry") == 42);
+      CHECK (call ((p).value (), "calls", "entry") == 42);
     }
     for (unsigned n = 0; n <= unsigned (test::VariableExample::Narrow); ++n) {
       CAPTURE (level);
@@ -65,12 +68,13 @@ TEST_CASE ("owning interpreter executes original and O0-O3 call and variable fix
       auto optimized
         = transforms::optimize (*c, {.level = static_cast<transforms::OptimizationLevel> (
                                        level ? level - 1 : 0)});
-      REQUIRE (optimized);
-      auto p = level ? InterpretedProgram::create (std::move (*optimized))
-                     : InterpretedProgram::create (*c);
-      REQUIRE (p);
+      REQUIRE ((optimized).has_value ());
+      auto p = level ? ExecutionSession::create (std::move ((optimized).value ()),
+                                                 {.mode = ExecutionMode::Interpreter})
+                     : ExecutionSession::create (*c, {.mode = ExecutionMode::Interpreter});
+      REQUIRE ((p).has_value ());
       c.reset ();
-      CHECK (call (*p, "consumer", "entry") == 42);
+      CHECK (call ((p).value (), "consumer", "entry") == 42);
     }
   }
 }
@@ -80,15 +84,15 @@ TEST_CASE ("owning interpreter prepares and executes all scalar and comparison b
              : fixture == 1 ? test::interpreter_ieee ()
                             : test::interpreter_overflow ();
     auto p = program (*c);
-    CHECK (p.statistics ().functions > 80);
+    CHECK (p.interpreter_statistics ().value ().functions > 80);
     for (auto &m : c->modules ())
       for (auto &f : m.functions ()) {
         auto result = p.call (find (p, m.name (), f.symbol ().name ()));
         INFO (f.symbol ().name ());
-        INFO ((result ? "" : result.error ().message));
-        REQUIRE (result);
-        CHECK (result->size () == 1);
-        CHECK ((*result)[0].type ().is_scalar ());
+        INFO (((result).has_value () ? "" : result.error ().message));
+        REQUIRE ((result).has_value ());
+        CHECK (result.value ().size () == 1);
+        CHECK (((result).value ())[0].type ().is_scalar ());
       }
   }
 }
@@ -96,20 +100,20 @@ TEST_CASE (
   "owning interpreter retains data and function handles across source destruction and moves") {
   auto c = test::variable_example (test::VariableExample::Initialized);
   auto p = program (*c);
-  auto before = dump (p.context ());
+  auto before = dump (p.program ());
   auto f = find (p, "consumer", "entry");
   auto data = p.find_data ("consumer", "value");
-  REQUIRE (data);
+  REQUIRE ((data).has_value ());
   c.reset ();
   CHECK (call (p, "consumer", "entry") == 42);
   auto moved = std::move (p);
-  CHECK_FALSE (p.call_i64 (f));
-  CHECK_FALSE (p.find_data ("consumer", "value"));
+  CHECK_FALSE ((p.call_i64 (f)).has_value ());
+  CHECK_FALSE ((p.find_data ("consumer", "value")).has_value ());
   CHECK (call (moved, "consumer", "entry") == 64);
-  auto other = program (moved.context ());
-  CHECK_FALSE (other.call_i64 (f));
-  CHECK (dump (moved.context ()) == before);
-  auto bytes = data->bytes ();
+  auto other = program (moved.program ());
+  CHECK_FALSE ((other.call_i64 (f)).has_value ());
+  CHECK (dump (moved.program ()) == before);
+  auto bytes = data.value ().bytes ();
   std::int64_t value;
   std::memcpy (&value, bytes.data (), 8);
   CHECK (value == 64);
@@ -117,15 +121,16 @@ TEST_CASE (
 TEST_CASE (
   "owning interpreter implements local addresses narrow accesses labels and jump returns") {
   std::string hard
-    = target::TargetMachine::native ()->architecture () == target::Architecture::AArch64 ? "r19"
-                                                                                         : "r12";
+    = target::TargetMachine::native ().value ().architecture () == target::Architecture::AArch64
+        ? "r19"
+        : "r12";
   auto c = parse("m:module\nget:func\nglobal i64:next:"+hard+"\njret next\nendfunc\np:proto\nf:func i64\nglobal i64:target:"+hard+"\nlocal i64:x,i64:a\nmov x,42\naddr8 a,x\nmov i8:0(a),-3\next8 x,x\nladdr target,done\njcall p,get\nret 99\ndone:ret x\nendfunc\nlabeldata:lref done,done,7\nendmodule\n");
   auto p = program (*c);
   CHECK (call (p, "m", "f") == -3);
   auto data = p.find_data ("m", "labeldata");
-  REQUIRE (data);
+  REQUIRE ((data).has_value ());
   std::uint64_t difference;
-  std::memcpy (&difference, data->bytes ().data (), 8);
+  std::memcpy (&difference, data.value ().bytes ().data (), 8);
   CHECK (difference == 7);
 }
 TEST_CASE ("owning interpreter typed host calls support mixed values and validate results") {
@@ -142,8 +147,8 @@ TEST_CASE ("owning interpreter typed host calls support mixed values and validat
                            s.interpret = [&] (auto args) -> Result<std::vector<ScalarValue>> {
                              ++calls;
                              REQUIRE (args.size () == 2);
-                             CHECK (*args[0].scalar ()->as_i64 () == 7);
-                             CHECK (*args[1].scalar ()->as_double () == 2.5);
+                             CHECK (args[0].scalar ().value ().as_i64 ().value () == 7);
+                             CHECK (args[1].scalar ().value ().as_double ().value () == 2.5);
                              if (fail) return std::vector<ScalarValue>{ScalarValue (1)};
                              return std::vector<ScalarValue>{ScalarValue (9.5)};
                            };
@@ -151,15 +156,15 @@ TEST_CASE ("owning interpreter typed host calls support mixed values and validat
                          }}});
   auto f = find (p, "m", "f");
   auto result = p.call (f);
-  REQUIRE (result);
-  CHECK (*(*result)[0].as_double () == 9.5);
+  REQUIRE ((result).has_value ());
+  CHECK ((((result).value ())[0].as_double ()).value () == 9.5);
   CHECK (calls == 1);
   fail = true;
-  CHECK_FALSE (p.call (f));
+  CHECK_FALSE ((p.call (f)).has_value ());
   fail = false;
   result = p.call (f);
-  REQUIRE (result);
-  CHECK (*(*result)[0].as_double () == 9.5);
+  REQUIRE ((result).has_value ());
+  CHECK ((((result).value ())[0].as_double ()).value () == 9.5);
 }
 TEST_CASE (
   "owning interpreter returns diagnostics for undefined arithmetic and bounded execution") {
@@ -169,13 +174,13 @@ TEST_CASE (
                     + "\ndone:ret 42\nendfunc\nendmodule\n");
     auto p = program (*c);
     auto result = p.call_i64 (find (p, "m", "f"));
-    REQUIRE_FALSE (result);
+    REQUIRE_FALSE ((result).has_value ());
     CHECK (result.error ().message.find ("m/f") != std::string::npos);
   }
   auto c = parse ("m:module\nf:func i64\nloop:jmp loop\nret 0\nendfunc\nendmodule\n");
   auto p = program (*c, {.instruction_limit = 19});
   auto result = p.call_i64 (find (p, "m", "f"));
-  REQUIRE_FALSE (result);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("instruction limit") != std::string::npos);
 }
 TEST_CASE ("owning interpreter never asks for native code publication") {
@@ -221,23 +226,23 @@ TEST_CASE ("owning interpreter copies every block class and preserves writable r
     std::array args{ExecutionArgument::block (std::as_bytes (std::span (values)),
                                               static_cast<Type::BlockClass> (category))};
     auto result = p.call (find (p, "m", "f"), args);
-    REQUIRE (result);
-    CHECK (*(*result)[0].as_i64 () == 42);
+    REQUIRE ((result).has_value ());
+    CHECK ((((result).value ())[0].as_i64 ()).value () == 42);
     CHECK (values[0] == 42);
     std::array bad{ExecutionArgument::block (std::as_bytes (std::span (values)).first (8),
                                              static_cast<Type::BlockClass> (category))};
-    CHECK_FALSE (p.call (find (p, "m", "f"), bad));
+    CHECK_FALSE ((p.call (find (p, "m", "f"), bad)).has_value ());
   }
   auto c = test::call_example (test::CallExample::ReturnBlock);
   auto p = program (*c);
   std::array<std::int64_t, 2> values{};
   std::array args{ExecutionArgument::return_buffer (std::as_writable_bytes (std::span (values)))};
   auto result = p.call (find (p, "calls", "sum"), args);
-  REQUIRE (result);
-  CHECK (result->empty ());
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().empty ());
   CHECK (values[0] == 42);
   std::array bad{ExecutionArgument::block (std::as_bytes (std::span (values)))};
-  CHECK_FALSE (p.call (find (p, "calls", "sum"), bad));
+  CHECK_FALSE ((p.call (find (p, "calls", "sum"), bad)).has_value ());
 }
 TEST_CASE ("owning interpreter keeps stack marks and locals valid through nested segments") {
   auto c = parse (
@@ -256,16 +261,16 @@ TEST_CASE ("owning interpreter bounds recursive calls without poisoning subseque
   auto f = find (p, "m", "f");
   std::array<std::int64_t, 1> args{7};
   auto value = p.call_i64 (f, args);
-  REQUIRE (value);
-  CHECK (*value == 7);
+  REQUIRE ((value).has_value ());
+  CHECK ((value).value () == 7);
   args[0] = 8;
   value = p.call_i64 (f, args);
-  REQUIRE_FALSE (value);
+  REQUIRE_FALSE ((value).has_value ());
   CHECK (value.error ().message.find ("call depth limit") != std::string::npos);
   args[0] = 2;
   value = p.call_i64 (f, args);
-  REQUIRE (value);
-  CHECK (*value == 2);
+  REQUIRE ((value).has_value ());
+  CHECK ((value).value () == 2);
 }
 TEST_CASE ("owning interpreter rejects exhausted varargs and unpromoted host arguments") {
   auto c = test::call_example (test::CallExample::Variadic);
@@ -273,32 +278,34 @@ TEST_CASE ("owning interpreter rejects exhausted varargs and unpromoted host arg
   auto f = find (p, "calls", "sum");
   std::array short_args{ExecutionArgument (0), ExecutionArgument (42)};
   auto value = p.call (f, short_args);
-  REQUIRE_FALSE (value);
+  REQUIRE_FALSE ((value).has_value ());
   CHECK (value.error ().message.find ("variadic argument exceeds") != std::string::npos);
   std::array float_args{ExecutionArgument (0), ExecutionArgument (1.0f)};
-  CHECK_FALSE (p.call (f, float_args));
+  CHECK_FALSE ((p.call (f, float_args)).has_value ());
   std::array args{ExecutionArgument (0), ExecutionArgument (20), ExecutionArgument (22)};
   value = p.call (f, args);
-  REQUIRE (value);
-  CHECK (*(*value)[0].as_i64 () == 42);
+  REQUIRE ((value).has_value ());
+  CHECK ((((value).value ())[0].as_i64 ()).value () == 42);
 }
 TEST_CASE ("owning interpreter enforces readonly storage through computed addresses") {
   auto c = test::variable_example (test::VariableExample::Constant);
   auto &m = *c->modules ().begin ();
-  auto symbol = m.find_symbol ("value");
+  auto symbol = m.find_symbol ("value").get ();
   REQUIRE (symbol);
-  auto f = m.create_function ("overwrite", {{Type::i64 ()}, {}});
-  REQUIRE (f);
-  auto block = (*f)->create_block ();
-  REQUIRE (block);
-  IRBuilder b (**block);
+  auto f = mirnext::ir::detail::access (m).create_function ("overwrite", {{Type::i64 ()}, {}});
+  REQUIRE ((f).has_value ());
+  auto block = mirnext::ir::detail::access (((f)).value ()).create_block ();
+  REQUIRE ((block).has_value ());
+  InstructionBuilder b ((block).value ());
   auto address = b.address_of (*symbol);
-  REQUIRE (address);
-  REQUIRE (b.store (Memory{Type::i64 (), *address}, 99));
-  REQUIRE (b.ret (1));
+  REQUIRE ((address).has_value ());
+  REQUIRE (
+    (b.store (mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 (), &(address).value ()), 99))
+      .has_value ());
+  REQUIRE ((b.ret (1)).has_value ());
   auto p = program (*c);
   auto result = p.call_i64 (find (p, "consumer", "overwrite"));
-  REQUIRE_FALSE (result);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("read-only loaded data") != std::string::npos);
   CHECK (call (p, "consumer", "entry") == 42);
 }
@@ -316,9 +323,9 @@ TEST_CASE (
   auto p = program (*c);
   std::array args{ExecutionArgument (0), ExecutionArgument (10), ExecutionArgument (22.0)};
   auto value = p.call (find (p, "m", "f"), args);
-  INFO ((value ? "" : value.error ().message));
-  REQUIRE (value);
-  CHECK (*(*value)[0].as_i64 () == 42);
+  INFO (((value).has_value () ? "" : value.error ().message));
+  REQUIRE ((value).has_value ());
+  CHECK ((((value).value ())[0].as_i64 ()).value () == 42);
 }
 TEST_CASE ("owning interpreter shares typed host symbol identity across module imports") {
   auto c = parse (
@@ -350,10 +357,11 @@ TEST_CASE ("owning interpreter materializes nested stack scopes on each outgoing
       CAPTURE (level);
       auto optimized
         = transforms::optimize (*c, {.level = static_cast<transforms::OptimizationLevel> (level)});
-      REQUIRE (optimized);
-      auto p = InterpretedProgram::create (std::move (*optimized));
-      REQUIRE (p);
-      CHECK (call (*p, "scopes", "entry") == 42);
+      REQUIRE ((optimized).has_value ());
+      auto p = ExecutionSession::create (std::move ((optimized).value ()),
+                                         {.mode = ExecutionMode::Interpreter});
+      REQUIRE ((p).has_value ());
+      CHECK (call ((p).value (), "scopes", "entry") == 42);
     }
     CHECK (dump (*c) == original);
   }
@@ -400,7 +408,7 @@ TEST_CASE ("owning interpreter reports missing native-address adapters without a
                          }},
                          .native_calls = false});
   auto value = p.call_i64 (find (p, "m", "f"));
-  REQUIRE_FALSE (value);
+  REQUIRE_FALSE ((value).has_value ());
   CHECK (calls == 1);
   CHECK (value.error ().message.find ("typed interpreter implementation") != std::string::npos);
 }
@@ -413,13 +421,15 @@ TEST_CASE (
   for (unsigned level = 0; level < 4; ++level) {
     auto optimized
       = transforms::optimize (*c, {.level = static_cast<transforms::OptimizationLevel> (level)});
-    REQUIRE (optimized);
-    REQUIRE (optimized->find_function ("defs", "hidden"));
-    CHECK (optimized->context ().find_module ("defs")->find_symbol ("hidden") == nullptr);
-    auto p = InterpretedProgram::create (std::move (*optimized));
-    REQUIRE (p);
-    CHECK (call (*p, "consumer", "entry") == 7);
-    CHECK (call (*p, "defs", "hidden") == 7);
+    REQUIRE ((optimized).has_value ());
+    REQUIRE ((optimized.value ().find_function ("defs", "hidden")).has_value ());
+    CHECK (optimized.value ().program ().find_module ("defs").get ()->find_symbol ("hidden").get ()
+           == nullptr);
+    auto p = ExecutionSession::create (std::move ((optimized).value ()),
+                                       {.mode = ExecutionMode::Interpreter});
+    REQUIRE ((p).has_value ());
+    CHECK (call ((p).value (), "consumer", "entry") == 7);
+    CHECK (call ((p).value (), "defs", "hidden") == 7);
   }
 }
 TEST_CASE (
@@ -429,8 +439,8 @@ TEST_CASE (
     = parse ("m:module\nf:func ld\nret 1.25\nendfunc\ng:func d\nret 2.5L\nendfunc\nendmodule\n");
   auto p = program (*c);
   auto a = p.call (find (p, "m", "f")), b = p.call (find (p, "m", "g"));
-  REQUIRE (a);
-  REQUIRE (b);
-  CHECK (*(*a)[0].as_long_double () == 1.25L);
-  CHECK (*(*b)[0].as_double () == 2.5);
+  REQUIRE ((a).has_value ());
+  REQUIRE ((b).has_value ());
+  CHECK ((((a).value ())[0].as_long_double ()).value () == 1.25L);
+  CHECK ((((b).value ())[0].as_double ()).value () == 2.5);
 }

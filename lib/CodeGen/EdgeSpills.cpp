@@ -1,7 +1,11 @@
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* MIR edge placement, Copyright (C) 2018-2024 Vladimir Makarov. MIT License.
    Instructions remain owned by their machine blocks throughout all edits. */
 #include "mirnext/CodeGen/EdgeSpills.hpp"
-#include "mirnext/CodeGen/Detail/SpillEmitter.hpp"
+#include "mirnext/CodeGen/SpillEmitter.hpp"
 #include <algorithm>
 #include <map>
 #include <set>
@@ -18,7 +22,7 @@ bool branch (const MachineInstruction *i) {
   if (!i) return false;
   auto code = i->opcode ();
   auto p = std::get_if<Opcode> (&code);
-  return p && ir::instruction_descriptor (*p)->flow != ir::ControlFlow::Next;
+  return p && ir::instruction_descriptor (*p).get ()->flow != ir::ControlFlow::Next;
 }
 MachineInstruction *last (MachineBasicBlock *b) {
   auto body = b->instructions ();
@@ -49,7 +53,7 @@ struct MachineEdgeEditor {
   std::unordered_map<const MachineBasicBlock *, Node *> by_block;
   std::optional<Error> error;
   MachineEdgeEditor (MachineFunction &f, const MachineControlFlow &cfg) : f (f), rw (f) {
-    for (auto b : cfg.blocks) {
+    for (auto b : detail::NodeAccess::blocks (cfg)) {
       auto n = std::make_unique<Node> ();
       n->block = const_cast<MachineBasicBlock *> (b);
       n->identity = nodes.size ();
@@ -74,7 +78,7 @@ struct MachineEdgeEditor {
   }
   template <class T>
   bool check (const Result<T> &r) {
-    if (!r) {
+    if (!r.has_value ()) {
       fail (r.error ().message);
       return false;
     }
@@ -84,10 +88,10 @@ struct MachineEdgeEditor {
     auto b = after ? rw.create_block_after (*anchor.block) : rw.create_block_before (*anchor.block);
     if (!check (b)) return &anchor;
     auto n = std::make_unique<Node> ();
-    n->block = *b;
+    n->block = &(b).value ();
     n->identity = nodes.size ();
     auto p = n.get ();
-    by_block.emplace (*b, p);
+    by_block.emplace (&(b).value (), p);
     nodes.push_back (std::move (n));
     return p;
   }
@@ -106,7 +110,7 @@ struct MachineEdgeEditor {
   const MachineLabel *target (Edge &e) {
     auto tail = last (e.source->block);
     if (!tail || e.operand >= tail->operands ().size ()) return nullptr;
-    auto label = tail->operands ()[e.operand].get<const MachineLabel *> ();
+    auto label = detail::operand_access (tail->operands ()[e.operand]).get<const MachineLabel *> ();
     return label && &(*label)->block () == e.destination->block ? *label : nullptr;
   }
   Node *split (Edge &e) {
@@ -143,20 +147,22 @@ struct MachineEdgeEditor {
       e.kind = Kind::Fallthrough;
       e.operand = SIZE_MAX;
     } else if (dst->incoming.size () == 1) {
-      if (dst->block->labels ().empty ()) {
+      if (ir::detail::ReferenceAccess::pointers (dst->block->labels ()).empty ()) {
         fail ("jump destination lacks an anchor");
         return dst;
       }
-      if (dst->block->labels ().size () == 1 && !last (dst->block)) return dst;
+      if (ir::detail::ReferenceAccess::pointers (dst->block->labels ()).size () == 1
+          && !last (dst->block))
+        return dst;
       auto label = target (e);
-      if (!label) label = dst->block->labels ()[0];
+      if (!label) label = ir::detail::ReferenceAccess::pointers (dst->block->labels ())[0];
       created = create (*dst, false);
       if (error) return dst;
       check (rw.move_label (*const_cast<MachineLabel *> (label), *created->block));
       redirect (e, *created);
       connect (*created, *dst, Kind::Fallthrough);
     } else {
-      if (dst->block->labels ().empty ()) {
+      if (ir::detail::ReferenceAccess::pointers (dst->block->labels ()).empty ()) {
         fail ("critical destination lacks an anchor");
         return src;
       }
@@ -178,23 +184,25 @@ struct MachineEdgeEditor {
             fail ("single fallthrough source ends in a branch");
             return other;
           }
-          check (rw.append (*other->block, Opcode::Jmp, {MachineOperand (*label)}));
+          check (rw.append (*other->block, Opcode::Jmp,
+                            {detail::NodeAccess::make_MachineOperand (*label)}));
           incoming->kind = Kind::Branch;
           incoming->operand = 0;
         } else {
           auto trampoline = create (*other, true);
           if (error) return other;
-          check (rw.append (*trampoline->block, Opcode::Jmp, {MachineOperand (*label)}));
+          check (rw.append (*trampoline->block, Opcode::Jmp,
+                            {detail::NodeAccess::make_MachineOperand (*label)}));
           redirect (*incoming, *trampoline);
           connect (*trampoline, *dst, Kind::Branch, 0);
         }
       }
       created = create (*dst, false);
       if (error) return src;
-      auto fresh = f.create_label (*created->block);
+      auto fresh = detail::access (f).create_label (*created->block);
       if (!check (fresh)) return src;
       auto ops = std::vector<MachineOperand> (tail->operands ().begin (), tail->operands ().end ());
-      ops[e.operand] = MachineOperand (**fresh);
+      ops[e.operand] = detail::NodeAccess::make_MachineOperand ((fresh).value ());
       check (rw.replace (*tail, tail->opcode (), std::move (ops)));
       redirect (e, *created);
       connect (*created, *dst, Kind::Fallthrough);
@@ -204,15 +212,16 @@ struct MachineEdgeEditor {
   Result<MachineControlFlow> finish () {
     if (error) return *error;
     auto canonical = MachineControlFlow::build (f);
-    if (!canonical) return invalid (f, canonical.error ().message);
+    if (!(canonical).has_value ()) return invalid (f, canonical.error ().message);
     MachineControlFlow cfg;
     cfg.owner_ = &f;
     cfg.revision = f.revision ();
-    cfg.blocks = canonical->blocks;
+    detail::NodeAccess::blocks (cfg) = detail::NodeAccess::blocks (((canonical)).value ());
     std::map<const Node *, std::size_t> indices;
     indices[nodes[0].get ()] = 0;
     indices[nodes[1].get ()] = 1;
-    for (std::size_t b = 2; b < cfg.blocks.size (); ++b) indices[by_block.at (cfg.blocks[b])] = b;
+    for (std::size_t b = 2; b < detail::NodeAccess::blocks (cfg).size (); ++b)
+      indices[by_block.at (detail::NodeAccess::blocks (cfg)[b])] = b;
     cfg.incoming.resize (indices.size ());
     cfg.outgoing.resize (indices.size ());
     for (auto &e : edges)
@@ -229,7 +238,7 @@ struct MachineEdgeEditor {
       std::sort (v.begin (), v.end ());
       return v;
     };
-    if (sorted (cfg) != sorted (*canonical))
+    if (sorted (cfg) != sorted ((canonical).value ()))
       return invalid (f, "edited topology disagrees with block-owned control flow");
     return cfg;
   }
@@ -287,7 +296,7 @@ struct EdgeSpillEngine {
     for (auto el : elements)
       if (el.reg >= result.allocation ().locations_.size ()
           || !std::holds_alternative<target::PhysicalRegister> (
-            result.allocation ().locations_[el.reg]))
+            detail::NodeAccess::storage (result.allocation ().locations_[el.reg])))
         return invalid (f, "edge-spilled value lacks physical assignment");
     std::sort (elements.begin (), elements.end (), [] (auto a, auto b) {
       if (a.edge != b.edge) return a.edge->identity < b.edge->identity;
@@ -363,7 +372,8 @@ struct EdgeSpillEngine {
     });
     placements.erase (std::unique (placements.begin (), placements.end ()), placements.end ());
     for (auto p : placements) {
-      auto r = std::get<const MachineVirtualRegister *> (result.allocation ().registers ()[p.reg]);
+      auto r = std::get<const MachineVirtualRegister *> (
+        detail::NodeAccess::storage (result.allocation ().registers ()[p.reg]));
       auto &b = *p.block->block;
       auto body = b.instructions ();
       auto anchor = p.end ? last (&b) : body.begin () == body.end () ? nullptr : &*body.begin ();
@@ -371,8 +381,9 @@ struct EdgeSpillEngine {
       // each subsequent start insertion precedes the previous generated code.
       bool after = p.end && !branch (anchor);
       auto emitted = spill.preserve (r, b, anchor, after, !p.store);
-      if (!emitted) return emitted.error ();
-      result.placements_.push_back ({r, &b, p.end, p.store});
+      if (!(emitted).has_value ()) return emitted.error ();
+      result.placements_.push_back (
+        detail::NodeAccess::make_MachineSpillPlacement (r, &b, p.end, p.store));
     }
     for (auto p : result.allocation ().global_registers ()) used.erase (p.encoding ());
     auto &a = result.rewrite_.allocation_;
@@ -381,15 +392,17 @@ struct EdgeSpillEngine {
     auto state = f.state ();
     state.edge_spills_inserted = true;
     auto changed = edit.rw.set_state (state);
-    if (!changed) return changed.error ();
+    if (!(changed).has_value ()) return changed.error ();
     auto cfg = edit.finish ();
-    if (!cfg) return cfg.error ();
-    result.cfg_ = std::move (*cfg);
+    if (!(cfg).has_value ()) return cfg.error ();
+    result.cfg_ = std::move ((cfg).value ());
     result.rewrite_.blocks_.clear ();
     a.spill_.clear ();
-    for (std::size_t b = 0; b < result.cfg_.blocks.size (); ++b) {
-      auto node = b < 2 ? edit.nodes[b].get () : edit.by_block.at (result.cfg_.blocks[b]);
-      result.rewrite_.blocks_.push_back ({node->block, node->live_in, node->gen, node->kill});
+    for (std::size_t b = 0; b < detail::NodeAccess::blocks (result.cfg_).size (); ++b) {
+      auto node = b < 2 ? edit.nodes[b].get ()
+                        : edit.by_block.at (detail::NodeAccess::blocks (result.cfg_)[b]);
+      result.rewrite_.blocks_.push_back (
+        {::mirnext::detail::borrow_optional (node->block), node->live_in, node->gen, node->kill});
       a.spill_.push_back ({node->gen, node->kill});
     }
     a.revision_ = f.revision ();
@@ -402,13 +415,13 @@ Result<MachineEdgeSplit> split_machine_edge (MachineFunction &f, const MachineCo
   if (!cfg.current (f) || edge >= cfg.edges.size ())
     return invalid (f, "stale/foreign CFG or invalid edge");
   auto valid = cfg.verify (f);
-  if (!valid) return invalid (f, valid.error ().message);
+  if (!(valid).has_value ()) return invalid (f, valid.error ().message);
   detail::MachineEdgeEditor editor (f, cfg);
   auto b = editor.split (*editor.edges[edge]);
   if (editor.error) return *editor.error;
   auto result = editor.finish ();
-  if (!result) return result.error ();
-  return MachineEdgeSplit{b->block, std::move (*result)};
+  if (!(result).has_value ()) return result.error ();
+  return detail::NodeAccess::make_MachineEdgeSplit (b->block, std::move ((result).value ()));
 }
 Result<MachineSpillResult> split_allocated_spills (MachineFunction &f,
                                                    MachineRewriteResult rewrite) {
@@ -418,12 +431,13 @@ Result<MachineSpillResult> split_allocated_spills (MachineFunction &f,
   if (!rewrite.current (f) || !f.state ().operands_rewritten || f.state ().edge_spills_inserted)
     return invalid (f, "invalid phase or stale/foreign rewrite result");
   auto cfg = MachineControlFlow::build (f);
-  if (!cfg) return invalid (f, cfg.error ().message);
-  if (cfg->blocks.size () != rewrite.blocks ().size ())
+  if (!(cfg).has_value ()) return invalid (f, cfg.error ().message);
+  if (detail::NodeAccess::blocks (((cfg)).value ()).size () != rewrite.blocks ().size ())
     return invalid (f, "rewrite facts disagree with block layout");
-  for (std::size_t b = 0; b < cfg->blocks.size (); ++b)
-    if (cfg->blocks[b] != rewrite.blocks ()[b].block) return invalid (f, "foreign rewrite block");
-  detail::EdgeSpillEngine engine (f, std::move (rewrite), *cfg);
+  for (std::size_t b = 0; b < detail::NodeAccess::blocks (((cfg)).value ()).size (); ++b)
+    if (detail::NodeAccess::blocks (((cfg)).value ())[b] != rewrite.blocks ()[b].block.get ())
+      return invalid (f, "foreign rewrite block");
+  detail::EdgeSpillEngine engine (f, std::move (rewrite), (cfg).value ());
   return engine.run ();
 }
 }  // namespace mirnext::codegen

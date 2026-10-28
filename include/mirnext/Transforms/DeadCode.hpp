@@ -5,6 +5,6 @@ namespace mirnext::transforms {
 class SSADeadCodePass final : public FunctionPass {
  public:
   std::string_view name () const noexcept override { return "ssa-dce"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 };
 }  // namespace mirnext::transforms

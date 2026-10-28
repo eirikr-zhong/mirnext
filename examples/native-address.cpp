@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Address lowering rewrites canonical instructions. */
+#include "mirnext/IR/Builder.hpp"
 #include "mirnext/Transforms/Address.hpp"
 #include "mirnext/Transforms/Simplify.hpp"
 #include "mirnext/Transforms/PrepareCFG.hpp"
@@ -8,23 +9,21 @@
 int main () {
   using namespace mirnext;
   using namespace mirnext::ir;
-  Context context;
-  auto module = context.create_module ("address");
-  if (!module) return 1;
-  auto function = (*module)->create_function ("entry", {{Type::i64 ()}, {}});
-  if (!function) return 1;
-  auto block = (*function)->create_block ();
-  if (!block) return 1;
-  auto variable = (*function)->create_register (Type::i64 (), "value");
-  if (!variable) return 1;
-  IRBuilder body (**block);
-  if (!body.assign (**variable, 7)) return 1;
-  auto pointer = body.address_of (**variable);
-  if (!pointer) return 1;
-  const Type byte (Type::Kind::I8);
-  if (!body.store (Memory{byte, *pointer}, Operand (255))) return 1;
-  auto loaded = body.load (Memory{byte, *pointer});
-  if (!loaded || !body.ret (Operand (**loaded))) return 1;
+  Program context;
+  MIRBuilder builder (context);
+  auto *module = builder.create_module ("address");
+  builder.create_function<std::int64_t ()> (module, "entry");
+  auto value = builder.create_register (Type::i64 (), "value");
+  builder.create_assign (value, builder.constant_i64 (7));
+  auto pointer = builder.create_address_of (value);
+  auto byte = builder.memory (Type (Type::Kind::I8), pointer);
+  builder.create_store (byte, builder.constant (Type (Type::Kind::I8), Operand (255)));
+  builder.create_return (builder.create_convert (builder.create_load (byte), Type::i64 ()));
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    std::cerr << built.error ().message << '\n';
+    return 1;
+  }
   transforms::FunctionPassManager passes;
   passes.add<transforms::SimplifyPass> ();
   passes.add<transforms::PrepareCFGPass> ();
@@ -38,12 +37,12 @@ int main () {
       std::cout << event.pass << '\n' << dump (event.function);
     return {};
   });
-  if (!status) {
+  if (!status.has_value ()) {
     std::cerr << status.error ().message << '\n';
     return 1;
   }
   auto binary = serialization::write_binary (context);
-  if (!binary) {
+  if (!binary.has_value ()) {
     std::cerr << binary.error ().message << '\n';
     return 1;
   }

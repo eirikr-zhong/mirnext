@@ -1,46 +1,41 @@
 /* Licensed under the MIT License. Owning callable with persistent data. */
 #include <mirnext/Execution/Session.hpp>
-#include <array>
 #include <iostream>
 mirnext::Result<mirnext::execution::FunctionHandle> build () {
   using namespace mirnext;
   using namespace mirnext::ir;
-  Context context;
-  MIRNEXT_TRY_VALUE (module, context.create_module ("counter"));
-  MIRNEXT_TRY_VALUE (total, module->create_variable ("total", Type::i64 (), 0));
-  MIRNEXT_TRY_VALUE (add, module->create_function ("add", {{Type::i64 ()}, {Type::i64 ()}}));
-  MIRNEXT_TRY_VALUE (block, add->create_block ());
-  IRBuilder body (*block);
-  MIRNEXT_TRY_VALUE (previous, body.load (*total));
-  auto next = body.expression (*previous) + body.expression (*add->arguments ()[0]);
-  MIRNEXT_RESULT_RET (body.store (*total, next));
-  MIRNEXT_RESULT_RET (body.ret (next));
-  MIRNEXT_TRY_VALUE (session,
-                     execution::ExecutionSession::create (context,
-                                                          {.link
-                                                           = {.compilation
-                                                              = execution::JITCompilation::Lazy}}));
-  return session.find_function ("counter", "add");
+  Program program;
+  MIRBuilder builder (program);
+  auto *module = builder.create_module ("counter");
+  auto *total = builder.create_variable (module, "total", std::int64_t{0});
+  builder.create_function<std::int64_t (std::int64_t)> (module, "add");
+  auto next = builder.create_add (builder.create_load (total), builder.argument (0));
+  builder.create_store (total, next);
+  builder.create_return (next);
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    return built.error ();
+  }
+  auto session
+    = execution::ExecutionSession::create (std::move (program),
+                                           {.link
+                                            = {.compilation = execution::JITCompilation::Lazy}});
+  if (!session.has_value ()) return session.error ();
+  return session.value ().find_function ("counter", "add");
 }
 int main () {
-  auto target = mirnext::target::TargetMachine::native ();
-  if (!target) return 1;
   auto add = build ();
-  if (!add) {
+  if (!add.has_value ()) {
     std::cerr << add.error ().message << '\n';
     return 1;
   }
-  // Both source IR and session are destroyed. The callable retains data, code
-  // and the services used to compile its body and ABI adapter on first call.
   for (std::int64_t increment : {20, 22}) {
-    std::array arguments{increment};
-    auto value = add->call_i64 (arguments);
-    if (!value) {
+    auto value = add.value ().call_i64 ({increment});
+    if (!value.has_value ()) {
       std::cerr << value.error ().message << '\n';
       return 1;
     }
-    std::cout << "total = " << *value << '\n';
-    if (*value != (increment == 20 ? 20 : 42)) return 1;
+    std::cout << "total = " << value.value () << '\n';
+    if (value.value () != (increment == 20 ? 20 : 42)) return 1;
   }
-  return 0;
 }

@@ -167,8 +167,8 @@ class Decompressor {
     std::size_t produced = 0, count = 0;
     for (;;) {
       auto tag = get ();
-      if (!tag) return tag.error ();
-      if (!*tag) {
+      if (!(tag).has_value ()) return tag.error ();
+      if (!(tag).value ()) {
         if (input_.size () != 8) return invalid ("missing checksum or trailing bytes");
         if (produced) checksum = hash (std::span (block_).first (produced), checksum);
         std::uint64_t expected = 0;
@@ -176,14 +176,14 @@ class Decompressor {
           expected |= std::uint64_t (std::to_integer<unsigned> (input_[n])) << (n * 8);
         if (expected != checksum) return invalid ("checksum mismatch");
         auto appended = append (produced);
-        if (!appended) return appended.error ();
+        if (!(appended).has_value ()) return appended.error ();
         return std::move (output_);
       }
-      unsigned literals = *tag >> 5;
+      unsigned literals = (tag).value () >> 5;
       if (literals == 7) {
         auto value = number ();
-        if (!value) return value.error ();
-        literals = *value;
+        if (!(value).has_value ()) return value.error ();
+        literals = (value).value ();
       }
       if (literals > 2047 || literals > block_size - produced || literals > input_.size ())
         return invalid ("invalid literal length");
@@ -192,20 +192,21 @@ class Decompressor {
         input_ = input_.subspan (literals);
         for (unsigned n = 0; n < literals; ++n) indices_[count++] = produced++;
       }
-      unsigned length = *tag & 31;
+      unsigned length = (tag).value () & 31;
       if (length) {
         if (length == 31) {
           auto value = number ();
-          if (!value) return value.error ();
-          length = *value;
+          if (!(value).has_value ()) return value.error ();
+          length = (value).value ();
         }
         if (!length || length > block_size - produced || length + 3 > block_size - produced)
           return invalid ("invalid reference length");
         length += 3;
         auto offset = number ();
-        if (!offset) return offset.error ();
-        if (!*offset || *offset > count) return invalid ("invalid dictionary reference");
-        auto source = indices_[count - *offset];
+        if (!(offset).has_value ()) return offset.error ();
+        if (!(offset).value () || (offset).value () > count)
+          return invalid ("invalid dictionary reference");
+        auto source = indices_[count - (offset).value ()];
         if (source > produced || length > produced - source)
           return invalid ("overlapping or uninitialized reference");
         std::memcpy (block_.data () + produced, block_.data () + source, length);
@@ -215,7 +216,7 @@ class Decompressor {
       if (produced == block_size) {
         checksum = hash (block_, checksum);
         auto appended = append (produced);
-        if (!appended) return appended.error ();
+        if (!(appended).has_value ()) return appended.error ();
         produced = count = 0;
       }
     }
@@ -234,15 +235,15 @@ class Decompressor {
   }
   Result<std::uint32_t> number () {
     auto first = get ();
-    if (!first) return first.error ();
-    unsigned count = 1, value = *first;
+    if (!(first).has_value ()) return first.error ();
+    unsigned count = 1, value = (first).value ();
     while (count <= 4 && (value >> (8 - count)) != 1) ++count;
     if (count > 4) return invalid ("invalid integer tag");
     value &= 255u >> count;
     for (unsigned n = 1; n < count; ++n) {
       auto next = get ();
-      if (!next) return next.error ();
-      value = value * 256 + *next;
+      if (!(next).has_value ()) return next.error ();
+      value = value * 256 + (next).value ();
     }
     return value;
   }

@@ -7,7 +7,7 @@
 namespace mirnext::execution::detail {
 struct LoadedProgram : ProgramImage {
   std::shared_ptr<const transforms::OptimizedProgram> optimized;
-  InterpreterOptions options;
+  ExecutionOptions options;
   InterpreterStatistics prepared;
   struct Location {
     InterpreterBody *body;
@@ -65,8 +65,8 @@ struct LoadedProgram : ProgramImage {
   std::vector<ExecutableCode> jump_entries;
   std::unordered_map<const ir::Label *, std::pair<std::size_t, std::size_t>> label_offsets;
   std::unordered_map<const ir::Label *, const codegen::MachineLabel *> block_labels;
-  LoadedProgram (std::shared_ptr<const ir::Context> c, target::TargetMachine t,
-                 InterpreterOptions o, std::shared_ptr<const transforms::OptimizedProgram> p = {},
+  LoadedProgram (std::shared_ptr<const ir::Program> c, target::TargetMachine t, ExecutionOptions o,
+                 std::shared_ptr<const transforms::OptimizedProgram> p = {},
                  ExecutionEngine engine = ExecutionEngine::Interpreter)
     : ProgramImage (std::move (c), std::move (t)),
       optimized (std::move (p)),

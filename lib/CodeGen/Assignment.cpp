@@ -1,3 +1,4 @@
+#include "mirnext/CodeGen/Access.hpp"
 /* Priority assignment derived from MIR, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. Consumes owning machine nodes and analyses. */
 #include "mirnext/CodeGen/RegisterAllocation.hpp"
@@ -44,7 +45,7 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
       || !std::ranges::equal (live.registers (), ranges.registers ()))
     return invalid (f, "inconsistent or compact allocation analyses");
   auto valid = f.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   auto count = live.registers ().size (), physical = f.target ().registers ().size ();
   if (ranges.point_count () < 0 || ranges.point_count () == INT_MAX || count > SIZE_MAX / 16)
     return invalid (f, "allocation dimensions overflow");
@@ -67,8 +68,8 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
         bool inner = true;
         for (auto child : parent.children)
           if (graph.loops ()[child].block == no_machine_node) inner = false;
-        if (inner && graph.cfg ().blocks[node.block])
-          result.aligned_loops_.push_back (graph.cfg ().blocks[node.block]);
+        if (inner && detail::NodeAccess::blocks (graph.cfg ())[node.block])
+          result.aligned_loops_.push_back (detail::NodeAccess::blocks (graph.cfg ())[node.block]);
       }
   MachinePointLocations globals;
   for (auto p : live.global_registers ()) globals.physical.insert (p.encoding ());
@@ -77,11 +78,12 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
   std::vector<long> frequencies (count);
   SparseBitSet addressable;
   for (std::size_t r = physical; r < count; ++r) {
-    auto reg = std::get<const MachineVirtualRegister *> (result.registers_[r]);
+    auto reg = std::get<const MachineVirtualRegister *> (
+      detail::NodeAccess::storage (result.registers_[r]));
     result.virtuals_.emplace (reg, r);
-    auto frequency = live.frequency (reg);
-    if (!frequency) return frequency.error ();
-    frequencies[r] = *frequency;
+    auto frequency = live.frequency (detail::NodeAccess::make_MachineRegister (reg));
+    if (!(frequency).has_value ()) return frequency.error ();
+    frequencies[r] = (frequency).value ();
     if (reg->is_memory_backed ()) addressable.insert (r);
   }
   // ADDR makes storage observable even at O0/O1, before address conversion.
@@ -92,13 +94,15 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
       if (op
           && (*op == ir::Opcode::Addr || *op == ir::Opcode::Addr8 || *op == ir::Opcode::Addr16
               || *op == ir::Opcode::Addr32)) {
-        auto local = i.operands ()[1].get<const MachineVirtualRegister *> ();
+        auto local
+          = detail::operand_access (i.operands ()[1]).get<const MachineVirtualRegister *> ();
         if (!local) return invalid (f, "local address requires a virtual register");
         addressable.insert (result.virtuals_.at (*local));
       }
     }
   auto reg_at = [&] (std::size_t r) {
-    return std::get<const MachineVirtualRegister *> (result.registers_[r]);
+    return std::get<const MachineVirtualRegister *> (
+      detail::NodeAccess::storage (result.registers_[r]));
   };
   auto type_at = [&] (std::size_t r) { return reg_at (r)->type (); };
   auto new_stack = [&] (ir::Type type) {
@@ -132,7 +136,8 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
   auto reserve = [&] (const MachineLocation &location, const MachineLiveRange &lr,
                       std::vector<MachinePointLocations> &points, bool set = true) {
     for (int p = lr.start; p <= lr.finish; ++p) {
-      if (auto physical = std::get_if<target::PhysicalRegister> (&location)) {
+      if (auto physical
+          = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&location))) {
         if (set)
           points[p].physical.insert (physical->encoding ());
         else
@@ -149,14 +154,15 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
   };
   for (std::size_t r = 0; r < physical; ++r)
     for (auto &lr : ranges.all_ranges ()[r]) {
-      auto location = std::get<target::PhysicalRegister> (result.registers_[r]);
+      auto location
+        = std::get<target::PhysicalRegister> (detail::NodeAccess::storage (result.registers_[r]));
       reserve (location, lr, result.used_);
       if (advanced) reserve (location, lr, result.busy_);
     }
   std::map<std::pair<unsigned, int>, Gap> gaps;
   std::unordered_map<const MachineBasicBlock *, std::size_t> blocks;
-  for (std::size_t b = 2; b < graph.cfg ().blocks.size (); ++b)
-    blocks.emplace (graph.cfg ().blocks[b], b);
+  for (std::size_t b = 2; b < detail::NodeAccess::blocks (graph.cfg ()).size (); ++b)
+    blocks.emplace (detail::NodeAccess::blocks (graph.cfg ())[b], b);
   auto range = [&] (const Gap &g) -> const MachineLiveRange & {
     return ranges.all_ranges ()[g.reg][g.range];
   };
@@ -166,9 +172,9 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
   auto spill_cost = [&] (const MachineLiveRange &lr) {
     if (auto found = spill_costs.find (&lr); found != spill_costs.end ()) return found->second;
     SparseBitSet members;
-    for (auto b : lr.blocks) members.insert (blocks.at (b));
+    for (auto b : detail::NodeAccess::blocks (lr)) members.insert (blocks.at (b));
     std::int64_t cost = 0;
-    for (auto node : lr.blocks) {
+    for (auto node : detail::NodeAccess::blocks (lr)) {
       auto b = blocks.at (node);
       auto level = static_cast<std::int64_t> (graph.loop_depth ()[b]) + 1;
       for (bool outgoing : {true, false}) {
@@ -275,7 +281,7 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
           if (available (p.reg, lr, result.busy_)) {
             deduction = find_gaps (p.reg, lr, candidate);
             gap_size += lr.finish - lr.start + 1;
-          } else if (lr.blocks.empty ()) {
+          } else if (detail::NodeAccess::blocks (lr).empty ()) {
             possible = false;
             break;
           } else {
@@ -322,7 +328,8 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
     SparseBitSet own_spills;
     for (auto g = spilled.rbegin (); g != spilled.rend (); ++g) {
       auto &lr = range (*g);
-      for (auto b : lr.blocks) result.spill_[blocks.at (b)].gen.insert (g->reg);
+      for (auto b : detail::NodeAccess::blocks (lr))
+        result.spill_[blocks.at (b)].gen.insert (g->reg);
       if (g->reg == reg) {
         own_spills.insert (lr.start);
         continue;
@@ -337,7 +344,7 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
       bool reserved = simple || !own_spills.contains (lr.start);
       if (reserved) reserve (location, lr, result.used_);
       if (simple) continue;
-      if (lr.blocks.empty ())
+      if (detail::NodeAccess::blocks (lr).empty ())
         reserve (location, lr, result.busy_);
       else if (reserved)
         gaps.insert_or_assign ({best->encoding (), lr.start}, Gap{*best, reg, n});
@@ -346,7 +353,8 @@ Result<MachineAllocation> MachineAllocation::assign (const MachineFunction &f,
   used_registers.for_each (
     [&] (auto r) { result.used_registers_.push_back (f.target ().registers ()[r].reg); });
   for (auto &[key, gap] : gaps)
-    result.gaps_.push_back ({gap.physical, reg_at (gap.reg), range (gap)});
+    result.gaps_.push_back (
+      detail::NodeAccess::make_MachineAllocationGap (gap.physical, reg_at (gap.reg), range (gap)));
   return result;
 }
 }  // namespace mirnext::codegen

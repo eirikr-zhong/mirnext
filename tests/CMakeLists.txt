@@ -1,3 +1,4 @@
+include_directories(${PROJECT_SOURCE_DIR}/lib)
 find_package(Threads REQUIRED)
 
 if(MIRNEXT_ENABLE_NATIVE_EVIDENCE)
@@ -44,6 +45,10 @@ if(MIRNEXT_BUILD_SCRIPT_TESTS)
     ${PROJECT_SOURCE_DIR}/tests/Support/CheckResultFault.py $<TARGET_FILE:mirnext_result_fault_probe>)
 endif()
 set_property(CACHE MIRNEXT_TEST_EXPECTED_TARGET PROPERTY STRINGS "" x86_64-sysv x86_64-windows aarch64-linux aarch64-macos)
+add_executable(mirnext_public_api_test Support/PublicAPI.cpp)
+target_include_directories(mirnext_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
+mir_target_cxx_options(mirnext_public_api_test)
+add_test(NAME mirnext-public-api COMMAND mirnext_public_api_test)
 if(NOT MIRNEXT_TEST_EXPECTED_TARGET MATCHES "^(|x86_64-sysv|x86_64-windows|aarch64-linux|aarch64-macos)$")
   message(FATAL_ERROR "Unknown MIRNEXT_TEST_EXPECTED_TARGET: ${MIRNEXT_TEST_EXPECTED_TARGET}")
 endif()
@@ -93,6 +98,8 @@ add_test(NAME mirnext-native-acceptance-${linkage} COMMAND ${acceptance_command}
 set_tests_properties(mirnext-native-acceptance-${linkage} PROPERTIES LABELS "native-acceptance" TIMEOUT 120)
 mirnext_add_test(mirnext_ir_test mirnext-unified-ir
   SOURCES IR/Core.cpp IR/DataUses.cpp)
+mirnext_add_test(mirnext_builder_test mirnext-explicit-builder
+  SOURCES IR/Builder.cpp IR/NativeBuilder.cpp)
 mirnext_add_test(mirnext_text_test mirnext-unified-text WITH_RTTI
   SOURCES Serialization/Text.cpp)
 target_compile_definitions(mirnext_text_test PRIVATE MIRNEXT_TEST_SOURCE_DIR="${PROJECT_SOURCE_DIR}")

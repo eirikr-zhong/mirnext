@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. MIR traversal, dominance, liveness and natural loops. */
+#include "mirnext/Analysis/Access.hpp"
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
 #include <algorithm>
 #include <numeric>
@@ -30,32 +32,42 @@ mirnext::Result<FunctionGraph> FunctionGraphAnalysis::run (const ir::Function &f
                                                            FunctionAnalysisManager &analyses) {
   if (&analyses.function () != &function) return owner_error (function);
   auto source = analyses.get<ControlFlowAnalysis> ();
-  if (!source) return source.error ();
+  if (!(source).has_value ()) return source.error ();
   FunctionGraph graph;
   graph.blocks.push_back ({FunctionGraph::Kind::Entry});
   graph.blocks.push_back ({FunctionGraph::Kind::Exit});
   // The original generator prepends a label. A pre-existing first label starts
   // another block; represent that empty prologue without mutating public IR.
-  const bool prologue = !(*source)->blocks.front ()->labels ().empty ();
+  const bool prologue = !ir::detail::ReferenceAccess::pointers (
+                           detail::NodeAccess::blocks (((source)).value ()).front ()->labels ())
+                           .empty ();
   if (prologue) graph.blocks.push_back ({FunctionGraph::Kind::Prologue});
   const auto offset = graph.blocks.size ();
-  for (auto block : (*source)->blocks) {
-    graph.indices.emplace (block, graph.blocks.size ());
-    graph.blocks.push_back ({FunctionGraph::Kind::Body, block});
+  for (auto block : detail::NodeAccess::blocks (((source)).value ())) {
+    detail::NodeAccess::indices (graph).emplace (block, graph.blocks.size ());
+    graph.blocks.push_back ({FunctionGraph::Kind::Body, *block});
   }
   for (auto &block : function.blocks ())
     for (auto &instruction : block.instructions ())
       if (instruction.opcode () == ir::Opcode::LAddr)
         graph
-          .blocks[graph.indices.at (
-            &(*instruction.operands ()[1].get<const ir::Label *> ())->block ())]
+          .blocks[detail::NodeAccess::indices (graph).at (
+            &(*ir::detail::operand_access (instruction.operands ()[1]).get<const ir::Label *> ())
+               ->block ())]
           .address_taken = true;
-  for (auto data : function.label_data_uses ())
+  for (auto data : ir::detail::ReferenceAccess::pointers (function.label_data_uses ()))
     if (auto ref = std::get_if<ir::LabelReference> (&data->initializer ())) {
-      if (&ref->label->function () == &function)
-        graph.blocks[graph.indices.at (&ref->label->block ())].address_taken = true;
-      if (ref->base && &ref->base->function () == &function)
-        graph.blocks[graph.indices.at (&ref->base->block ())].address_taken = true;
+      if (&ir::detail::NodeAccess::label (*(ref))->function () == &function)
+        graph
+          .blocks[detail::NodeAccess::indices (graph).at (
+            &ir::detail::NodeAccess::label (*(ref))->block ())]
+          .address_taken = true;
+      if (ir::detail::NodeAccess::base (*(ref))
+          && &ir::detail::NodeAccess::base (*(ref))->function () == &function)
+        graph
+          .blocks[detail::NodeAccess::indices (graph).at (
+            &ir::detail::NodeAccess::base (*(ref))->block ())]
+          .address_taken = true;
     }
   const auto count = graph.blocks.size ();
   graph.incoming.resize (count);
@@ -68,7 +80,7 @@ mirnext::Result<FunctionGraph> FunctionGraphAnalysis::run (const ir::Function &f
         graph.incoming[to].push_back (id);
       };
   if (prologue) edge (2, offset, EdgeKind::Fallthrough);
-  for (auto &e : (*source)->edges)
+  for (auto &e : source.value ().edges)
     edge (e.source + offset, e.destination + offset, e.kind, e.operand);
   // Layout order is observable to DFS/SSA: entry -> exit is added before any
   // additional entry edges, and return -> exit edges follow the body edges.
@@ -122,8 +134,8 @@ mirnext::Result<DominatorTree> DominatorAnalysis::run (const ir::Function &funct
                                                        FunctionAnalysisManager &analyses) {
   if (&analyses.function () != &function) return owner_error (function);
   auto result = analyses.get<FunctionGraphAnalysis> ();
-  if (!result) return result.error ();
-  auto &graph = **result;
+  if (!(result).has_value ()) return result.error ();
+  auto &graph = (result).value ();
   const auto count = graph.blocks.size ();
   DominatorTree tree;
   tree.immediate.assign (count, SIZE_MAX);
@@ -188,11 +200,11 @@ bool RegisterLiveness::live_out (std::size_t block, const ir::Register &reg) con
 mirnext::Result<RegisterLiveness> LivenessAnalysis::run (const ir::Function &function,
                                                          FunctionAnalysisManager &analyses) {
   auto phase = function.require_register_ir ();
-  if (!phase) return phase.error ();
+  if (!(phase).has_value ()) return phase.error ();
   if (&analyses.function () != &function) return owner_error (function);
   auto result = analyses.get<FunctionGraphAnalysis> ();
-  if (!result) return result.error ();
-  auto &graph = **result;
+  if (!(result).has_value ()) return result.error ();
+  auto &graph = (result).value ();
   RegisterLiveness live;
   const auto count = graph.blocks.size ();
   live.in.resize (count);
@@ -201,8 +213,8 @@ mirnext::Result<RegisterLiveness> LivenessAnalysis::run (const ir::Function &fun
   live.killed.resize (count);
   std::vector<const ir::Register *> hardware;
   for (auto &reg : function.registers ()) {
-    live.indices.emplace (&reg, live.registers.size ());
-    live.registers.push_back (&reg);
+    detail::NodeAccess::indices (live).emplace (&reg, detail::NodeAccess::registers (live).size ());
+    detail::NodeAccess::registers (live).push_back (&reg);
     if (!reg.hardware_binding ().empty () && !reg.is_memory_backed ()) hardware.push_back (&reg);
   }
   // MIR's optimization iterator classifies LADDR's destination as an input.
@@ -211,10 +223,10 @@ mirnext::Result<RegisterLiveness> LivenessAnalysis::run (const ir::Function &fun
     return insn.opcode () != ir::Opcode::LAddr && ir::output_operand (function, insn, p);
   };
   for (std::size_t b = 0; b < count; ++b)
-    if (auto block = graph.blocks[b].ir) {
+    if (auto block = detail::NodeAccess::ir (graph.blocks[b])) {
       auto input = [&] (const ir::Register *reg) {
         if (reg) {
-          auto id = live.indices.at (reg);
+          auto id = detail::NodeAccess::indices (live).at (reg);
           if (!live.killed[b].contains (id)) live.generated[b].insert (id);
         }
       };
@@ -225,16 +237,19 @@ mirnext::Result<RegisterLiveness> LivenessAnalysis::run (const ir::Function &fun
           for (auto reg : hardware) input (reg);
         for (std::size_t p = 0; p < insn.operands ().size (); ++p) {
           auto &operand = insn.operands ()[p];
-          if (auto reg = operand.get<const ir::Register *> (); reg && !output (insn, p))
+          if (auto reg = ir::detail::operand_access (operand).get<const ir::Register *> ();
+              reg && !output (insn, p))
             input (*reg);
-          else if (auto memory = operand.get<ir::Memory> ()) {
-            input (memory->base);
-            input (memory->index);
+          else if (auto memory = ir::detail::operand_access (operand).get<ir::Memory> ()) {
+            input (ir::detail::NodeAccess::base (*(memory)));
+            input (ir::detail::NodeAccess::index (*(memory)));
           }
         }
         for (std::size_t p = 0; p < insn.operands ().size (); ++p)
-          if (auto reg = insn.operands ()[p].get<const ir::Register *> (); reg && output (insn, p))
-            live.killed[b].insert (live.indices.at (*reg));
+          if (auto reg
+              = ir::detail::operand_access (insn.operands ()[p]).get<const ir::Register *> ();
+              reg && output (insn, p))
+            live.killed[b].insert (detail::NodeAccess::indices (live).at (*reg));
       }
     }
   // In/out start empty and only grow. Accumulate outgoing facts and enqueue
@@ -281,8 +296,8 @@ mirnext::Result<LoopTree> LoopAnalysis::run (const ir::Function &function,
                                              FunctionAnalysisManager &analyses) {
   if (&analyses.function () != &function) return owner_error (function);
   auto result = analyses.get<FunctionGraphAnalysis> ();
-  if (!result) return result.error ();
-  auto &graph = **result;
+  if (!(result).has_value ()) return result.error ();
+  auto &graph = (result).value ();
   LoopTree tree;
   const auto count = graph.blocks.size ();
   tree.nodes.reserve (2 * count + 1);

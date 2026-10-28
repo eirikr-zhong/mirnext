@@ -1,6 +1,7 @@
 /* Licensed under the MIT License. Native pass execution and observation. */
 #pragma once
 #include "mirnext/Analysis/AnalysisManager.hpp"
+#include "mirnext/IR/Builder.hpp"
 #include <concepts>
 #include <functional>
 
@@ -13,9 +14,9 @@ class FunctionPass {
  public:
   virtual ~FunctionPass () = default;
   virtual std::string_view name () const noexcept = 0;
-  virtual Result<void> initialize (ir::Context &) { return {}; }
+  virtual Result<void> initialize (ir::Program &) { return {}; }
   virtual void finalize () noexcept {}
-  virtual Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) = 0;
+  virtual Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) = 0;
 };
 struct PassEvent {
   enum class Phase { Before, After };
@@ -34,7 +35,7 @@ class FunctionPassManager {
   }
   Result<void> run (ir::Function &, analysis::FunctionAnalysisManager &, PassObserver = {}) const;
   // Run each pass over the whole scope before advancing to the next pass.
-  Result<void> run (ir::Context &, PassObserver = {}) const;
+  Result<void> run (ir::Program &, PassObserver = {}) const;
   Result<void> run (ir::Module &, PassObserver = {}) const;
 
  private:
@@ -50,6 +51,7 @@ struct ModulePassEvent {
 using ModulePassObserver = std::function<Result<void> (const ModulePassEvent &)>;
 struct ModulePassContext {
   analysis::ModuleAnalysisManager &analyses;
+  ir::MIRBuilder &builder;
   // Nested function passes share the same instrumentation as direct runs.
   const PassObserver &function_observer;
 };
@@ -57,7 +59,7 @@ class ModulePass {
  public:
   virtual ~ModulePass () = default;
   virtual std::string_view name () const noexcept = 0;
-  virtual Result<void> initialize (ir::Context &) { return {}; }
+  virtual Result<void> initialize (ir::Program &) { return {}; }
   virtual void finalize () noexcept {}
   virtual Result<PassResult> run (ir::Module &, ModulePassContext &) = 0;
 };
@@ -69,7 +71,7 @@ class FunctionPassAdaptor final : public ModulePass {
   std::string_view name () const noexcept override {
     return pass_ ? pass_->name () : "empty-function-pass";
   }
-  Result<void> initialize (ir::Context &context) override {
+  Result<void> initialize (ir::Program &context) override {
     if (!pass_) return Error{ErrorCode::InvalidArgument, "function pass adaptor requires a pass"};
     return pass_->initialize (context);
   }
@@ -97,10 +99,10 @@ class ModulePassManager {
   Result<void> run (ir::Module &, analysis::ModuleAnalysisManager &, ModulePassObserver = {},
                     PassObserver = {}) const;
   // Phase-major order: finish a pass over every module before starting the next.
-  Result<void> run (ir::Context &, ModulePassObserver = {}, PassObserver = {}) const;
+  Result<void> run (ir::Program &, ModulePassObserver = {}, PassObserver = {}) const;
 
  private:
-  Result<void> run_scope (ir::Context &, std::span<ir::Module *const>,
+  Result<void> run_scope (ir::Program &, std::span<ir::Module *const>,
                           std::span<analysis::ModuleAnalysisManager *const>,
                           const ModulePassObserver &, const PassObserver &) const;
   std::vector<std::unique_ptr<ModulePass>> passes_;

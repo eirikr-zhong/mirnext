@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Isolated GVN timings and checked output fingerprints. */
+#include "mirnext/Transforms/Testing.hpp"
 #include "mirnext/Transforms/GVN.hpp"
 #include "mirnext/Transforms/Simplify.hpp"
 #include "mirnext/Transforms/PrepareCFG.hpp"
@@ -47,43 +48,44 @@ int main () {
       std::uint64_t fingerprint = 0;
       for (unsigned repetition = 0; repetition < repeats; ++repetition) {
         auto parsed = serialization::parse_text (text);
-        if (!parsed) {
+        if (!(parsed).has_value ()) {
           std::cerr << parsed.error ().message << '\n';
           return 1;
         }
-        auto &function = *(*parsed)->modules ().begin ()->functions ().begin ();
+        auto &function = *parsed.value ().modules ().begin ()->functions ().begin ();
         FunctionAnalysisManager analyses (function);
         FunctionPassManager prepare;
         prepare.add<SimplifyPass> ();
         prepare.add<PrepareCFGPass> ();
         prepare.add<BuildSSAPass> ();
         auto prepared = prepare.run (function, analyses);
-        if (!prepared) {
+        if (!(prepared).has_value ()) {
           std::cerr << prepared.error ().message << '\n';
           return 1;
         }
         allocations = 0;
         measuring = true;
         auto start = std::chrono::steady_clock::now ();
-        auto result = GVNPass ().run (function, analyses);
+        auto result = ::mirnext::transforms::detail::run_pass (GVNPass (), function, analyses);
         auto end = std::chrono::steady_clock::now ();
         measuring = false;
-        if (!result) {
+        if (!(result).has_value ()) {
           std::cerr << result.error ().message << '\n';
           return 1;
         }
-        if (!function.verify ()) return 1;
+        if (!(function.verify ()).has_value ()) return 1;
         auto snapshot = dump (function);
         std::uint64_t hash = 14695981039346656037ULL;
         for (unsigned char c : snapshot) hash = (hash ^ c) * 1099511628211ULL;
-        if (repetition && (fingerprint != hash || changes != result->transformations)) {
+        if (repetition && (fingerprint != hash || changes != result.value ().transformations)) {
           std::cerr << "unstable output blocks=" << count << " fingerprint=" << fingerprint << '/'
-                    << hash << " changes=" << changes << '/' << result->transformations << '\n';
+                    << hash << " changes=" << changes << '/' << result.value ().transformations
+                    << '\n';
           return 1;
         }
         allocation_counts.push_back (allocations);
         fingerprint = hash;
-        changes = result->transformations;
+        changes = result.value ().transformations;
         times.push_back (std::chrono::duration<double, std::milli> (end - start).count ());
       }
       std::ranges::sort (times);

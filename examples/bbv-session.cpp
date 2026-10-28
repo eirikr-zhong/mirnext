@@ -5,24 +5,22 @@ mirnext::Result<mirnext::execution::ExecutionSession> build () {
   using namespace mirnext;
   using namespace mirnext::ir;
   using namespace mirnext::execution;
-  Context source;
-  auto module = source.create_module ("example");
-  if (!module) return module.error ();
-  auto f = (*module)->create_function ("choose", {{Type::i64 ()}, {Type::i64 ()}});
-  if (!f) return f.error ();
-  auto entry = (*f)->create_block (), zero = (*f)->create_block (), nonzero = (*f)->create_block ();
-  if (!entry) return entry.error ();
-  if (!zero) return zero.error ();
-  if (!nonzero) return nonzero.error ();
-  auto label = (*f)->create_label (**nonzero, "nonzero");
-  if (!label) return label.error ();
-  auto branch = IRBuilder (**entry).branch_if (Operand (*(*f)->arguments ()[0]), **label);
-  if (!branch) return branch.error ();
-  auto returned = IRBuilder (**zero).ret (17);
-  if (!returned) return returned.error ();
-  returned = IRBuilder (**nonzero).ret (42);
-  if (!returned) return returned.error ();
-  return ExecutionSession::create (source,
+  Program program;
+  MIRBuilder builder (program);
+  auto *module = builder.create_module ("example");
+  builder.create_function<std::int64_t (std::int64_t)> (module, "choose");
+  auto *zero = builder.create_block ("zero");
+  auto *nonzero = builder.create_block ("nonzero");
+  builder.create_cond_branch (builder.argument (0), nonzero);
+  builder.set_insert_point (zero);
+  builder.create_return (builder.constant_i64 (17));
+  builder.set_insert_point (nonzero);
+  builder.create_return (builder.constant_i64 (42));
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    return built.error ();
+  }
+  return ExecutionSession::create (std::move (program),
                                    {.link
                                     = {.compilation = JITCompilation::BlockVersioning,
                                        .block_versioning
@@ -39,23 +37,22 @@ mirnext::Result<mirnext::execution::ExecutionSession> build () {
 }
 int main () {
   auto session = build ();
-  if (!session) {
+  if (!session.has_value ()) {
     std::cerr << session.error ().message << '\n';
     return 1;
   }
-  auto f = session->find_function ("example", "choose");
-  if (!f) return 1;
+  auto f = session.value ().find_function ("example", "choose");
+  if (!f.has_value ()) return 1;
   for (std::int64_t input : {1, 1, 0}) {
-    const std::array args{input};
-    auto value = f->call_i64 (args);
-    if (!value) {
+    auto value = f.value ().call_i64 ({input});
+    if (!value.has_value ()) {
       std::cerr << value.error ().message << '\n';
       return 1;
     }
-    if (*value != (input ? 42 : 17)) return 1;
-    std::cout << "choose(" << input << ") = " << *value << '\n';
+    if (value.value () != (input ? 42 : 17)) return 1;
+    std::cout << "choose(" << input << ") = " << value.value () << '\n';
   }
-  auto statistics = f->block_statistics ();
+  auto statistics = f.value ().block_statistics ();
   if (!statistics) return 1;
   std::cout << statistics->compiled_blocks << '/' << statistics->blocks << " blocks published\n";
 }

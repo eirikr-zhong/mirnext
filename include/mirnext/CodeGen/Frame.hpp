@@ -28,8 +28,12 @@ class MachineFrameResult {
   }
   const MachineControlFlow &cfg () const { return cfg_; }
   const MachineFrameLayout &layout () const { return layout_; }
-  std::span<const MachineInstruction *const> inserted_instructions () const { return inserted_; }
-  std::span<const MachineLabel *const> aligned_loop_labels () const { return aligned_labels_; }
+  ir::ReferenceRange<const MachineInstruction> inserted_instructions () const {
+    return ir::ReferenceRange<const MachineInstruction> (inserted_);
+  }
+  ir::ReferenceRange<const MachineLabel> aligned_loop_labels () const {
+    return ir::ReferenceRange<const MachineLabel> (aligned_labels_);
+  }
 
  private:
   friend struct detail::FrameEngine;
@@ -43,6 +47,5 @@ class MachineFrameResult {
 };
 // Consumes checked post-allocation machine state.
 // The result borrows stable machine identities; its function must outlive it.
-Result<MachineFrameResult> form_frame (MachineFunction &, MachinePostResult,
-                                       MachineFrameOptions = {});
+
 }  // namespace mirnext::codegen

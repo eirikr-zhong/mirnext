@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Owning interpreter preparation and dispatch. */
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/Execution/detail/LoadedProgram.hpp"
 #include <algorithm>
 namespace mirnext::execution {
@@ -19,18 +20,20 @@ Result<void> LoadedProgram::prepare () {
         auto h = no_slot;
         if (!r.hardware_binding ().empty ()) {
           auto reg = target.find_register (r.hardware_binding ());
-          if (!reg) return error (&fn.symbol (), "prepare", reg.error ());
-          if (!target.accepts (*reg, r.type ()))
+          if (!(reg).has_value ()) return error (&fn.symbol (), "prepare", reg.error ());
+          if (!target.accepts ((reg).value (), r.type ()))
             return error (&fn.symbol (), "prepare", invalid ("invalid hardware binding type"));
-          h = hardware_indices.at (reg->encoding ());
+          h = hardware_indices.at (reg.value ().encoding ());
         }
         body->hardware.push_back (h);
       }
-      for (auto a : fn.arguments ()) body->arguments.push_back (regs.at (a));
+      for (auto a : ir::detail::ReferenceAccess::pointers (fn.arguments ()))
+        body->arguments.push_back (regs.at (a));
       for (auto &b : fn.blocks ()) {
-        for (auto l : b.labels ()) body->labels.emplace (l, body->operations.size ());
+        for (auto l : ir::detail::ReferenceAccess::pointers (b.labels ()))
+          body->labels.emplace (l, body->operations.size ());
         for (auto &i : b.instructions ()) {
-          auto descriptor = ir::instruction_descriptor (i.opcode ());
+          auto descriptor = ir::instruction_descriptor (i.opcode ()).get ();
           PreparedOperation operation{&i, descriptor, {}};
           using O = ir::Opcode;
           auto op = i.opcode ();
@@ -47,12 +50,16 @@ Result<void> LoadedProgram::prepare () {
           operation.operands.reserve (i.operands ().size ());
           for (auto &o : i.operands ()) {
             PreparedOperand p{&o};
-            if (auto r = o.get<const ir::Register *> ()) p.reg = regs.at (*r);
-            if (auto mem = o.get<ir::Memory> ()) {
-              if (mem->base) p.base = regs.at (mem->base);
-              if (mem->index) p.index = regs.at (mem->index);
+            if (auto r = ir::detail::operand_access (o).get<const ir::Register *> ())
+              p.reg = regs.at (*r);
+            if (auto mem = ir::detail::operand_access (o).get<ir::Memory> ()) {
+              if (ir::detail::NodeAccess::base (*(mem)))
+                p.base = regs.at (ir::detail::NodeAccess::base (*(mem)));
+              if (ir::detail::NodeAccess::index (*(mem)))
+                p.index = regs.at (ir::detail::NodeAccess::index (*(mem)));
             }
-            if (auto ref = o.get<ir::SymbolReference> ()) p.binding = identities.at (ref->symbol);
+            if (auto ref = ir::detail::operand_access (o).get<ir::SymbolReference> ())
+              p.binding = identities.at (ir::detail::NodeAccess::symbol (*(ref)));
             operation.operands.push_back (p);
           }
           body->operations.push_back (std::move (operation));
@@ -61,7 +68,8 @@ Result<void> LoadedProgram::prepare () {
       }
       for (auto &i : body->operations)
         for (auto &o : i.operands)
-          if (auto l = o.source->get<const ir::Label *> ()) o.pc = body->labels.at (*l);
+          if (auto l = ir::detail::operand_access (*(o.source)).get<const ir::Label *> ())
+            o.pc = body->labels.at (*l);
       ++prepared.functions;
       if (!options.native_entries || bindings[identities.at (&fn.symbol ())].jump) {
         auto address = reinterpret_cast<std::uintptr_t> (body.get ());
@@ -99,7 +107,7 @@ Result<InterpreterOutcome> InterpreterInvocation::invoke (
   std::size_t index, std::span<const ExecutionArgument> arguments, bool jump,
   std::span<const std::byte> native_va) {
   auto &entry = state.binding (index);
-  auto fn = entry.source->function ();
+  auto fn = entry.source->function ().get ();
   auto fail = [&] (Error e) -> Result<InterpreterOutcome> {
     return state.error (entry.source, "interpret", std::move (e));
   };
@@ -107,8 +115,8 @@ Result<InterpreterOutcome> InterpreterInvocation::invoke (
     return fail (invalid ("call target kind or calling convention mismatch"));
   auto &sig = *entry.signature;
   auto checked = normalize_arguments (sig, arguments, !fn && bool (entry.interpret) && !jump);
-  if (!checked) return fail (checked.error ());
-  auto &normalized = checked->values;
+  if (!(checked).has_value ()) return fail (checked.error ());
+  auto &normalized = checked.value ().values;
   if (state.options.call_depth_limit && depth >= state.options.call_depth_limit)
     return fail (invalid ("interpreter call depth limit exceeded"));
   struct Depth {
@@ -125,7 +133,7 @@ Result<InterpreterOutcome> InterpreterInvocation::invoke (
       return fail (invalid ("missing prepared function"));
     InterpreterFrame frame (*this, *state.functions[*entry.function]->interpreter);
     auto initialized = frame.initialize (normalized, native_va);
-    if (!initialized) return fail (initialized.error ());
+    if (!(initialized).has_value ()) return fail (initialized.error ());
     outcome = frame.run ();
   } else if (jump) {
     if (native_definition)
@@ -134,24 +142,24 @@ Result<InterpreterOutcome> InterpreterInvocation::invoke (
       invalid ("external jcall requires a nonstandard ABI entry; no native adapter is available"));
   } else if (entry.interpret) {
     auto values = entry.interpret (normalized);
-    if (!values) return fail (values.error ());
-    outcome = InterpreterOutcome{std::move (*values), {}};
+    if (!(values).has_value ()) return fail (values.error ());
+    outcome = InterpreterOutcome{std::move ((values).value ()), {}};
   } else if (state.native_calls && (native_definition || state.options.native_calls)) {
     auto values = call_native (entry.address, sig, normalized, native_definition);
-    if (!values) return fail (values.error ());
-    outcome = InterpreterOutcome{std::move (*values), {}};
+    if (!(values).has_value ()) return fail (values.error ());
+    outcome = InterpreterOutcome{std::move ((values).value ()), {}};
   }
-  if (!outcome) return fail (outcome.error ());
+  if (!(outcome).has_value ()) return fail (outcome.error ());
   if (jump) {
-    if (!outcome->jump) return fail (invalid ("jcall target did not return through jret"));
+    if (!outcome.value ().jump) return fail (invalid ("jcall target did not return through jret"));
     return outcome;
   }
-  if (outcome->jump || outcome->values.size () != sig.results.size ())
+  if (outcome.value ().jump || outcome.value ().values.size () != sig.results.size ())
     return fail (invalid ("call result count or convention mismatch"));
   for (std::size_t n = 0; n < sig.results.size (); ++n) {
-    auto normalized = normalize_scalar (sig.results[n], outcome->values[n]);
-    if (!normalized) return fail (normalized.error ());
-    outcome->values[n] = std::move (*normalized);
+    auto normalized = normalize_scalar (sig.results[n], outcome.value ().values[n]);
+    if (!(normalized).has_value ()) return fail (normalized.error ());
+    outcome.value ().values[n] = std::move ((normalized).value ());
   }
   return outcome;
 }
@@ -162,9 +170,9 @@ Result<std::vector<ScalarValue>> InterpreterInvocation::call_native (
     return invalid (
       "native foreign calls are disabled or require a typed interpreter implementation");
   for (auto &argument : arguments)
-    if (auto scalar = argument.scalar (); scalar && scalar->type ().is_integer ()) {
+    if (auto scalar = argument.scalar ().get (); scalar && scalar->type ().is_integer ()) {
       auto value = scalar->as_u64 ();
-      if (value && state.virtual_functions.contains (*value))
+      if ((value).has_value () && state.virtual_functions.contains ((value).value ()))
         return invalid (state.options.native_entries
                           ? "nonstandard interpreted function has no ordinary native ABI entry"
                           : "passing an interpreted function address to native code requires "
@@ -193,130 +201,8 @@ Result<InterpreterOutcome> InterpreterInvocation::invoke_foreign (
   } guard (depth);
   InvocationActivation activation (*this);
   auto values = call_native (address, signature, arguments);
-  if (!values) return values.error ();
-  return InterpreterOutcome{std::move (*values), {}};
+  if (!(values).has_value ()) return values.error ();
+  return InterpreterOutcome{std::move ((values).value ()), {}};
 }
 }  // namespace detail
-std::string_view InterpretedFunction::module_name () const {
-  return owner_->bindings[index_].source->module ().name ();
-}
-std::string_view InterpretedFunction::name () const {
-  return owner_->bindings[index_].source->name ();
-}
-const ir::Signature &InterpretedFunction::signature () const {
-  return *owner_->binding (index_).signature;
-}
-bool InterpretedFunction::is_jump_return () const { return owner_->binding (index_).jump; }
-const ir::Context &InterpretedProgram::context () const { return owner_->context; }
-const InterpreterStatistics &InterpretedProgram::statistics () const { return owner_->prepared; }
-const LinkStatistics &InterpretedProgram::link_statistics () const { return owner_->statistics; }
-std::size_t InterpretedProgram::native_entry_count () const { return owner_->entry_count (); }
-Result<InterpretedProgram> InterpretedProgram::load (std::shared_ptr<const ir::Context> context,
-                                                     InterpreterOptions options) {
-  auto valid = context->verify ();
-  if (!valid) return valid.error ();
-  auto target = target::TargetMachine::native ();
-  if (!target) return target.error ();
-  auto state = std::make_shared<detail::LoadedProgram> (std::move (context), std::move (*target),
-                                                        std::move (options));
-  auto loaded = state->load ();
-  if (!loaded) return loaded.error ();
-  return InterpretedProgram (std::move (state));
-}
-namespace {
-Result<std::shared_ptr<const ir::Context>> materialized (
-  Result<std::unique_ptr<ir::Context>> copied) {
-  if (!copied) return copied.error ();
-  for (auto &m : (*copied)->modules ())
-    for (auto &f : m.functions ()) {
-      auto result = ir::materialize_stack_scopes (f);
-      if (!result) return result.error ();
-    }
-  return std::shared_ptr<const ir::Context> (std::move (*copied));
-}
-}  // namespace
-Result<InterpretedProgram> InterpretedProgram::create (const ir::Context &source,
-                                                       InterpreterOptions options) {
-  auto context = materialized (ir::clone (source));
-  if (!context) return context.error ();
-  return load (std::move (*context), std::move (options));
-}
-Result<InterpretedProgram> InterpretedProgram::create (const ir::Module &source,
-                                                       InterpreterOptions options) {
-  auto context = materialized (ir::clone (source));
-  if (!context) return context.error ();
-  return load (std::move (*context), std::move (options));
-}
-Result<InterpretedProgram> InterpretedProgram::create (transforms::OptimizedProgram program,
-                                                       InterpreterOptions options) {
-  auto valid = program.verify ();
-  if (!valid) return valid.error ();
-  auto target = target::TargetMachine::native (program.target ());
-  if (!target) return target.error ();
-  auto owner = std::make_shared<transforms::OptimizedProgram> (std::move (program));
-  std::shared_ptr<const ir::Context> context (owner, &owner->context ());
-  auto loaded = load (std::move (context), std::move (options));
-  if (!loaded) return loaded.error ();
-  loaded->owner_->optimized = std::move (owner);
-  return loaded;
-}
-Result<InterpretedFunction> InterpretedProgram::find_function (std::string_view module,
-                                                               std::string_view name) const {
-  if (!owner_) return invalid ("moved-from interpreted program");
-  auto found = owner_->find_function (module, name);
-  if (!found) return found.error ();
-  return InterpretedFunction (owner_, *found);
-}
-Result<LinkedData> InterpretedProgram::find_data (std::string_view module,
-                                                  std::string_view name) const {
-  if (!owner_) return invalid ("moved-from interpreted program");
-  auto found = owner_->find (module, name);
-  if (!found) return found.error ();
-  if (owner_->binding (*found).kind != detail::ProgramImage::Kind::Data)
-    return invalid ("symbol is not loaded data");
-  return LinkedData (owner_, *found);
-}
-Result<std::vector<ScalarValue>> InterpretedProgram::call (
-  const InterpretedFunction &fn, std::span<const ExecutionArgument> args) const {
-  if (!owner_ || owner_ != fn.owner_)
-    return invalid ("function belongs to another interpreted program");
-  return owner_->invoke (fn.index_, args);
-}
-Result<NativeEntry> InterpretedProgram::native_entry (const InterpretedFunction &fn) const {
-  if (!owns (fn)) return invalid ("function belongs to another interpreted program");
-  if (!owner_->options.native_entries)
-    return invalid ("native entries must be enabled before loading and data relocation");
-  if (fn.is_jump_return ())
-    return invalid ("native entry requires the ordinary calling convention");
-  return NativeEntry (owner_, fn.index_, owner_->binding (fn.index_).address);
-}
-Result<std::variant<InterpretedFunction, LinkedData>> InterpretedProgram::find_export (
-  std::string_view name) const {
-  if (!owner_) return invalid ("moved-from interpreted program");
-  auto found = owner_->exports.find (name);
-  if (found == owner_->exports.end ())
-    return Error{ErrorCode::UnknownName, "unknown interpreted export: " + std::string (name)};
-  auto kind = owner_->binding (found->second).kind;
-  if (kind == detail::ProgramImage::Kind::Function)
-    return std::variant<InterpretedFunction, LinkedData> (
-      InterpretedFunction (owner_, found->second));
-  if (kind == detail::ProgramImage::Kind::Data)
-    return std::variant<InterpretedFunction, LinkedData> (LinkedData (owner_, found->second));
-  return invalid ("export has no runtime definition");
-}
-Result<std::int64_t> InterpretedProgram::call_i64 (const InterpretedFunction &fn,
-                                                   std::span<const std::int64_t> args) const {
-  if (!owner_ || owner_ != fn.owner_)
-    return invalid ("function belongs to another interpreted program");
-  if (fn.signature ().results.size () != 1 || !fn.signature ().results[0].is_integer ())
-    return invalid ("integer helper requires one integer result");
-  for (auto type : fn.signature ().parameters)
-    if (!type.is_integer ()) return invalid ("integer helper requires integer parameters");
-  std::vector<ExecutionArgument> values;
-  values.reserve (args.size ());
-  for (auto value : args) values.emplace_back (value);
-  auto result = call (fn, values);
-  if (!result) return result.error ();
-  return (*result)[0].as_i64 ();
-}
 }  // namespace mirnext::execution

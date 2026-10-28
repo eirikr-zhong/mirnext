@@ -1,5 +1,6 @@
 /* Licensed under the MIT License. Private SSA borrows canonical IR and exits before serialization.
  */
+#include "mirnext/IR/Builder.hpp"
 #include "mirnext/Transforms/SSA.hpp"
 #include "mirnext/Transforms/Simplify.hpp"
 #include "mirnext/Transforms/PrepareCFG.hpp"
@@ -8,28 +9,27 @@
 int main () {
   using namespace mirnext;
   using namespace mirnext::ir;
-  Context context;
-  auto module = context.create_module ("ssa");
-  if (!module) return 1;
-  auto function = (*module)->create_function ("sum", {{Type::i64 ()}, {Type::i64 ()}});
-  if (!function) return 1;
-  auto entry = (*function)->create_block (), loop = (*function)->create_block (),
-       exit = (*function)->create_block ();
-  if (!entry || !loop || !exit) return 1;
-  auto label = (*function)->create_label (**loop, "loop");
-  if (!label) return 1;
-  auto i = (*function)->create_register (Type::i64 (), "i"),
-       sum = (*function)->create_register (Type::i64 (), "sum");
-  if (!i || !sum) return 1;
-  IRBuilder begin (**entry);
-  if (!begin.assign (**i, 0) || !begin.assign (**sum, 0)) return 1;
-  IRBuilder body (**loop);
-  if (!body.assign (**i, body.expression (**i) + 1)
-      || !body.assign (**sum, body.expression (**sum) + body.expression (**i))
-      || !body.branch (Comparison::Less, body.expression (**i),
-                       body.expression (*(*function)->arguments ()[0]), **label))
+  Program context;
+  MIRBuilder builder (context);
+  auto *module_builder = builder.create_module ("ssa");
+  builder.create_function<std::int64_t (std::int64_t)> (module_builder, "sum");
+  auto *loop = builder.create_block ("loop");
+  auto *exit = builder.create_block ("exit");
+  auto count = builder.create_register (Type::i64 (), "count");
+  auto sum = builder.create_register (Type::i64 (), "sum");
+  builder.create_assign (count, builder.constant_i64 (0));
+  builder.create_assign (sum, builder.constant_i64 (0));
+  builder.set_insert_point (loop);
+  builder.create_assign (count, builder.create_add (count, builder.constant_i64 (1)));
+  builder.create_assign (sum, builder.create_add (sum, count));
+  builder.create_cond_branch (builder.create_lt (count, builder.argument (0)), loop);
+  builder.set_insert_point (exit);
+  builder.create_return (sum);
+  auto built = builder.finish ();
+  if (!built.has_value ()) {
+    std::cerr << built.error ().message << '\n';
     return 1;
-  if (!IRBuilder (**exit).ret (Operand (**sum))) return 1;
+  }
   transforms::FunctionPassManager passes;
   passes.add<transforms::SimplifyPass> ();
   passes.add<transforms::PrepareCFGPass> ();
@@ -41,12 +41,12 @@ int main () {
       std::cout << event.pass << '\n' << dump (event.function);
     return {};
   });
-  if (!optimized) {
+  if (!optimized.has_value ()) {
     std::cerr << optimized.error ().message << '\n';
     return 1;
   }
   auto binary = serialization::write_binary (context);
-  if (!binary) {
+  if (!binary.has_value ()) {
     std::cerr << binary.error ().message << '\n';
     return 1;
   }

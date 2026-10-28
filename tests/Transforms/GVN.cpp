@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Global value numbering tests. */
+#include "mirnext/Transforms/AnalysisAccess.hpp"
+#include "mirnext/Transforms/Testing.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -17,14 +21,15 @@ using namespace mirnext::ir;
 using namespace mirnext::analysis;
 using namespace mirnext::transforms;
 namespace {
-std::unique_ptr<Context> parse (std::string_view text) {
+std::unique_ptr<Program> parse (std::string_view text) {
   auto result = serialization::parse_text (text);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<Program> (std::move ((result).value ()));
 }
-Function &entry (Context &context) {
-  return const_cast<Function &> (*context.modules ().begin ()->find_symbol ("entry")->function ());
+Function &entry (Program &context) {
+  return const_cast<Function &> (
+    *context.modules ().begin ()->find_symbol ("entry").get ()->function ().get ());
 }
 void prepare (Function &f, FunctionAnalysisManager &analyses, bool rename = true) {
   FunctionPassManager passes;
@@ -32,14 +37,14 @@ void prepare (Function &f, FunctionAnalysisManager &analyses, bool rename = true
   passes.add<PrepareCFGPass> ();
   passes.add<BuildSSAPass> (rename);
   auto result = passes.run (f, analyses);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
 }
 void finish (Function &f, FunctionAnalysisManager &analyses) {
   FunctionPassManager passes;
   passes.add<ConventionalSSAPass> ();
   passes.add<DestroySSAPass> ();
-  REQUIRE (passes.run (f, analyses));
+  REQUIRE ((passes.run (f, analyses)).has_value ());
 }
 }  // namespace
 TEST_CASE ("GVN edits canonical SSA and produces independent public IR without a runtime") {
@@ -53,9 +58,9 @@ TEST_CASE ("GVN edits canonical SSA and produces independent public IR without a
     auto source = parse (text);
     auto original = dump (*source);
     auto context = clone (*source);
-    REQUIRE (context);
+    REQUIRE ((context).has_value ());
     std::unordered_set<const Instruction *> identities;
-    auto &f = entry (**context);
+    auto &f = entry ((context).value ());
     FunctionAnalysisManager analyses (f);
     prepare (f, analyses);
     for (auto &b : f.blocks ())
@@ -63,48 +68,65 @@ TEST_CASE ("GVN edits canonical SSA and produces independent public IR without a
     FunctionPassManager passes;
     passes.add<GVNPass> ();
     std::size_t observations = 0;
-    REQUIRE (passes.run (f, analyses, [&] (const PassEvent &event) -> Result<void> {
-      if (event.phase == PassEvent::Phase::After) {
-        ++observations;
-        REQUIRE (event.function.ssa_form ()->verify ());
-        REQUIRE (analyses.get<GVNAnalysis> ());
-        auto graph = analyses.get<FunctionGraphAnalysis> ();
-        REQUIRE (graph);
-        std::size_t edges = 0;
-        for (auto &outgoing : (*graph)->outgoing)
-          for (auto id : outgoing) {
-            REQUIRE (id < (*graph)->edges.size ());
-            auto &edge = (*graph)->edges[id];
-            CHECK (std::ranges::count ((*graph)->incoming[edge.destination], id) == 1);
-            ++edges;
-          }
-        CHECK (edges == (*graph)->edges.size ());
-      }
-      return {};
-    }));
+    REQUIRE (
+      (passes.run (f, analyses,
+                   [&] (const PassEvent &event) -> Result<void> {
+                     if (event.phase == PassEvent::Phase::After) {
+                       ++observations;
+                       REQUIRE ((event.function.ssa_form ().value ().verify ()).has_value ());
+                       auto info = analyses.get<GVNAnalysis> ();
+                       REQUIRE ((info).has_value ());
+                       for (auto &[value, number] :
+                            mirnext::transforms::detail::AnalysisAccess::numbers (
+                              (info).value ())) {
+                         auto queried = info.value ().number (*value);
+                         REQUIRE ((queried).has_value ());
+                         CHECK (queried.value ().constant == number.constant);
+                         CHECK (queried.value ().value == number.value);
+                       }
+                       for (auto &[instruction, location] :
+                            mirnext::transforms::detail::AnalysisAccess::locations (
+                              (info).value ()))
+                         CHECK (info.value ().location (*instruction) == location);
+                       auto graph = analyses.get<FunctionGraphAnalysis> ();
+                       REQUIRE ((graph).has_value ());
+                       std::size_t edges = 0;
+                       for (auto &outgoing : graph.value ().outgoing)
+                         for (auto id : outgoing) {
+                           REQUIRE (id < graph.value ().edges.size ());
+                           auto &edge = graph.value ().edges[id];
+                           CHECK (std::ranges::count (graph.value ().incoming[edge.destination], id)
+                                  == 1);
+                           ++edges;
+                         }
+                       CHECK (edges == graph.value ().edges.size ());
+                     }
+                     return {};
+                   }))
+        .has_value ());
     CHECK (observations == 1);
     CHECK (dump (*source) == original);
-    REQUIRE (f.verify ());
+    REQUIRE ((f.verify ()).has_value ());
     // Nonterminating computations keep their original canonical identity.
     std::size_t survivors = 0;
     for (auto &b : f.blocks ())
       for (auto &i : b.instructions ()) survivors += identities.contains (&i);
     CHECK (survivors > 0);
-    CHECK_FALSE (serialization::write_binary (**context));
+    CHECK_FALSE ((serialization::write_binary ((context).value ())).has_value ());
     finish (f, analyses);
-    CHECK_FALSE (analyses.get<GVNAnalysis> ());
+    CHECK_FALSE ((analyses.get<GVNAnalysis> ()).has_value ());
     source.reset ();
-    REQUIRE ((*context)->verify ());
-    auto encoded = serialization::write_binary (**context);
-    REQUIRE (encoded);
-    REQUIRE (serialization::read_binary (*encoded));
-    auto text_result = serialization::write_text (**context);
-    REQUIRE (text_result);
-    REQUIRE (serialization::parse_text (*text_result));
-    auto independent = clone (**context);
-    REQUIRE (independent);
-    context->reset ();
-    REQUIRE ((*independent)->verify ());
+    REQUIRE ((context.value ().verify ()).has_value ());
+    auto encoded = serialization::write_binary ((context).value ());
+    REQUIRE ((encoded).has_value ());
+    REQUIRE ((serialization::read_binary ((encoded).value ())).has_value ());
+    auto text_result = serialization::write_text ((context).value ());
+    REQUIRE ((text_result).has_value ());
+    REQUIRE ((serialization::parse_text ((text_result).value ())).has_value ());
+    auto independent = clone ((context).value ());
+    REQUIRE ((independent).has_value ());
+    (context).value () = mirnext::ir::Program{};
+    REQUIRE ((independent.value ().verify ()).has_value ());
   }
 }
 TEST_CASE ("GVN keeps overflow producers and rejects illegal phases atomically") {
@@ -112,11 +134,11 @@ TEST_CASE ("GVN keeps overflow producers and rejects illegal phases atomically")
   auto &f = entry (*context);
   FunctionAnalysisManager analyses (f), foreign (entry (*other));
   auto before = dump (f);
-  CHECK_FALSE (GVNPass ().run (f, analyses));
+  CHECK_FALSE ((mirnext::transforms::detail::run_pass (GVNPass (), f, analyses)).has_value ());
   CHECK (dump (f) == before);
   prepare (f, analyses);
   before = dump (f);
-  CHECK_FALSE (GVNPass ().run (f, foreign));
+  CHECK_FALSE ((mirnext::transforms::detail::run_pass (GVNPass (), f, foreign)).has_value ());
   CHECK (dump (f) == before);
   FunctionPassManager passes;
   passes.add<GVNPass> ();
@@ -125,22 +147,24 @@ TEST_CASE ("GVN keeps overflow producers and rejects illegal phases atomically")
       return Error{ErrorCode::InvalidArgument, "observer declined"};
     return {};
   });
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("m/entry [gvn]") != std::string::npos);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
   bool overflow_live = false;
   for (auto &b : f.blocks ())
     for (auto &i : b.instructions ())
       if (i.opcode () == Opcode::Addo) {
-        auto definitions = f.ssa_form ()->definitions (i);
+        auto definitions
+          = mirnext::ir::detail::ReferenceAccess::pointers (f.ssa_form ().get ()->definitions (i));
         REQUIRE (definitions.size () == 1);
-        overflow_live |= !definitions[0]->uses ().empty ();
+        overflow_live
+          |= !mirnext::ir::detail::ReferenceAccess::pointers (definitions[0]->uses ()).empty ();
       }
   CHECK (overflow_live);
   finish (f, analyses);
   prepare (f, analyses, false);
   before = dump (f);
-  CHECK_FALSE (GVNPass ().run (f, analyses));
+  CHECK_FALSE ((mirnext::transforms::detail::run_pass (GVNPass (), f, analyses)).has_value ());
   CHECK (dump (f) == before);
   auto conventional = parse (test::gvn_fixtures ()[1]);
   auto &g = entry (*conventional);
@@ -148,9 +172,9 @@ TEST_CASE ("GVN keeps overflow producers and rejects illegal phases atomically")
   prepare (g, g_analyses);
   FunctionPassManager conventional_pass;
   conventional_pass.add<ConventionalSSAPass> ();
-  REQUIRE (conventional_pass.run (g, g_analyses));
+  REQUIRE ((conventional_pass.run (g, g_analyses)).has_value ());
   before = dump (g);
-  CHECK_FALSE (GVNPass ().run (g, g_analyses));
+  CHECK_FALSE ((mirnext::transforms::detail::run_pass (GVNPass (), g, g_analyses)).has_value ());
   CHECK (dump (g) == before);
 }
 TEST_CASE ("GVN can run again on an independent previously optimized result") {
@@ -160,19 +184,19 @@ TEST_CASE ("GVN can run again on an independent previously optimized result") {
   prepare (f, analyses);
   FunctionPassManager passes;
   passes.add<GVNPass> ();
-  REQUIRE (passes.run (f, analyses));
+  REQUIRE ((passes.run (f, analyses)).has_value ());
   finish (f, analyses);
   auto context = clone (*source);
-  REQUIRE (context);
+  REQUIRE ((context).has_value ());
   source.reset ();
-  auto &g = entry (**context);
+  auto &g = entry ((context).value ());
   FunctionAnalysisManager g_analyses (g);
   prepare (g, g_analyses);
-  REQUIRE (passes.run (g, g_analyses));
+  REQUIRE ((passes.run (g, g_analyses)).has_value ());
   finish (g, g_analyses);
-  auto binary = serialization::write_binary (**context);
-  REQUIRE (binary);
-  REQUIRE (serialization::read_binary (*binary));
+  auto binary = serialization::write_binary ((context).value ());
+  REQUIRE ((binary).has_value ());
+  REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
 }
 TEST_CASE (
   "SSA opcode replacement preserves definitions and validates all new inputs before editing") {
@@ -181,38 +205,40 @@ TEST_CASE (
   FunctionAnalysisManager analyses (f), other_analyses (foreign);
   prepare (f, analyses);
   prepare (foreign, other_analyses);
-  auto form = f.ssa_form ();
-  auto rewriter = SSARewriter::get (f);
-  REQUIRE (rewriter);
+  auto form = f.ssa_form ().get ();
+  auto rewriter = SSAUpdater::get (f);
+  REQUIRE ((rewriter).has_value ());
   Instruction *target = nullptr;
   for (auto &b : f.blocks ())
     for (auto &i : b.instructions ())
       if (i.opcode () == Opcode::Add && !target) target = &i;
   REQUIRE (target);
-  auto definitions = form->definitions (*target);
+  auto definitions = mirnext::ir::detail::ReferenceAccess::pointers (form->definitions (*target));
   auto output = definitions[0];
-  auto input = const_cast<SSAValue *> (&form->inputs (*target)[0]->value ());
+  auto input = const_cast<SSAValue *> (
+    &mirnext::ir::detail::ReferenceAccess::pointers (form->inputs (*target))[0]->value ());
   Operand operands[]{target->operands ()[0], Operand (input->reg ())};
   SSAValue *values[]{input};
   auto before = dump (f);
-  auto bad = const_cast<SSAValue *> (&*foreign.ssa_form ()->values ().begin ());
+  auto bad = const_cast<SSAValue *> (&*foreign.ssa_form ().get ()->values ().begin ());
   SSAValue *bad_values[]{bad};
-  CHECK_FALSE (rewriter->replace (*target, Opcode::Mov, operands, bad_values));
-  CHECK_FALSE (rewriter->replace (*target, Opcode::Mov, operands, {}));
+  CHECK_FALSE (
+    (rewriter.value ().replace (*target, Opcode::Mov, operands, bad_values)).has_value ());
+  CHECK_FALSE ((rewriter.value ().replace (*target, Opcode::Mov, operands, {})).has_value ());
   CHECK (dump (f) == before);
-  REQUIRE (form->verify ());
-  REQUIRE (rewriter->replace (*target, Opcode::Mov, operands, values));
-  CHECK (form->definitions (*target)[0] == output);
+  REQUIRE ((form->verify ()).has_value ());
+  REQUIRE ((rewriter.value ().replace (*target, Opcode::Mov, operands, values)).has_value ());
+  CHECK (mirnext::ir::detail::ReferenceAccess::pointers (form->definitions (*target))[0] == output);
   CHECK (form->inputs (*target).size () == 1);
-  REQUIRE (form->verify ());
-  auto reg = rewriter->fresh_register (Type::i64 ());
-  REQUIRE (reg);
-  operands[0] = Operand (**reg);
+  REQUIRE ((form->verify ()).has_value ());
+  auto reg = rewriter.value ().fresh_register (Type::i64 ());
+  REQUIRE ((reg).has_value ());
+  operands[0] = Operand ((reg).value ());
   before = dump (f);
-  CHECK_FALSE (rewriter->replace (*target, Opcode::Mov, operands, values));
+  CHECK_FALSE ((rewriter.value ().replace (*target, Opcode::Mov, operands, values)).has_value ());
   CHECK (dump (f) == before);
-  REQUIRE (form->verify ());
-  CHECK_FALSE (rewriter->fresh_register (Type::block (16)));
+  REQUIRE ((form->verify ()).has_value ());
+  CHECK_FALSE ((rewriter.value ().fresh_register (Type::block (16))).has_value ());
   finish (f, analyses);
 }
 TEST_CASE ("GVN rejects nonmaterialized scalar memory operands before editing SSA") {
@@ -223,13 +249,13 @@ TEST_CASE ("GVN rejects nonmaterialized scalar memory operands before editing SS
   FunctionAnalysisManager analyses (f);
   FunctionPassManager ssa;
   ssa.add<BuildSSAPass> ();
-  REQUIRE (ssa.run (f, analyses));
+  REQUIRE ((ssa.run (f, analyses)).has_value ());
   auto before = dump (f);
-  auto result = GVNPass ().run (f, analyses);
-  REQUIRE_FALSE (result);
+  auto result = mirnext::transforms::detail::run_pass (GVNPass (), f, analyses);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("materialize memory") != std::string::npos);
   CHECK (dump (f) == before);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
 }
 TEST_CASE ("every public opcode passes GVN and binary encoding") {
   for (auto &descriptor : instruction_descriptors ()) {
@@ -243,12 +269,12 @@ TEST_CASE ("every public opcode passes GVN and binary encoding") {
     passes.add<ConventionalSSAPass> ();
     passes.add<DestroySSAPass> ();
     auto result = passes.run (*context);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    REQUIRE (context->verify ());
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    REQUIRE ((context->verify ()).has_value ());
     auto binary = serialization::write_binary (*context);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
   }
 }
 TEST_CASE ("GVN tracks stack provenance memory classes and full pointer escape") {
@@ -259,18 +285,19 @@ TEST_CASE ("GVN tracks stack provenance memory classes and full pointer escape")
     auto &f = entry (*context);
     FunctionAnalysisManager analyses (f);
     prepare (f, analyses);
-    auto result = GVNPass ().run (f, analyses);
-    REQUIRE (result);
+    auto result = mirnext::transforms::detail::run_pass (GVNPass (), f, analyses);
+    REQUIRE ((result).has_value ());
     auto info = analyses.get<GVNAnalysis> ();
-    REQUIRE (info);
-    escape |= (*info)->full_escape;
-    for (auto &location : (*info)->memory) {
+    REQUIRE ((info).has_value ());
+    escape |= info.value ().full_escape;
+    for (auto &location : info.value ().memory) {
       stack |= location.alloca_flags != 0;
       aliases |= !location.alias.empty ();
     }
-    for (auto &[instruction, slot] : (*info)->locations) {
+    for (auto &[instruction, slot] :
+         mirnext::transforms::detail::AnalysisAccess::locations (((info)).value ())) {
       REQUIRE (slot > 0);
-      REQUIRE (slot < (*info)->memory.size ());
+      REQUIRE (slot < info.value ().memory.size ());
       CHECK (instruction->function ().symbol ().name () == "entry");
     }
     finish (f, analyses);

@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Derived from MIR's conventional SSA combine traversal. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #include "mirnext/Transforms/SSACombine.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
 #include "mirnext/IR/SSA.hpp"
@@ -100,14 +102,14 @@ class Combiner {
   };
   Function &function;
   SSAForm &form;
-  SSARewriter rewriter;
+  SSAUpdater rewriter;
   target::AddressingRules target;
   std::vector<Node> nodes;
   std::unordered_map<const Instruction *, std::size_t> positions;
   std::size_t changes = 0;
   SSAValue *input (const Instruction &i, std::size_t p,
                    SSAOperandPart part = SSAOperandPart::Register) {
-    for (auto use : form.inputs (i))
+    for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (i)))
       if (auto site = std::get_if<SSAInstructionUse> (&use->site ());
           site && site->operand == p && site->part == part)
         return const_cast<SSAValue *> (&use->value ());
@@ -117,53 +119,59 @@ class Combiner {
     return {i.operands ()[p], input (i, p), &i, p};
   }
   std::optional<std::uint64_t> integer (Term t) {
-    if (t.operand.get<const Register *> ()) {
-      auto definition = t.value ? t.value->instruction () : nullptr;
+    if (ir::detail::operand_access (t.operand).get<const Register *> ()) {
+      auto definition = t.value ? t.value->instruction ().get () : nullptr;
       if (!definition || definition->opcode () != Opcode::Mov) return {};
       t.operand = definition->operands ()[1];
     }
-    if (auto value = t.operand.get<std::int64_t> ()) return static_cast<std::uint64_t> (*value);
-    if (auto value = t.operand.get<std::uint64_t> ()) return *value;
+    if (auto value = ir::detail::operand_access (t.operand).get<std::int64_t> ())
+      return static_cast<std::uint64_t> (*value);
+    if (auto value = ir::detail::operand_access (t.operand).get<std::uint64_t> ()) return *value;
     // No runtime addresses are guessed for unresolved symbol relocations.
     return {};
   }
   bool allowed (const Term &t, const BasicBlock &from) {
-    if (!t.value || !t.value->phi () || &t.value->phi ()->block () == &from) return true;
-    auto phi = t.value->phi ();
-    for (auto use : phi->inputs ()) {
+    if (!t.value || !t.value->phi ().get () || &t.value->phi ().get ()->block () == &from)
+      return true;
+    auto phi = t.value->phi ().get ();
+    for (auto use : ir::detail::ReferenceAccess::pointers (phi->inputs ())) {
       auto &value = use->value ();
-      if ((value.instruction () && &value.instruction ()->block () == &phi->block ())
-          || (value.phi () && &value.phi ()->block () == &phi->block ()))
+      if ((value.instruction ().get () && &value.instruction ().get ()->block () == &phi->block ())
+          || (value.phi ().get () && &value.phi ().get ()->block () == &phi->block ()))
         return false;
     }
     return true;
   }
   bool bound (const Term &t) {
-    return !t.operand.get<const Register *> ()
-           || !(*t.operand.get<const Register *> ())->hardware_binding ().empty ();
+    return !ir::detail::operand_access (t.operand).get<const Register *> ()
+           || !(*ir::detail::operand_access (t.operand).get<const Register *> ())
+                 ->hardware_binding ()
+                 .empty ();
   }
   bool plus_constant (Term &t, const BasicBlock &from, std::uint64_t &constant) {
     if (!t.value || bound (t)) return false;
     constant = 0;
-    if (!t.value->instruction () && !t.value->phi () && t.origin) {
+    if (!t.value->instruction ().get () && !t.value->phi ().get () && t.origin) {
       t.origin = nullptr;
       t.position = 0;
       return true;
     }
-    auto definition = t.value->instruction ();
+    auto definition = t.value->instruction ().get ();
     if (!definition) return false;
     auto &i = *definition;
     std::optional<Term> result;
-    if (i.opcode () == Opcode::Mov && i.operands ()[1].get<const Register *> ())
+    if (i.opcode () == Opcode::Mov
+        && ir::detail::operand_access (i.operands ()[1]).get<const Register *> ())
       result = term (i, 1);
     else if ((i.opcode () == Opcode::Add || i.opcode () == Opcode::Sub)
-             && i.operands ()[1].get<const Register *> ()) {
+             && ir::detail::operand_access (i.operands ()[1]).get<const Register *> ()) {
       if (auto value = integer (term (i, 2))) {
         result = term (i, 1);
         constant = i.opcode () == Opcode::Sub ? 0 - *value : *value;
       }
     }
-    if (!result && i.opcode () == Opcode::Add && i.operands ()[2].get<const Register *> ())
+    if (!result && i.opcode () == Opcode::Add
+        && ir::detail::operand_access (i.operands ()[2]).get<const Register *> ())
       if (auto value = integer (term (i, 1))) {
         result = term (i, 2);
         constant = *value;
@@ -174,12 +182,12 @@ class Combiner {
   }
   bool multiply_constant (Term &t, const BasicBlock &from, std::uint64_t &constant) {
     if (!t.value || bound (t)) return false;
-    auto definition = t.value->instruction ();
+    auto definition = t.value->instruction ().get ();
     if (!definition) return false;
     auto &i = *definition;
     std::optional<Term> result;
     if ((i.opcode () == Opcode::Mul || i.opcode () == Opcode::Lsh)
-        && i.operands ()[1].get<const Register *> ())
+        && ir::detail::operand_access (i.operands ()[1]).get<const Register *> ())
       if (auto value = integer (term (i, 2))) {
         result = term (i, 1);
         constant = *value;
@@ -188,7 +196,8 @@ class Combiner {
           constant = std::uint64_t{1} << constant;
         }
       }
-    if (!result && i.opcode () == Opcode::Mul && i.operands ()[2].get<const Register *> ())
+    if (!result && i.opcode () == Opcode::Mul
+        && ir::detail::operand_access (i.operands ()[2]).get<const Register *> ())
       if (auto value = integer (term (i, 1))) {
         result = term (i, 2);
         constant = *value;
@@ -199,9 +208,10 @@ class Combiner {
   }
   bool plus_variable (Term &base, std::optional<Term> &index, const BasicBlock &from) {
     if (!base.value || bound (base)) return false;
-    auto i = base.value->instruction ();
-    if (!i || i->opcode () != Opcode::Add || !i->operands ()[1].get<const Register *> ()
-        || !i->operands ()[2].get<const Register *> ())
+    auto i = base.value->instruction ().get ();
+    if (!i || i->opcode () != Opcode::Add
+        || !ir::detail::operand_access (i->operands ()[1]).get<const Register *> ()
+        || !ir::detail::operand_access (i->operands ()[2]).get<const Register *> ())
       return false;
     auto a = term (*i, 1), b = term (*i, 2);
     if (!allowed (a, from) || !allowed (b, from)) return false;
@@ -212,16 +222,17 @@ class Combiner {
   bool dead (std::size_t p) {
     auto &node = nodes[p];
     if (!node.alive) return false;
-    if (node.phi) return node.phi->output ().uses ().empty ();
+    if (node.phi)
+      return ir::detail::ReferenceAccess::pointers (node.phi->output ().uses ()).empty ();
     auto &i = *node.instruction;
     auto op = i.opcode ();
-    if (instruction_descriptor (op)->count == OperandCount::Call || op == Opcode::Alloca
+    if (instruction_descriptor (op).get ()->count == OperandCount::Call || op == Opcode::Alloca
         || op == Opcode::BStart || op == Opcode::VaStart || op == Opcode::VaArg)
       return false;
-    auto definitions = form.definitions (i);
+    auto definitions = ir::detail::ReferenceAccess::pointers (form.definitions (i));
     if (definitions.empty ()) return false;
     for (auto value : definitions)
-      if (!value->uses ().empty ()) return false;
+      if (!ir::detail::ReferenceAccess::pointers (value->uses ()).empty ()) return false;
     if (op == Opcode::Addo || op == Opcode::Addos || op == Opcode::Subo || op == Opcode::Subos
         || op == Opcode::Mulo || op == Opcode::Mulos || op == Opcode::UMulo || op == Opcode::UMulos)
       for (auto n = node.next; n != SIZE_MAX; n = nodes[n].next)
@@ -239,15 +250,16 @@ class Combiner {
   Result<void> erase (std::size_t p) {
     auto &n = nodes[p];
     auto result = n.phi ? rewriter.erase_phi (*n.phi) : rewriter.erase_instruction (*n.instruction);
-    if (!result) return result;
+    if (!(result).has_value ()) return result;
     n.alive = false;
     ++changes;
     return {};
   }
   Result<void> address (Instruction &i, std::size_t p) {
-    auto memory = *i.operands ()[p].get<Memory> ();
-    if (!memory.base) return {};
-    Address a{Term{Operand (*memory.base), input (i, p, SSAOperandPart::MemoryBase), &i, p},
+    auto memory = *ir::detail::operand_access (i.operands ()[p]).get<Memory> ();
+    if (!ir::detail::NodeAccess::base (memory)) return {};
+    Address a{Term{Operand (*ir::detail::NodeAccess::base (memory)),
+                   input (i, p, SSAOperandPart::MemoryBase), &i, p},
               {},
               static_cast<std::uint64_t> (memory.displacement)};
     bool stop_base = false, stop_index = true, changed = false;
@@ -295,27 +307,33 @@ class Combiner {
       break;
     }
     if (!changed) return {};
-    memory.base = a.base ? *a.base->operand.get<const Register *> () : nullptr;
-    memory.index = a.index ? *a.index->operand.get<const Register *> () : nullptr;
+    ir::detail::NodeAccess::base (memory)
+      = a.base ? *ir::detail::operand_access (a.base->operand).get<const Register *> () : nullptr;
+    ir::detail::NodeAccess::index (memory)
+      = a.index ? *ir::detail::operand_access (a.index->operand).get<const Register *> () : nullptr;
     memory.displacement = std::bit_cast<std::int64_t> (a.displacement);
     memory.scale = a.scale;
     auto result
       = rewriter.replace_memory (i, p, std::move (memory), a.base ? a.base->value : nullptr,
                                  a.index ? a.index->value : nullptr);
-    if (!result) return result;
+    if (!(result).has_value ()) return result;
     ++changes;
     return {};
   }
 
  public:
   Combiner (Function &f, target::AddressingRules rules)
-    : function (f), form (*const_cast<SSAForm *> (f.ssa_form ())), rewriter (form), target (rules) {
+    : function (f),
+      form (*const_cast<SSAForm *> (f.ssa_form ().get ())),
+      rewriter (form),
+      target (rules) {
     nodes.reserve (f.instruction_count () + std::ranges::distance (form.phis ()));
     positions.reserve (f.instruction_count ());
     for (auto &block : f.blocks ()) {
       auto first = nodes.size ();
       std::unordered_map<const Instruction *, std::vector<SSAPhi *>> anchors;
-      for (auto phi : form.phis (block)) anchors[phi->before ()].push_back (phi);
+      for (auto phi : ir::detail::ReferenceAccess::pointers (form.phis (block)))
+        anchors[phi->before ().get ()].push_back (phi);
       auto phis = [&] (const Instruction *before) {
         if (auto found = anchors.find (before); found != anchors.end ())
           for (auto phi : found->second) nodes.push_back ({nullptr, phi});
@@ -339,16 +357,16 @@ class Combiner {
         if (!node.alive) continue;
         if (dead (n)) {
           auto result = erase (n);
-          if (!result) return result.error ();
+          if (!(result).has_value ()) return result.error ();
           continue;
         }
         if (node.phi) continue;
         auto &i = *node.instruction;
-        if (instruction_descriptor (i.opcode ())->count == OperandCount::Call) continue;
+        if (instruction_descriptor (i.opcode ()).get ()->count == OperandCount::Call) continue;
         if (i.opcode () == Opcode::Bt || i.opcode () == Opcode::Bf || i.opcode () == Opcode::Bts
             || i.opcode () == Opcode::Bfs) {
           auto condition = input (i, 1);
-          auto definition = condition ? condition->instruction () : nullptr;
+          auto definition = condition ? condition->instruction ().get () : nullptr;
           if (definition)
             if (auto opcode
                 = combined_branch (definition->opcode (),
@@ -359,57 +377,63 @@ class Combiner {
               for (auto p : {1u, 2u})
                 if (auto value = input (*definition, p)) inputs.push_back (value);
               auto result = rewriter.replace (i, *opcode, operands, inputs);
-              if (!result) return result.error ();
+              if (!(result).has_value ()) return result.error ();
               ++changes;
               auto at = positions.at (definition);
               if (dead (at)) {
                 result = erase (at);
-                if (!result) return result.error ();
+                if (!(result).has_value ()) return result.error ();
               }
             }
         }
         for (std::size_t p = 0; p < i.operands ().size (); ++p)
-          if (i.operands ()[p].get<Memory> ()) {
+          if (ir::detail::operand_access (i.operands ()[p]).get<Memory> ()) {
             auto result = address (i, p);
-            if (!result) return result.error ();
+            if (!(result).has_value ()) return result.error ();
           }
       }
       first = end;
     }
     auto checked = function.verify ();
-    if (!checked) return checked.error ();
+    if (!(checked).has_value ()) return checked.error ();
     return changes;
   }
 };
 }  // namespace
-Result<PassResult> SSACombinePass::run (ir::Function &function,
+Result<PassResult> SSACombinePass::run (ir::MIRBuilder &edit,
                                         analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   auto invalid = [&] (std::string reason) {
     return Error{ErrorCode::InvalidArgument,
                  std::string (function.symbol ().name ()) + ": ssa-combine: " + reason};
   };
   if (&analyses.function () != &function) return invalid ("analysis owner mismatch");
   auto rules = target::AddressingRules::get (architecture_);
-  if (!rules) return invalid (rules.error ().message);
+  if (!(rules).has_value ()) return invalid (rules.error ().message);
   auto checked = function.verify ();
-  if (!checked) return checked.error ();
-  auto form = function.ssa_form ();
+  if (!(checked).has_value ()) return checked.error ();
+  auto form = function.ssa_form ().get ();
   if (!form || !form->conventional ()) return invalid ("requires conventional SSA");
   for (auto &block : function.blocks ())
     for (auto &i : block.instructions ())
       for (auto &operand : i.operands ())
-        if (auto memory = operand.get<Memory> (); memory && memory->index)
+        if (auto memory = ir::detail::operand_access (operand).get<Memory> ();
+            memory && ir::detail::NodeAccess::index (*(memory)))
           return invalid ("requires simplified memory addresses");
   auto graph = analyses.get<analysis::FunctionGraphAnalysis> ();
-  if (!graph) return graph.error ();
+  if (!(graph).has_value ()) return graph.error ();
   auto retained = analyses.take_cached<analysis::FunctionGraphAnalysis> ();
-  if (!retained) return retained.error ();
-  auto result = Combiner (function, *rules).run ();
-  if (!result) return result.error ();
-  checked = analyses.set<analysis::FunctionGraphAnalysis> (std::move (**retained));
-  if (!checked) return checked.error ();
+  if (!(retained).has_value ()) return retained.error ();
+  auto result = Combiner (function, (rules).value ()).run ();
+  if (!(result).has_value ()) return result.error ();
+  checked = analyses.set<analysis::FunctionGraphAnalysis> (std::move (*(retained).value ()));
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();
-  return PassResult{*result, preserved};
+  return PassResult{(result).value (), preserved};
 }
 }  // namespace mirnext::transforms

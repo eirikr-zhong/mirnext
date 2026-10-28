@@ -28,11 +28,12 @@ Result<X86ResolverFrame> x86_resolver_frame (target::ABI abi) {
 }
 Result<X86BlockResolverFrame> x86_block_resolver_frame (target::ABI abi) {
   auto frame = x86_resolver_frame (abi);
-  if (!frame) return frame.error ();
+  if (!(frame).has_value ()) return frame.error ();
   // Exact flags-stack pointer in the last slot, inside the aligned frame.
-  frame->metadata_offset = frame->shadow_bytes + 512 + frame->saves.size () * 8;
-  frame->frame_bytes = (frame->metadata_offset + 8 + 15) & ~std::size_t (15);
-  return X86BlockResolverFrame{*frame, abi == target::ABI::X86SysV ? 128u : 0u};
+  frame.value ().metadata_offset
+    = frame.value ().shadow_bytes + 512 + frame.value ().saves.size () * 8;
+  frame.value ().frame_bytes = (frame.value ().metadata_offset + 8 + 15) & ~std::size_t (15);
+  return X86BlockResolverFrame{(frame).value (), abi == target::ABI::X86SysV ? 128u : 0u};
 }
 Result<X86InvocationFrame> x86_invocation_frame (target::ABI abi) {
   using R = target::X86Register;
@@ -56,9 +57,11 @@ Result<X86InvocationFrame> x86_invocation_frame (target::ABI abi) {
 }
 Result<X86BoundaryFrame> x86_boundary_frame (target::ABI abi) {
   auto f = x86_invocation_frame (abi);
-  if (!f) return f.error ();
-  return X86BoundaryFrame{f->parameters[0], f->parameters[1], f->shadow_bytes,
-                          f->shadow_bytes + sizeof (NativeInvocationState), f->red_zone_bytes};
+  if (!(f).has_value ()) return f.error ();
+  return X86BoundaryFrame{f.value ().parameters[0], f.value ().parameters[1],
+                          f.value ().shadow_bytes,
+                          f.value ().shadow_bytes + sizeof (NativeInvocationState),
+                          f.value ().red_zone_bytes};
 }
 }  // namespace detail
 namespace {
@@ -137,21 +140,22 @@ Result<std::vector<std::uint8_t>> detail::make_x86_lazy_resolver (
   if (target.architecture () != target::Architecture::X86_64 || !callback)
     return Error{ErrorCode::InvalidArgument, "invalid x86 lazy resolver target or callback"};
   auto frame = x86_resolver_frame (target.abi ());
-  if (!frame) return frame.error ();
+  if (!(frame).has_value ()) return frame.error ();
   Code c;
   c.bytes.reserve (384);
-  c.stack (false, frame->frame_bytes);
-  for (auto &save : frame->saves) c.memory (0x89, unsigned (save.reg), save.offset);
-  c.fx (false, frame->fx_offset);
-  c.emit (
-    {0x4c, 0x89,
-     std::uint8_t (0xd0 | unsigned (frame->argument))});  // descriptor r10 -> ABI first argument
+  c.stack (false, frame.value ().frame_bytes);
+  for (auto &save : frame.value ().saves) c.memory (0x89, unsigned (save.reg), save.offset);
+  c.fx (false, frame.value ().fx_offset);
+  c.emit ({0x4c, 0x89,
+           std::uint8_t (
+             0xd0 | unsigned (frame.value ().argument))});  // descriptor r10 -> ABI first argument
   c.address (11, callback);
   c.emit ({0x41, 0xff, 0xd3, 0x49, 0x89, 0xc3});  // call r11; mov r11,rax
-  c.fx (true, frame->fx_offset);
-  for (auto &save : frame->saves) c.memory (0x8b, unsigned (save.reg), save.offset);
-  c.memory (0x8b, 10, frame->metadata_offset);
-  c.stack (true, frame->frame_bytes + 8);  // discard metadata; restore original call arguments
+  c.fx (true, frame.value ().fx_offset);
+  for (auto &save : frame.value ().saves) c.memory (0x8b, unsigned (save.reg), save.offset);
+  c.memory (0x8b, 10, frame.value ().metadata_offset);
+  c.stack (true,
+           frame.value ().frame_bytes + 8);  // discard metadata; restore original call arguments
   c.emit ({0x4d, 0x85, 0xdb});
   const auto resolved = c.branch (0x75);
   // The C++ callback has reported the failure to ExecutionInvocation. Zero the
@@ -191,13 +195,14 @@ Result<std::vector<std::uint8_t>> detail::make_x86_block_resolver (
     return Error{ErrorCode::InvalidArgument,
                  "invalid x86 block resolver target callback or failure continuation"};
   auto layout = x86_block_resolver_frame (target.abi ());
-  if (!layout) return layout.error ();
-  auto &frame = layout->saved;
+  if (!(layout).has_value ()) return layout.error ();
+  auto &frame = layout.value ().saved;
   Code c;
   c.bytes.reserve (384);
   // LEA preserves the incoming flags and protects live SysV red-zone storage
   // before the first push. Blocks need not have ordinary function-entry SP.
-  if (layout->red_zone_bytes) c.memory (0x8d, 4, std::size_t (0) - layout->red_zone_bytes);
+  if (layout.value ().red_zone_bytes)
+    c.memory (0x8d, 4, std::size_t (0) - layout.value ().red_zone_bytes);
   c.emit ({0x9c, 0x49, 0x89, 0xe3, 0x48, 0x83, 0xe4, 0xf0});  // pushfq; mov r11,rsp; and rsp,-16
   c.stack (false, frame.frame_bytes);
   c.memory (0x89, 11, frame.metadata_offset);
@@ -213,7 +218,7 @@ Result<std::vector<std::uint8_t>> detail::make_x86_block_resolver (
   for (auto &save : frame.saves) c.memory (0x8b, unsigned (save.reg), save.offset);
   c.memory (0x8b, 4, frame.metadata_offset);
   c.emit ({0x9d});  // mov rsp,[rsp+metadata]; popfq
-  if (layout->red_zone_bytes) c.memory (0x8d, 4, layout->red_zone_bytes);
+  if (layout.value ().red_zone_bytes) c.memory (0x8d, 4, layout.value ().red_zone_bytes);
   c.emit ({0x41, 0xff, 0xe3});
   return std::move (c.bytes);
 }
@@ -222,8 +227,8 @@ Result<InvocationEntryCode> detail::make_x86_invocation_entries (
   if (target.architecture () != target::Architecture::X86_64 || !callback)
     return Error{ErrorCode::InvalidArgument, "invalid x86 invocation checkpoint callback"};
   auto layout = x86_invocation_frame (target.abi ());
-  if (!layout) return layout.error ();
-  auto &f = *layout;
+  if (!(layout).has_value ()) return layout.error ();
+  auto &f = (layout).value ();
   Code call;
   call.bytes.reserve (320);
   call.move (11, unsigned (f.parameters[3]));
@@ -301,8 +306,8 @@ Result<NativeBoundaryCode> detail::make_x86_native_boundary_entries (
   if (target.architecture () != target::Architecture::X86_64 || !enter || !leave)
     return Error{ErrorCode::InvalidArgument, "invalid x86 native boundary callback"};
   auto layout = x86_boundary_frame (target.abi ());
-  if (!layout) return layout.error ();
-  auto &f = *layout;
+  if (!(layout).has_value ()) return layout.error ();
+  auto &f = (layout).value ();
   Code c;
   if (f.red_zone_bytes) c.memory (0x8d, 4, std::size_t (0) - f.red_zone_bytes);
   c.emit (
@@ -338,12 +343,12 @@ Result<NativeBoundaryCode> detail::make_x86_native_boundary_entries (
   c.state (0x8b, 10, 80);
   c.emit ({0x41, 0xff, 0xe2});  // original argument stack, target r10
   auto outgoing = x86_block_resolver_frame (target.abi ());
-  if (!outgoing) return outgoing.error ();
-  auto &saved = outgoing->saved;
+  if (!(outgoing).has_value ()) return outgoing.error ();
+  auto &saved = outgoing.value ().saved;
   Code out;
   // The leave callback restores the original return slot. On Windows that
   // slot is immediately below SP after RET, so keep saved flags below it.
-  const auto leave_stack_bytes = std::max<std::size_t> (outgoing->red_zone_bytes, 8);
+  const auto leave_stack_bytes = std::max<std::size_t> (outgoing.value ().red_zone_bytes, 8);
   out.memory (0x8d, 4, std::size_t (0) - leave_stack_bytes);
   out.emit ({0x9c, 0x49, 0x89, 0xe3, 0x48, 0x83, 0xe4, 0xf0});
   out.stack (false, saved.frame_bytes);

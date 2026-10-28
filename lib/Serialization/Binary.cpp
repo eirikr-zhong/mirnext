@@ -1,3 +1,5 @@
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 /* Licensed under the MIT License. MIR binary grammar derived from MIR,
    Copyright 2018-2024 Vladimir Makarov. Direct native IR construction. */
 #include "mirnext/Serialization/Format.hpp"
@@ -71,12 +73,12 @@ struct WireStringEqual {
 };
 class Writer {
  public:
-  Result<std::vector<std::byte>> run (const Context &context) {
+  Result<std::vector<std::byte>> run (const Program &context) {
     auto valid = context.verify ();
-    if (!valid) return valid.error ();
+    if (!(valid).has_value ()) return valid.error ();
     for (auto &module : context.modules ()) {
       auto result = write_module (module);
-      if (!result) return result.error ();
+      if (!(result).has_value ()) return result.error ();
     }
     byte (wire::EOFILE);
     std::vector<std::byte> body = std::move (bytes_);
@@ -182,7 +184,8 @@ class Writer {
   }
   Result<void> memory (const Memory &value, std::string_view override_base = {}) {
     bool override = !override_base.empty ();
-    bool base = override || value.base, index = !override && value.index;
+    bool base = override || ir::detail::NodeAccess::base (value),
+         index = !override && ir::detail::NodeAccess::index (value);
     auto displacement = override ? std::int64_t{0} : value.displacement;
     if (value.type.is_block ()) displacement = static_cast<std::int64_t> (value.type.block_size ());
     unsigned form = displacement ? (base ? (index ? 6 : 3) : (index ? 4 : 0))
@@ -192,17 +195,18 @@ class Writer {
     type (value.type);
     if (displacement || (!base && !index)) sint (displacement);
     if (base) {
-      auto result = override ? name (override_base, wire::REG1) : reg (value.base);
-      if (!result) return result;
+      auto result
+        = override ? name (override_base, wire::REG1) : reg (ir::detail::NodeAccess::base (value));
+      if (!(result).has_value ()) return result;
     }
     if (index) {
-      auto result = reg (value.index);
-      if (!result) return result;
+      auto result = reg (ir::detail::NodeAccess::index (value));
+      if (!(result).has_value ()) return result;
       uint (value.scale);
     }
     if (aliased) {
       auto a = name (value.alias);
-      if (!a) return a;
+      if (!(a).has_value ()) return a;
       return name (value.nonalias);
     }
     return {};
@@ -235,11 +239,11 @@ class Writer {
           return memory (value);
         else {
           if (value.displacement) return invalid ("unmaterialized symbol displacement");
-          return name (value.symbol->name ());
+          return name (ir::detail::NodeAccess::symbol (value)->name ());
         }
         return {};
       },
-      operand.storage ());
+      ir::detail::operand_access (operand).storage ());
   }
   Result<void> signature (const Signature &value, const Function *function = nullptr) {
     uint (value.variadic);
@@ -248,9 +252,10 @@ class Writer {
     for (std::size_t n = 0; n < value.parameters.size (); ++n) {
       auto parameter = value.parameters[n];
       type (parameter);
-      auto named
-        = name (function ? registers_.at (function->arguments ()[n]) : ".arg" + std::to_string (n));
-      if (!named) return named;
+      auto named = name (
+        function ? registers_.at (ir::detail::ReferenceAccess::pointers (function->arguments ())[n])
+                 : ".arg" + std::to_string (n));
+      if (!(named).has_value ()) return named;
       if (parameter.is_block ()) uint (parameter.block_size ());
     }
     byte (wire::EOI);
@@ -263,50 +268,50 @@ class Writer {
     for (auto &expansion : expansions) {
       auto &value = instruction.operands ()[expansion.index];
       auto destination = [&] () { return name (expansion.name, wire::REG1); };
-      if (auto symbol = value.get<SymbolReference> ()) {
+      if (auto symbol = ir::detail::operand_access (value).get<SymbolReference> ()) {
         uint (codes[std::size_t (Opcode::Mov)].number);
         auto d = destination ();
-        if (!d) return d;
-        auto s = name (symbol->symbol->name ());
-        if (!s) return s;
+        if (!(d).has_value ()) return d;
+        auto s = name (ir::detail::NodeAccess::symbol (*(symbol))->name ());
+        if (!(s).has_value ()) return s;
         uint (codes[std::size_t (Opcode::Add)].number);
         d = destination ();
-        if (!d) return d;
+        if (!(d).has_value ()) return d;
         d = destination ();
-        if (!d) return d;
+        if (!(d).has_value ()) return d;
         sint (symbol->displacement);
       } else {
-        auto &memory = *value.get<Memory> ();
+        auto &memory = *ir::detail::operand_access (value).get<Memory> ();
         uint (codes[std::size_t (Opcode::Mov)].number);
         auto d = destination ();
-        if (!d) return d;
-        if (memory.index) {
-          auto source = reg (memory.index);
-          if (!source) return source;
+        if (!(d).has_value ()) return d;
+        if (ir::detail::NodeAccess::index (memory)) {
+          auto source = reg (ir::detail::NodeAccess::index (memory));
+          if (!(source).has_value ()) return source;
         } else
           sint (0);
-        if (memory.index && memory.scale != 1) {
+        if (ir::detail::NodeAccess::index (memory) && memory.scale != 1) {
           uint (codes[std::size_t (Opcode::Mul)].number);
           d = destination ();
-          if (!d) return d;
+          if (!(d).has_value ()) return d;
           d = destination ();
-          if (!d) return d;
+          if (!(d).has_value ()) return d;
           sint (memory.scale);
         }
-        if (memory.base) {
+        if (ir::detail::NodeAccess::base (memory)) {
           uint (codes[std::size_t (Opcode::Add)].number);
           d = destination ();
-          if (!d) return d;
+          if (!(d).has_value ()) return d;
           d = destination ();
-          if (!d) return d;
-          auto source = reg (memory.base);
-          if (!source) return source;
+          if (!(d).has_value ()) return d;
+          auto source = reg (ir::detail::NodeAccess::base (memory));
+          if (!(source).has_value ()) return source;
         }
         uint (codes[std::size_t (Opcode::Add)].number);
         d = destination ();
-        if (!d) return d;
+        if (!(d).has_value ()) return d;
         d = destination ();
-        if (!d) return d;
+        if (!(d).has_value ()) return d;
         sint (memory.displacement);
       }
     }
@@ -316,43 +321,45 @@ class Writer {
       if (!expansions.empty () && expansions.front ().index == n) {
         auto expansion = expansions.front ();
         expansions = expansions.subspan (1);
-        if (auto m = instruction.operands ()[n].get<Memory> ())
+        if (auto m = ir::detail::operand_access (instruction.operands ()[n]).get<Memory> ())
           result = memory (*m, expansion.name);
         else
           result = name (expansion.name, wire::REG1);
-      } else if (!n && instruction_descriptor (instruction.opcode ())->count == OperandCount::Call)
+      } else if (!n
+                 && instruction_descriptor (instruction.opcode ()).get ()->count
+                      == OperandCount::Call)
         result = name (call_signatures_.at (&instruction));
       else
         result = operand (instruction.operands ()[n]);
-      if (!result) return result;
+      if (!(result).has_value ()) return result;
     }
-    if (instruction_descriptor (instruction.opcode ())->count != OperandCount::Fixed)
+    if (instruction_descriptor (instruction.opcode ()).get ()->count != OperandCount::Fixed)
       byte (wire::EOI);
     return {};
   }
   Result<void> function (const Function &value) {
     function_ = &value;
     auto kind = name ("func");
-    if (!kind) return kind;
+    if (!(kind).has_value ()) return kind;
     auto named = name (value.symbol ().name ());
-    if (!named) return named;
+    if (!(named).has_value ()) return named;
     auto sig = signature (value.signature (), &value);
-    if (!sig) return sig;
+    if (!(sig).has_value ()) return sig;
     for (bool hardware : {false, true}) {
       bool opened = false;
       for (auto &reg : value.registers ())
         if (!reg.is_argument () && (!reg.hardware_binding ().empty ()) == hardware) {
           if (!opened) {
             auto k = name (hardware ? "global" : "local");
-            if (!k) return k;
+            if (!(k).has_value ()) return k;
             opened = true;
           }
           type (reg.type ().is_integer () ? Type::i64 () : reg.type ());
           auto n = name (registers_.at (&reg));
-          if (!n) return n;
+          if (!(n).has_value ()) return n;
           if (hardware) {
             n = name (reg.hardware_binding ());
-            if (!n) return n;
+            if (!(n).has_value ()) return n;
           }
         }
       if (!hardware)
@@ -363,24 +370,24 @@ class Writer {
             for (auto &expansion : found->second) {
               if (!opened) {
                 auto n = name ("local");
-                if (!n) return n;
+                if (!(n).has_value ()) return n;
                 opened = true;
               }
               type (Type::i64 ());
               auto n = name (expansion.name);
-              if (!n) return n;
+              if (!(n).has_value ()) return n;
             }
           }
       if (opened) byte (wire::EOI);
     }
     for (auto &block : value.blocks ()) {
-      for (auto anchor : block.labels ()) {
+      for (auto anchor : ir::detail::ReferenceAccess::pointers (block.labels ())) {
         auto written = label (anchor);
-        if (!written) return written;
+        if (!(written).has_value ()) return written;
       }
       for (auto &i : block.instructions ()) {
         auto written = instruction (i);
-        if (!written) return written;
+        if (!(written).has_value ()) return written;
       }
     }
     function_ = nullptr;
@@ -397,10 +404,10 @@ class Writer {
                     : std::is_same_v<T, LabelReference>  ? "lref"
                                                          : "expr";
         auto start = name ((named ? "n" : "") + std::string (kind));
-        if (!start) return start;
+        if (!(start).has_value ()) return start;
         if (named) {
           auto n = name (value.symbol ().name ());
-          if (!n) return n;
+          if (!(n).has_value ()) return n;
         }
         if constexpr (std::is_same_v<T, InitializedData>) {
           auto element_type = initializer.type.kind () == Type::Kind::Pointer
@@ -409,9 +416,11 @@ class Writer {
           type (element_type);
           for (auto &element : initializer.values) {
             if (element_type.is_integer ()) {
-              auto bits = element.template get<std::uint64_t> ()
-                            ? *element.template get<std::uint64_t> ()
-                            : std::bit_cast<std::uint64_t> (*element.template get<std::int64_t> ());
+              auto bits
+                = ir::detail::operand_access (element).template get<std::uint64_t> ()
+                    ? *ir::detail::operand_access (element).template get<std::uint64_t> ()
+                    : std::bit_cast<std::uint64_t> (
+                        *ir::detail::operand_access (element).template get<std::int64_t> ());
               switch (element_type.kind ()) {
               case Type::Kind::I8: sint (static_cast<std::int8_t> (bits)); break;
               case Type::Kind::U8: uint (static_cast<std::uint8_t> (bits)); break;
@@ -424,27 +433,27 @@ class Writer {
               }
             } else {
               auto written = operand (element);
-              if (!written) return written;
+              if (!written.has_value ()) return written;
             }
           }
           byte (wire::EOI);
         } else if constexpr (std::is_same_v<T, ZeroData>)
           uint (initializer.size);
         else if constexpr (std::is_same_v<T, SymbolReference>) {
-          auto target = name (initializer.symbol->name ());
-          if (!target) return target;
+          auto target = name (ir::detail::NodeAccess::symbol (initializer)->name ());
+          if (!target.has_value ()) return target;
           sint (initializer.displacement);
         } else if constexpr (std::is_same_v<T, LabelReference>) {
-          auto first = label (initializer.label, true);
-          if (!first) return first;
-          if (initializer.base) {
-            auto second = label (initializer.base, true);
-            if (!second) return second;
+          auto first = label (ir::detail::NodeAccess::label (initializer), true);
+          if (!first.has_value ()) return first;
+          if (ir::detail::NodeAccess::base (initializer)) {
+            auto second = label (ir::detail::NodeAccess::base (initializer), true);
+            if (!second.has_value ()) return second;
           } else
             sint (-1);
           sint (initializer.displacement);
         } else
-          return name (initializer.function->symbol ().name ());
+          return name (ir::detail::NodeAccess::function (initializer)->symbol ().name ());
         return {};
       },
       value.initializer ());
@@ -462,10 +471,10 @@ class Writer {
     for (auto &symbol : module.symbols ()) used_names_.emplace (symbol.name ());
     for (auto &data : module.data ())
       if (auto value = std::get_if<ExpressionData> (&data.initializer ()))
-        expressions.insert (value->function);
+        expressions.insert (ir::detail::NodeAccess::function (*(value)));
     std::vector<const Function *> functions;
     for (bool expression : {true, false})
-      for (auto &item : module.items ())
+      for (auto &item : ir::detail::NodeAccess::items (module))
         if (auto f = std::get_if<const Function *> (&item);
             f && expressions.contains (*f) == expression)
           functions.push_back (*f);
@@ -483,7 +492,7 @@ class Writer {
         registers_.emplace (&reg, std::move (n));
       }
       for (auto &block : f->blocks ())
-        for (auto label : block.labels ()) {
+        for (auto label : ir::detail::ReferenceAccess::pointers (block.labels ())) {
           if (label_number > UINT32_MAX) return invalid ("label count exceeds binary width");
           labels_.emplace (label, label_number++);
         }
@@ -491,7 +500,7 @@ class Writer {
     std::unordered_map<const Signature *, std::string> generated_signatures;
     std::vector<const Signature *> signature_order;
     std::unordered_set<const Symbol *> visible;
-    for (auto &item : module.items ()) {
+    for (auto &item : ir::detail::NodeAccess::items (module)) {
       if (auto symbol = std::get_if<const Symbol *> (&item);
           symbol && (*symbol)->kind () == Symbol::Kind::Prototype)
         visible.insert (*symbol);
@@ -501,18 +510,22 @@ class Writer {
         for (auto &instruction : block.instructions ()) {
           for (std::size_t n = 0; n < instruction.operands ().size (); ++n) {
             auto &value = instruction.operands ()[n];
-            if ((value.get<SymbolReference> () && value.get<SymbolReference> ()->displacement)
-                || (value.get<Memory> () && value.get<Memory> ()->type.is_block ()
-                    && value.get<Memory> ()->displacement))
+            if ((ir::detail::operand_access (value).get<SymbolReference> ()
+                 && ir::detail::operand_access (value).get<SymbolReference> ()->displacement)
+                || (ir::detail::operand_access (value).get<Memory> ()
+                    && ir::detail::operand_access (value).get<Memory> ()->type.is_block ()
+                    && ir::detail::operand_access (value).get<Memory> ()->displacement))
               expansions_[&instruction].push_back ({n, fresh (".addr")});
           }
-          if (instruction_descriptor (instruction.opcode ())->count != OperandCount::Call) continue;
-          auto symbol = instruction.operands ()[0].get<SymbolReference> ()->symbol;
+          if (instruction_descriptor (instruction.opcode ()).get ()->count != OperandCount::Call)
+            continue;
+          auto symbol = ir::detail::NodeAccess::symbol (
+            *(ir::detail::operand_access (instruction.operands ()[0]).get<SymbolReference> ()));
           if (visible.contains (symbol)) {
             call_signatures_.emplace (&instruction, std::string (symbol->name ()));
             continue;
           }
-          auto signature = symbol->signature ();
+          auto signature = symbol->signature ().get ();
           auto found = generated_signatures.find (signature);
           if (found == generated_signatures.end ()) {
             found = generated_signatures.emplace (signature, fresh (".sig")).first;
@@ -522,38 +535,38 @@ class Writer {
         }
     }
     auto start = name ("module");
-    if (!start) return start;
+    if (!(start).has_value ()) return start;
     auto n = name (module.name ());
-    if (!n) return n;
+    if (!(n).has_value ()) return n;
     for (auto &symbol : module.symbols ()) {
       if (symbol.kind () == Symbol::Kind::Import) {
         auto k = name ("import");
-        if (!k) return k;
+        if (!(k).has_value ()) return k;
         n = name (symbol.name ());
-        if (!n) return n;
+        if (!(n).has_value ()) return n;
       } else if (symbol.kind () == Symbol::Kind::Function
                  || (symbol.kind () == Symbol::Kind::Data && !symbol.name ().empty ())) {
         auto k = name ("forward");
-        if (!k) return k;
+        if (!(k).has_value ()) return k;
         n = name (symbol.name ());
-        if (!n) return n;
+        if (!(n).has_value ()) return n;
       }
     }
     for (auto value : signature_order) {
       auto k = name ("proto");
-      if (!k) return k;
+      if (!(k).has_value ()) return k;
       n = name (generated_signatures.at (value));
-      if (!n) return n;
+      if (!(n).has_value ()) return n;
       auto s = signature (*value);
-      if (!s) return s;
+      if (!(s).has_value ()) return s;
     }
     for (auto f : functions)
       if (expressions.contains (f)) {
         auto written = function (*f);
-        if (!written) return written;
+        if (!(written).has_value ()) return written;
       }
     bool last_data = false, skipped = false;
-    for (auto &item : module.items ()) {
+    for (auto &item : ir::detail::NodeAccess::items (module)) {
       if (std::holds_alternative<ForwardDeclaration> (item)
           || (std::holds_alternative<const Symbol *> (item)
               && std::get<const Symbol *> (item)->kind () == Symbol::Kind::Import)
@@ -565,11 +578,11 @@ class Writer {
       auto datum = std::get_if<const GlobalData *> (&item);
       if (datum && (*datum)->symbol ().name ().empty () && last_data && skipped) {
         auto k = name ("proto");
-        if (!k) return k;
+        if (!(k).has_value ()) return k;
         n = name (fresh (".boundary"));
-        if (!n) return n;
+        if (!(n).has_value ()) return n;
         auto s = signature ({});
-        if (!s) return s;
+        if (!(s).has_value ()) return s;
       }
       last_data = datum != nullptr;
       skipped = false;
@@ -582,19 +595,19 @@ class Writer {
             return data (*value);
           else if constexpr (std::is_same_v<T, const Symbol *>) {
             auto k = name ("proto");
-            if (!k) return k;
+            if (!(k).has_value ()) return k;
             auto n = name (value->name ());
-            if (!n) return n;
-            return signature (*value->signature ());
+            if (!n.has_value ()) return n;
+            return signature (value->signature ().value ());
           } else if constexpr (std::is_same_v<T, ExportDeclaration>) {
             auto k = name ("export");
-            if (!k) return k;
-            return name (value.symbol->name ());
+            if (!(k).has_value ()) return k;
+            return name (ir::detail::NodeAccess::symbol (value)->name ());
           } else
             return invalid ("unmaterialized data declaration");
         },
         item);
-      if (!result) return result;
+      if (!(result).has_value ()) return result;
     }
     return name ("endmodule");
   }
@@ -651,46 +664,47 @@ struct Record {
 class Reader {
  public:
   Reader (std::span<const std::byte> bytes, BinaryOptions options)
-    : bytes_ (bytes), options_ (options), context_ (std::make_unique<Context> ()) {}
-  Result<std::unique_ptr<Context>> run () {
+    : bytes_ (bytes), options_ (options), context_ () {}
+  Result<Program> run () {
     if (bytes_.size () > options_.max_bytes) return invalid ("input byte limit exceeded");
     auto version = uint ();
-    if (!version) return version.error ();
-    if (*version > wire::version) return invalid ("unsupported binary version");
+    if (!(version).has_value ()) return version.error ();
+    if ((version).value () > wire::version) return invalid ("unsupported binary version");
     auto count = uint ();
-    if (!count) return count.error ();
-    if (*count > options_.max_strings || *count > UINT32_MAX || *count > bytes_.size () - position_)
+    if (!(count).has_value ()) return count.error ();
+    if ((count).value () > options_.max_strings || (count).value () > UINT32_MAX
+        || (count).value () > bytes_.size () - position_)
       return invalid ("string table limit or truncated input");
-    strings_.reserve (*count);
-    for (std::uint64_t n = 0; n < *count; ++n) {
+    strings_.reserve ((count).value ());
+    for (std::uint64_t n = 0; n < (count).value (); ++n) {
       auto size = uint ();
-      if (!size) return size.error ();
-      if (*size > bytes_.size () - position_) return invalid ("truncated string table");
+      if (!(size).has_value ()) return size.error ();
+      if ((size).value () > bytes_.size () - position_) return invalid ("truncated string table");
       strings_.emplace_back (reinterpret_cast<const char *> (bytes_.data () + position_),
-                             static_cast<std::size_t> (*size));
-      position_ += *size;
+                             static_cast<std::size_t> ((size).value ()));
+      position_ += (size).value ();
     }
     for (;;) {
       auto first = token ();
-      if (!first) return first.error ();
-      if (first->tag == wire::EOFILE) {
+      if (!(first).has_value ()) return first.error ();
+      if (first.value ().tag == wire::EOFILE) {
         if (position_ != bytes_.size ()) return invalid ("trailing bytes");
-        auto valid = context_->verify ();
-        if (!valid) return diagnose (valid.error ());
+        auto valid = context_.verify ();
+        if (!(valid).has_value ()) return diagnose (valid.error ());
         return std::move (context_);
       }
-      auto kind = name (*first);
-      if (!kind) return kind.error ();
-      if (*kind != "module") return invalid ("expected module record");
+      auto kind = name ((first).value ());
+      if (!(kind).has_value ()) return kind.error ();
+      if ((kind).value () != "module") return invalid ("expected module record");
       auto module_name = name ();
-      if (!module_name) return module_name.error ();
-      auto created = context_->create_module (*module_name);
-      if (!created) return diagnose (created.error ());
-      module_ = *created;
+      if (!(module_name).has_value ()) return module_name.error ();
+      auto created = ir::detail::access (context_).create_module ((module_name).value ());
+      if (!(created).has_value ()) return diagnose (created.error ());
+      module_ = &(created).value ();
       auto parsed = parse_module ();
-      if (!parsed) return parsed.error ();
+      if (!(parsed).has_value ()) return parsed.error ();
       auto built = build ();
-      if (!built) return built.error ();
+      if (!(built).has_value ()) return built.error ();
       module_ = nullptr;
     }
   }
@@ -704,7 +718,7 @@ class Reader {
   std::span<const std::byte> bytes_;
   BinaryOptions options_;
   std::size_t position_ = 0, instruction_count_ = 0;
-  std::unique_ptr<Context> context_;
+  Program context_;
   Module *module_ = nullptr;
   std::string_view function_name_;
   std::vector<std::string_view> strings_;
@@ -732,51 +746,52 @@ class Reader {
   }
   Result<Token> token () {
     auto tag = byte ();
-    if (!tag) return tag.error ();
-    Token result{*tag};
-    if (*tag & 128) {
+    if (!(tag).has_value ()) return tag.error ();
+    Token result{(tag).value ()};
+    if ((tag).value () & 128) {
       result.tag = wire::U0;
-      result.bits = *tag & 127;
+      result.bits = (tag).value () & 127;
       return result;
     }
     unsigned count = 0;
-    if (*tag >= wire::U1 && *tag <= wire::U8)
-      count = *tag;
-    else if (*tag >= wire::I1 && *tag <= wire::I8)
-      count = *tag - wire::I1 + 1;
-    else if (*tag >= wire::REG1 && *tag <= wire::LAB4)
-      count = (*tag - wire::REG1) % 4 + 1;
-    else if (*tag == wire::F)
+    if ((tag).value () >= wire::U1 && (tag).value () <= wire::U8)
+      count = (tag).value ();
+    else if ((tag).value () >= wire::I1 && (tag).value () <= wire::I8)
+      count = (tag).value () - wire::I1 + 1;
+    else if ((tag).value () >= wire::REG1 && (tag).value () <= wire::LAB4)
+      count = ((tag).value () - wire::REG1) % 4 + 1;
+    else if ((tag).value () == wire::F)
       count = 4;
-    else if (*tag == wire::D)
+    else if ((tag).value () == wire::D)
       count = 8;
-    else if (*tag == wire::LD) {
+    else if ((tag).value () == wire::LD) {
       if (bytes_.size () - position_ < result.extended.size ())
         return invalid ("truncated long double");
       std::memcpy (result.extended.data (), bytes_.data () + position_, result.extended.size ());
       position_ += result.extended.size ();
       return result;
-    } else if ((*tag >= wire::MEM_DISP && *tag <= wire::EOFILE)
-               || (*tag >= wire::ALIAS_DISP && *tag <= wire::ALIAS_LAST))
+    } else if (((tag).value () >= wire::MEM_DISP && (tag).value () <= wire::EOFILE)
+               || ((tag).value () >= wire::ALIAS_DISP && (tag).value () <= wire::ALIAS_LAST))
       return result;
     else
       return invalid ("invalid tag");
     auto value = little (count);
-    if (!value) return value.error ();
-    result.bits = *value;
+    if (!(value).has_value ()) return value.error ();
+    result.bits = (value).value ();
     return result;
   }
   Result<std::uint64_t> uint () {
     auto value = token ();
-    if (!value) return value.error ();
-    if (value->tag > wire::U8) return invalid ("expected unsigned integer");
-    return value->bits;
+    if (!(value).has_value ()) return value.error ();
+    if (value.value ().tag > wire::U8) return invalid ("expected unsigned integer");
+    return value.value ().bits;
   }
   Result<std::int64_t> sint () {
     auto value = token ();
-    if (!value) return value.error ();
-    if (value->tag < wire::I1 || value->tag > wire::I8) return invalid ("expected signed integer");
-    return std::bit_cast<std::int64_t> (value->bits);
+    if (!(value).has_value ()) return value.error ();
+    if (value.value ().tag < wire::I1 || value.value ().tag > wire::I8)
+      return invalid ("expected signed integer");
+    return std::bit_cast<std::int64_t> (value.value ().bits);
   }
   Result<std::string_view> string (std::uint64_t id) {
     if (id >= strings_.size ()) return invalid ("invalid string identity");
@@ -784,10 +799,11 @@ class Reader {
   }
   Result<std::string_view> terminated (std::uint64_t id) {
     auto value = string (id);
-    if (!value) return value.error ();
-    if (value->empty () || value->back () != '\0' || value->find ('\0') != value->size () - 1)
+    if (!(value).has_value ()) return value.error ();
+    if (value.value ().empty () || value.value ().back () != '\0'
+        || value.value ().find ('\0') != value.value ().size () - 1)
       return invalid ("name is not a terminated string");
-    return value->substr (0, value->size () - 1);
+    return value.value ().substr (0, value.value ().size () - 1);
   }
   Result<std::string_view> name (Token token) {
     if (token.tag < wire::NAME1 || token.tag > wire::NAME4) return invalid ("expected name");
@@ -795,8 +811,8 @@ class Reader {
   }
   Result<std::string_view> name () {
     auto value = token ();
-    if (!value) return value.error ();
-    return name (*value);
+    if (!(value).has_value ()) return value.error ();
+    return name ((value).value ());
   }
   Result<Type> type (Token token, bool undef = false) {
     auto last = unsigned (undef ? wire::Type::Undef : wire::Type::ReturnBlock);
@@ -806,46 +822,47 @@ class Reader {
   }
   Result<Type> type (bool undef = false) {
     auto value = token ();
-    if (!value) return value.error ();
-    return type (*value, undef);
+    if (!(value).has_value ()) return value.error ();
+    return type ((value).value (), undef);
   }
   Result<ParsedFunction> signature (bool body) {
     ParsedFunction result;
     auto variadic = uint ();
-    if (!variadic) return variadic.error ();
-    if (*variadic > 1) return invalid ("invalid variadic flag");
-    result.signature.variadic = *variadic;
+    if (!(variadic).has_value ()) return variadic.error ();
+    if ((variadic).value () > 1) return invalid ("invalid variadic flag");
+    result.signature.variadic = (variadic).value ();
     auto count = uint ();
-    if (!count) return count.error ();
-    if (*count > bytes_.size () - position_) return invalid ("invalid result count");
-    for (std::uint64_t n = 0; n < *count; ++n) {
+    if (!(count).has_value ()) return count.error ();
+    if ((count).value () > bytes_.size () - position_) return invalid ("invalid result count");
+    for (std::uint64_t n = 0; n < (count).value (); ++n) {
       auto result_type = type ();
-      if (!result_type) return result_type.error ();
-      if (!result_type->is_scalar ()) return invalid ("function result must be scalar");
-      result.signature.results.push_back (*result_type);
+      if (!(result_type).has_value ()) return result_type.error ();
+      if (!result_type.value ().is_scalar ()) return invalid ("function result must be scalar");
+      result.signature.results.push_back ((result_type).value ());
     }
     for (;;) {
       auto value = token ();
-      if (!value) return value.error ();
-      if (value->tag == wire::EOI) break;
-      auto parameter = type (*value);
-      if (!parameter) return parameter.error ();
+      if (!(value).has_value ()) return value.error ();
+      if (value.value ().tag == wire::EOI) break;
+      auto parameter = type ((value).value ());
+      if (!(parameter).has_value ()) return parameter.error ();
       auto argument = name ();
-      if (!argument) return argument.error ();
-      if (parameter->is_block ()) {
+      if (!(argument).has_value ()) return argument.error ();
+      if (parameter.value ().is_block ()) {
         auto size = uint ();
-        if (!size) return size.error ();
-        if (*size > INT64_MAX || !*size) return invalid ("invalid block argument size");
-        *parameter = parameter->kind () == Type::Kind::ReturnBlock
-                       ? Type::return_block (*size)
-                       : Type::block (*size, parameter->block_class ());
+        if (!(size).has_value ()) return size.error ();
+        if ((size).value () > INT64_MAX || !(size).value ())
+          return invalid ("invalid block argument size");
+        (parameter).value () = parameter.value ().kind () == Type::Kind::ReturnBlock
+                                 ? Type::return_block ((size).value ())
+                                 : Type::block ((size).value (), parameter.value ().block_class ());
       }
-      if (body && argument->empty ()) return invalid ("empty function argument name");
-      result.signature.parameters.push_back (*parameter);
-      result.arguments.push_back (*argument);
+      if (body && argument.value ().empty ()) return invalid ("empty function argument name");
+      result.signature.parameters.push_back ((parameter).value ());
+      result.arguments.push_back ((argument).value ());
     }
     auto valid = result.signature.verify ();
-    if (!valid) return diagnose (valid.error ());
+    if (!(valid).has_value ()) return diagnose (valid.error ());
     return result;
   }
   Result<Operand> literal (Token token) {
@@ -861,26 +878,26 @@ class Reader {
     }
     if (token.tag >= wire::STR1 && token.tag <= wire::STR4) {
       auto value = string (token.bits);
-      if (!value) return value.error ();
-      return Operand (std::string (*value));
+      if (!(value).has_value ()) return value.error ();
+      return Operand (std::string ((value).value ()));
     }
     return invalid ("expected literal");
   }
   Result<ParsedOperand> operand (Token value) {
     if (value.tag <= wire::LD || (value.tag >= wire::STR1 && value.tag <= wire::STR4)) {
       auto l = literal (value);
-      if (!l) return l.error ();
-      return ParsedOperand (std::move (*l));
+      if (!(l).has_value ()) return l.error ();
+      return ParsedOperand (std::move ((l).value ()));
     }
     if (value.tag >= wire::REG1 && value.tag <= wire::REG4) {
       auto n = terminated (value.bits);
-      if (!n) return n.error ();
-      return ParsedOperand (RegisterName{*n});
+      if (!(n).has_value ()) return n.error ();
+      return ParsedOperand (RegisterName{(n).value ()});
     }
     if (value.tag >= wire::NAME1 && value.tag <= wire::NAME4) {
       auto n = terminated (value.bits);
-      if (!n) return n.error ();
-      return ParsedOperand (SymbolName{*n});
+      if (!(n).has_value ()) return n.error ();
+      return ParsedOperand (SymbolName{(n).value ()});
     }
     if (value.tag >= wire::LAB1 && value.tag <= wire::LAB4)
       return ParsedOperand (LabelNumber{static_cast<std::uint32_t> (value.bits)});
@@ -888,47 +905,47 @@ class Reader {
     if ((value.tag >= wire::MEM_DISP && value.tag <= wire::MEM_LAST) || aliased) {
       unsigned form = value.tag - (aliased ? wire::ALIAS_DISP : wire::MEM_DISP);
       auto t = type (true);
-      if (!t) return t.error ();
-      ParsedMemory result{Memory{*t}, {}, {}};
+      if (!(t).has_value ()) return t.error ();
+      ParsedMemory result{ir::detail::NodeAccess::make_Memory ((t).value ()), {}, {}};
       if (form == 0 || form == 3 || form == 4 || form == 6) {
         auto displacement = sint ();
-        if (!displacement) return displacement.error ();
-        result.value.displacement = *displacement;
+        if (!(displacement).has_value ()) return displacement.error ();
+        result.value.displacement = (displacement).value ();
       }
       auto reg = [&] () -> Result<std::string_view> {
         auto token = this->token ();
-        if (!token) return token.error ();
-        if (token->tag < wire::REG1 || token->tag > wire::REG4)
+        if (!(token).has_value ()) return token.error ();
+        if (token.value ().tag < wire::REG1 || token.value ().tag > wire::REG4)
           return invalid ("expected address register");
-        return terminated (token->bits);
+        return terminated (token.value ().bits);
       };
       if (form == 1 || form == 3 || form == 5 || form == 6) {
         auto n = reg ();
-        if (!n) return n.error ();
-        result.base = *n;
+        if (!(n).has_value ()) return n.error ();
+        result.base = (n).value ();
       }
       if (form == 2 || form == 4 || form == 5 || form == 6) {
         auto n = reg ();
-        if (!n) return n.error ();
-        result.index = *n;
+        if (!(n).has_value ()) return n.error ();
+        result.index = (n).value ();
         auto scale = uint ();
-        if (!scale) return scale.error ();
-        if (*scale > 255) return invalid ("invalid address scale");
-        result.value.scale = *scale;
+        if (!(scale).has_value ()) return scale.error ();
+        if ((scale).value () > 255) return invalid ("invalid address scale");
+        result.value.scale = (scale).value ();
       }
       if (aliased) {
         auto a = name ();
-        if (!a) return a.error ();
+        if (!(a).has_value ()) return a.error ();
         auto b = name ();
-        if (!b) return b.error ();
-        result.value.alias = *a;
-        result.value.nonalias = *b;
+        if (!(b).has_value ()) return b.error ();
+        result.value.alias = (a).value ();
+        result.value.nonalias = (b).value ();
       }
-      if (t->is_block ()) {
+      if (t.value ().is_block ()) {
         if (result.value.displacement <= 0) return invalid ("invalid block memory size");
-        result.value.type = t->kind () == Type::Kind::ReturnBlock
+        result.value.type = t.value ().kind () == Type::Kind::ReturnBlock
                               ? Type::return_block (result.value.displacement)
-                              : Type::block (result.value.displacement, t->block_class ());
+                              : Type::block (result.value.displacement, t.value ().block_class ());
         result.value.displacement = 0;
       }
       return ParsedOperand (std::move (result));
@@ -938,56 +955,60 @@ class Reader {
   Result<ParsedInitializer> data (std::string_view kind) {
     if (kind == "bss") {
       auto size = uint ();
-      if (!size) return size.error ();
-      if (*size > std::numeric_limits<std::size_t>::max ())
+      if (!(size).has_value ()) return size.error ();
+      if ((size).value () > std::numeric_limits<std::size_t>::max ())
         return invalid ("BSS exceeds addressable storage");
-      return ParsedInitializer (ZeroData{static_cast<std::size_t> (*size)});
+      return ParsedInitializer (ZeroData{static_cast<std::size_t> ((size).value ())});
     }
     if (kind == "ref" || kind == "expr") {
       auto target = name ();
-      if (!target) return target.error ();
+      if (!(target).has_value ()) return target.error ();
       std::int64_t displacement = 0;
       if (kind == "ref") {
         auto value = sint ();
-        if (!value) return value.error ();
-        displacement = *value;
+        if (!(value).has_value ()) return value.error ();
+        displacement = (value).value ();
       }
-      return ParsedInitializer (ReferenceData{*target, displacement, kind == "expr"});
+      return ParsedInitializer (ReferenceData{(target).value (), displacement, kind == "expr"});
     }
     if (kind == "lref") {
       auto label = sint ();
-      if (!label) return label.error ();
+      if (!(label).has_value ()) return label.error ();
       auto base = sint ();
-      if (!base) return base.error ();
+      if (!(base).has_value ()) return base.error ();
       auto displacement = sint ();
-      if (!displacement) return displacement.error ();
-      if (*label < 0 || *label > UINT32_MAX || *base < -1 || *base > UINT32_MAX)
+      if (!(displacement).has_value ()) return displacement.error ();
+      if ((label).value () < 0 || (label).value () > UINT32_MAX || (base).value () < -1
+          || (base).value () > UINT32_MAX)
         return invalid ("invalid label data identity");
       return ParsedInitializer (
-        LabelData{static_cast<std::uint32_t> (*label),
-                  *base == -1 ? std::nullopt : std::optional (static_cast<std::uint32_t> (*base)),
-                  *displacement});
+        LabelData{static_cast<std::uint32_t> ((label).value ()),
+                  (base).value () == -1
+                    ? std::nullopt
+                    : std::optional (static_cast<std::uint32_t> ((base).value ())),
+                  (displacement).value ()});
     }
     auto element_type = type ();
-    if (!element_type) return element_type.error ();
-    if (!element_type->is_scalar ()) return invalid ("data type must be scalar");
-    InitializedData result{*element_type, {}};
+    if (!(element_type).has_value ()) return element_type.error ();
+    if (!element_type.value ().is_scalar ()) return invalid ("data type must be scalar");
+    InitializedData result{(element_type).value (), {}};
     for (;;) {
       auto value = token ();
-      if (!value) return value.error ();
-      if (value->tag == wire::EOI) break;
-      unsigned number = type_code (*element_type);
-      bool valid = number <= unsigned (wire::Type::U64)
-                     ? ((number & 1) ? value->tag <= wire::U8
-                                     : value->tag >= wire::I1 && value->tag <= wire::I8)
-                   : number == unsigned (wire::Type::F) ? value->tag == wire::F
-                   : number == unsigned (wire::Type::D)
-                     ? value->tag == wire::D
-                     : number == unsigned (wire::Type::LD) && value->tag == wire::LD;
+      if (!(value).has_value ()) return value.error ();
+      if (value.value ().tag == wire::EOI) break;
+      unsigned number = type_code ((element_type).value ());
+      bool valid
+        = number <= unsigned (wire::Type::U64)
+            ? ((number & 1) ? value.value ().tag <= wire::U8
+                            : value.value ().tag >= wire::I1 && value.value ().tag <= wire::I8)
+          : number == unsigned (wire::Type::F) ? value.value ().tag == wire::F
+          : number == unsigned (wire::Type::D)
+            ? value.value ().tag == wire::D
+            : number == unsigned (wire::Type::LD) && value.value ().tag == wire::LD;
       if (!valid) return invalid ("data scalar and literal types differ");
-      auto element = literal (*value);
-      if (!element) return element.error ();
-      result.values.push_back (std::move (*element));
+      auto element = literal ((value).value ());
+      if (!(element).has_value ()) return element.error ();
+      result.values.push_back (std::move ((element).value ()));
     }
     return ParsedInitializer (std::move (result));
   }
@@ -998,91 +1019,93 @@ class Reader {
     for (;;) {
       std::vector<std::uint32_t> labels;
       auto value = token ();
-      if (!value) return value.error ();
-      while (value->tag >= wire::LAB1 && value->tag <= wire::LAB4) {
-        labels.push_back (value->bits);
+      if (!(value).has_value ()) return value.error ();
+      while (value.value ().tag >= wire::LAB1 && value.value ().tag <= wire::LAB4) {
+        labels.push_back (value.value ().bits);
         value = token ();
-        if (!value) return value.error ();
+        if (!(value).has_value ()) return value.error ();
       }
-      if (value->tag <= wire::U8) {
+      if (value.value ().tag <= wire::U8) {
         if (!function) return invalid ("instruction outside function");
-        auto code = opcode (value->bits);
+        auto code = opcode (value.value ().bits);
         if (!code || *code == Opcode::Label) return invalid ("private or invalid opcode");
         if (instruction_count_++ >= options_.max_instructions)
           return invalid ("instruction limit exceeded");
-        auto description = instruction_descriptor (*code);
+        auto description = instruction_descriptor (*code).get ();
         ParsedInstruction instruction{*code, std::move (labels), {}};
         for (std::size_t n = 0;
              description->count != OperandCount::Fixed || n < description->roles.size (); ++n) {
           auto argument = token ();
-          if (!argument) return argument.error ();
-          if (argument->tag == wire::EOI) {
+          if (!(argument).has_value ()) return argument.error ();
+          if (argument.value ().tag == wire::EOI) {
             if (description->count == OperandCount::Fixed)
               return invalid ("too few instruction operands");
             break;
           }
-          auto parsed = operand (*argument);
-          if (!parsed) return parsed.error ();
-          instruction.operands.push_back (std::move (*parsed));
+          auto parsed = operand ((argument).value ());
+          if (!(parsed).has_value ()) return parsed.error ();
+          instruction.operands.push_back (std::move ((parsed).value ()));
         }
         function->instructions.push_back (std::move (instruction));
         continue;
       }
       if (!labels.empty ()) return invalid ("labels before a module record");
-      auto kind = name (*value);
-      if (!kind) return kind.error ();
-      if (*kind == "endfunc") {
+      auto kind = name ((value).value ());
+      if (!(kind).has_value ()) return kind.error ();
+      if ((kind).value () == "endfunc") {
         if (!function) return invalid ("endfunc outside function");
         function = nullptr;
         function_name_ = {};
         continue;
       }
-      if (*kind == "local" || *kind == "global") {
+      if ((kind).value () == "local" || (kind).value () == "global") {
         if (!function) return invalid ("register declaration outside function");
         for (;;) {
           auto value = token ();
-          if (!value) return value.error ();
-          if (value->tag == wire::EOI) break;
-          auto t = type (*value);
-          if (!t) return t.error ();
-          if (!t->is_scalar ()) return invalid ("local register must be scalar");
+          if (!(value).has_value ()) return value.error ();
+          if (value.value ().tag == wire::EOI) break;
+          auto t = type ((value).value ());
+          if (!(t).has_value ()) return t.error ();
+          if (!t.value ().is_scalar ()) return invalid ("local register must be scalar");
           auto n = name ();
-          if (!n) return n.error ();
+          if (!(n).has_value ()) return n.error ();
           std::string_view hardware;
-          if (*kind == "global") {
+          if ((kind).value () == "global") {
             auto h = name ();
-            if (!h) return h.error ();
-            if (h->empty ()) return invalid ("empty hardware binding");
-            hardware = *h;
+            if (!(h).has_value ()) return h.error ();
+            if (h.value ().empty ()) return invalid ("empty hardware binding");
+            hardware = (h).value ();
           }
-          function->locals.push_back ({*t, *n, hardware});
+          function->locals.push_back ({(t).value (), (n).value (), hardware});
         }
         continue;
       }
       if (function) return invalid ("module record inside function");
-      if (*kind == "endmodule") return {};
-      if (*kind == "func" || *kind == "proto") {
+      if ((kind).value () == "endmodule") return {};
+      if ((kind).value () == "func" || (kind).value () == "proto") {
         auto n = name ();
-        if (!n) return n.error ();
-        function_name_ = *kind == "func" ? *n : std::string_view{};
-        auto body = signature (*kind == "func");
-        if (!body) return body.error ();
-        records_.push_back ({*kind == "func" ? Record::Kind::Function : Record::Kind::Prototype, *n,
-                             std::move (*body)});
-        if (*kind == "func") function = &std::get<ParsedFunction> (records_.back ().body);
+        if (!(n).has_value ()) return n.error ();
+        function_name_ = (kind).value () == "func" ? (n).value () : std::string_view{};
+        auto body = signature ((kind).value () == "func");
+        if (!(body).has_value ()) return body.error ();
+        records_.push_back (
+          {(kind).value () == "func" ? Record::Kind::Function : Record::Kind::Prototype,
+           (n).value (), std::move ((body).value ())});
+        if ((kind).value () == "func") function = &std::get<ParsedFunction> (records_.back ().body);
         continue;
       }
-      if (*kind == "import" || *kind == "forward" || *kind == "export") {
+      if ((kind).value () == "import" || (kind).value () == "forward"
+          || (kind).value () == "export") {
         auto n = name ();
-        if (!n) return n.error ();
-        records_.push_back ({*kind == "import"    ? Record::Kind::Import
-                             : *kind == "forward" ? Record::Kind::Forward
-                                                  : Record::Kind::Export,
-                             *n,
+        if (!(n).has_value ()) return n.error ();
+        records_.push_back ({(kind).value () == "import"    ? Record::Kind::Import
+                             : (kind).value () == "forward" ? Record::Kind::Forward
+                                                            : Record::Kind::Export,
+                             (n).value (),
                              {}});
         continue;
       }
-      auto spelling = *kind;
+      auto spelling = (kind).value ();
       bool named = spelling.starts_with ('n');
       if (named) spelling.remove_prefix (1);
       if (spelling != "data" && spelling != "bss" && spelling != "ref" && spelling != "lref"
@@ -1091,80 +1114,85 @@ class Reader {
       std::string_view n;
       if (named) {
         auto name = this->name ();
-        if (!name) return name.error ();
-        n = *name;
+        if (!(name).has_value ()) return name.error ();
+        n = (name).value ();
         if (n.empty ()) return invalid ("empty named data symbol");
       }
       auto initializer = data (spelling);
-      if (!initializer) return initializer.error ();
-      records_.push_back ({Record::Kind::Data, n, std::move (*initializer)});
+      if (!(initializer).has_value ()) return initializer.error ();
+      records_.push_back ({Record::Kind::Data, n, std::move ((initializer).value ())});
     }
   }
   Result<void> build () {
     for (auto &record : records_)
       if (!record.name.empty ()) {
-        auto reserved = module_->reserve_symbol (record.name);
-        if (!reserved) return diagnose (reserved.error ());
+        auto reserved = ir::detail::access (*(module_)).reserve_symbol (record.name);
+        if (!(reserved).has_value ()) return diagnose (reserved.error ());
       }
     for (auto &record : records_) {
       switch (record.kind) {
       case Record::Kind::Function: {
         auto &body = std::get<ParsedFunction> (record.body);
         function_name_ = record.name;
-        auto created = module_->create_function (record.name, body.signature, body.arguments);
-        if (!created) return diagnose (created.error ());
-        body.function = *created;
+        auto created = ir::detail::access (*(module_))
+                         .create_function (record.name, body.signature, body.arguments);
+        if (!(created).has_value ()) return diagnose (created.error ());
+        body.function = &(created).value ();
         for (auto &reg : body.locals) {
-          auto added = body.function->create_register (reg.type, reg.name, reg.hardware);
-          if (!added) return diagnose (added.error ());
+          auto added = ir::detail::access (*(body.function))
+                         .create_register (reg.type, reg.name, reg.hardware);
+          if (!(added).has_value ()) return diagnose (added.error ());
         }
-        auto created_block = body.function->create_block ();
-        if (!created_block) return diagnose (created_block.error ());
-        auto block = *created_block;
+        auto created_block = ir::detail::access (*(body.function)).create_block ();
+        if (!(created_block).has_value ()) return diagnose (created_block.error ());
+        auto block = &(created_block).value ();
         bool occupied = false, terminated = false;
         for (auto &instruction : body.instructions) {
           if (terminated || (occupied && !instruction.labels.empty ())) {
-            auto next = body.function->create_block ();
-            if (!next) return diagnose (next.error ());
-            block = *next;
+            auto next = ir::detail::access (*(body.function)).create_block ();
+            if (!(next).has_value ()) return diagnose (next.error ());
+            block = &(next).value ();
           }
           instruction.block = block;
           for (auto number : instruction.labels) {
             if (labels_.contains (number)) return invalid ("duplicate module label identity");
-            auto label = body.function->create_label (*block);
-            if (!label) return diagnose (label.error ());
-            labels_.emplace (number, *label);
+            auto label = ir::detail::access (*(body.function)).create_label (*block);
+            if (!(label).has_value ()) return diagnose (label.error ());
+            labels_.emplace (number, &(label).value ());
           }
           occupied = true;
-          terminated = instruction_descriptor (instruction.opcode)->flow != ControlFlow::Next;
+          terminated
+            = instruction_descriptor (instruction.opcode).get ()->flow != ControlFlow::Next;
         }
         function_name_ = {};
         break;
       }
       case Record::Kind::Prototype: {
-        auto p = module_->prototype (record.name, std::get<ParsedFunction> (record.body).signature);
-        if (!p) return diagnose (p.error ());
+        auto p = ir::detail::access (*(module_))
+                   .prototype (record.name, std::get<ParsedFunction> (record.body).signature);
+        if (!(p).has_value ()) return diagnose (p.error ());
         break;
       }
       case Record::Kind::Import: {
-        auto imported = module_->import (record.name);
-        if (!imported) return diagnose (imported.error ());
+        auto imported = ir::detail::access (*(module_)).import (record.name);
+        if (!(imported).has_value ()) return diagnose (imported.error ());
         break;
       }
       case Record::Kind::Forward: {
-        auto forward = module_->forward (record.name);
-        if (!forward) return diagnose (forward.error ());
+        auto forward = ir::detail::access (*(module_)).forward (record.name);
+        if (!(forward).has_value ()) return diagnose (forward.error ());
         break;
       }
       case Record::Kind::Export: {
-        auto exported = module_->export_symbol (*module_->find_symbol (record.name));
-        if (!exported) return diagnose (exported.error ());
+        auto exported = ir::detail::access (*(module_))
+                          .export_symbol (*module_->find_symbol (record.name).get ());
+        if (!(exported).has_value ()) return diagnose (exported.error ());
         break;
       }
       case Record::Kind::Data: {
-        auto declared = module_->declare_data (record.name);
-        if (!declared) return diagnose (declared.error ());
-        record.symbol = *declared;
+        auto declared = ir::detail::access (*(module_)).declare_data (record.name);
+        if (!(declared).has_value ()) return diagnose (declared.error ());
+        record.symbol = &(declared).value ();
         break;
       }
       }
@@ -1173,10 +1201,10 @@ class Reader {
       if (record.kind == Record::Kind::Function) {
         auto &body = std::get<ParsedFunction> (record.body);
         function_name_ = record.name;
-        auto reg = [&] (std::string_view name) -> Result<const Register *> {
-          auto result = body.function->find_register (name);
+        auto reg = [&] (std::string_view name) -> Result<const Register &> {
+          auto result = body.function->find_register (name).get ();
           if (!result) return invalid ("undeclared register: " + std::string (name));
-          return result;
+          return *(result);
         };
         for (auto &instruction : body.instructions) {
           std::vector<Operand> operands;
@@ -1189,10 +1217,10 @@ class Reader {
                   return value;
                 else if constexpr (std::is_same_v<T, RegisterName>) {
                   auto r = reg (value.name);
-                  if (!r) return r.error ();
-                  return Operand (**r);
+                  if (!r.has_value ()) return r.error ();
+                  return Operand (r.value ());
                 } else if constexpr (std::is_same_v<T, SymbolName>) {
-                  auto symbol = module_->find_symbol (value.name);
+                  auto symbol = module_->find_symbol (value.name).get ();
                   if (!symbol) return invalid ("undeclared symbol");
                   return Operand (*symbol);
                 } else if constexpr (std::is_same_v<T, LabelNumber>) {
@@ -1203,23 +1231,24 @@ class Reader {
                   auto m = value.value;
                   if (value.base) {
                     auto r = reg (*value.base);
-                    if (!r) return r.error ();
-                    m.base = *r;
+                    if (!r.has_value ()) return r.error ();
+                    ir::detail::NodeAccess::base (m) = &r.value ();
                   }
                   if (value.index) {
                     auto r = reg (*value.index);
-                    if (!r) return r.error ();
-                    m.index = *r;
+                    if (!r.has_value ()) return r.error ();
+                    ir::detail::NodeAccess::index (m) = &r.value ();
                   }
                   return Operand (std::move (m));
                 }
               },
               argument);
-            if (!value) return value.error ();
-            operands.push_back (std::move (*value));
+            if (!(value).has_value ()) return value.error ();
+            operands.push_back (std::move ((value).value ()));
           }
-          auto emitted = IRBuilder (*instruction.block).emit (instruction.opcode, operands);
-          if (!emitted) return diagnose (emitted.error ());
+          auto emitted
+            = InstructionBuilder (*instruction.block).emit (instruction.opcode, operands);
+          if (!(emitted).has_value ()) return diagnose (emitted.error ());
         }
         function_name_ = {};
       }
@@ -1231,13 +1260,16 @@ class Reader {
             if constexpr (std::is_same_v<T, InitializedData> || std::is_same_v<T, ZeroData>)
               return DataInitializer (value);
             else if constexpr (std::is_same_v<T, ReferenceData>) {
-              auto symbol = module_->find_symbol (value.name);
+              auto symbol = module_->find_symbol (value.name).get ();
               if (!symbol) return invalid ("undefined data symbol");
               if (value.expression) {
-                if (!symbol->function ()) return invalid ("expression requires a function");
-                return DataInitializer (ExpressionData{symbol->function ()});
+                if (!symbol->function ().has_value ())
+                  return invalid ("expression requires a function");
+                return DataInitializer (
+                  ir::detail::NodeAccess::make_ExpressionData (symbol->function ().get ()));
               }
-              return DataInitializer (SymbolReference{symbol, value.displacement});
+              return DataInitializer (
+                ir::detail::NodeAccess::make_SymbolReference (symbol, value.displacement));
             } else {
               auto first = labels_.find (value.label);
               if (first == labels_.end ()) return invalid ("undefined data label");
@@ -1247,44 +1279,46 @@ class Reader {
                 if (second == labels_.end ()) return invalid ("undefined base label");
                 base = second->second;
               }
-              return DataInitializer (LabelReference{first->second, base, value.displacement});
+              return DataInitializer (
+                ir::detail::NodeAccess::make_LabelReference (first->second, base,
+                                                             value.displacement));
             }
           },
           std::get<ParsedInitializer> (record.body));
-        if (!initializer) return initializer.error ();
-        auto defined = module_->define_data (*record.symbol, std::move (*initializer));
-        if (!defined) return diagnose (defined.error ());
+        if (!(initializer).has_value ()) return initializer.error ();
+        auto defined = ir::detail::access (*(module_))
+                         .define_data (*record.symbol, std::move ((initializer).value ()));
+        if (!(defined).has_value ()) return diagnose (defined.error ());
       }
     return {};
   }
 };
 }  // namespace
-Result<std::vector<std::byte>> write_binary (const ir::Context &context, BinaryEncoding encoding) {
+Result<std::vector<std::byte>> write_binary (const ir::Program &context, BinaryEncoding encoding) {
   for (auto &module : context.modules ())
     for (auto &function : module.functions ()) {
       auto phase = function.require_register_ir ();
-      if (!phase) return phase.error ();
+      if (!(phase).has_value ()) return phase.error ();
     }
   if (encoding != BinaryEncoding::Compressed && encoding != BinaryEncoding::Raw)
     return Error{ErrorCode::InvalidArgument, "invalid binary encoding"};
   if (ir::needs_materialization (context)) {
     auto lowered = ir::materialize (context);
-    if (!lowered) return lowered.error ();
-    return write_binary (**lowered, encoding);
+    if (!(lowered).has_value ()) return lowered.error ();
+    return write_binary ((lowered).value (), encoding);
   }
   auto raw = Writer ().run (context);
-  if (!raw || encoding == BinaryEncoding::Raw) return raw;
-  return compress (*raw);
+  if (!(raw).has_value () || encoding == BinaryEncoding::Raw) return raw;
+  return compress ((raw).value ());
 }
-Result<std::unique_ptr<ir::Context>> read_binary (std::span<const std::byte> bytes,
-                                                  BinaryOptions options) {
+Result<ir::Program> read_binary (std::span<const std::byte> bytes, BinaryOptions options) {
   if (options.encoding != BinaryEncoding::Compressed && options.encoding != BinaryEncoding::Raw)
     return Error{ErrorCode::InvalidArgument, "invalid binary encoding"};
   if (options.encoding == BinaryEncoding::Raw) return Reader (bytes, options).run ();
   auto raw = decompress (bytes, options.max_bytes);
-  if (!raw)
+  if (!(raw).has_value ())
     return Error{raw.error ().code,
                  std::string (options.source_name) + ": " + raw.error ().message};
-  return Reader (*raw, options).run ();
+  return Reader ((raw).value (), options).run ();
 }
 }  // namespace mirnext::serialization

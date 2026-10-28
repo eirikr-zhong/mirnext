@@ -39,9 +39,9 @@ struct OptimizationSnapshot {
   const PassStatistics &statistics;
   PassEvent::Phase phase;
   const ir::Function &function;
-  const analysis::FunctionGraph *graph = nullptr;
-  const analysis::LoopTree *loops = nullptr;
-  const ir::SSAForm *ssa () const { return function.ssa_form (); }
+  OptionalRef<const analysis::FunctionGraph> graph;
+  OptionalRef<const analysis::LoopTree> loops;
+  OptionalRef<const ir::SSAForm> ssa () const { return function.ssa_form (); }
 };
 struct OptimizationOptions {
   OptimizationLevel level = OptimizationLevel::O2;
@@ -56,24 +56,27 @@ class OptimizedProgram {
   OptimizedProgram (const OptimizedProgram &) = delete;
   OptimizedProgram &operator= (const OptimizedProgram &) = delete;
   // These accessors require a non-moved-from program.
-  const ir::Context &context () const noexcept;
+  const ir::Program &program () const noexcept;
   OptimizationLevel level () const noexcept;
   target::Architecture target () const noexcept;
-  const ir::Function *find_function (std::string_view module, std::string_view name) const noexcept;
+  OptionalRef<const ir::Function> find_function (std::string_view module,
+                                                 std::string_view name) const noexcept;
   std::span<const PassStatistics> statistics () const noexcept;
   Result<void> verify () const;
   std::string dump () const;
   Result<std::string> write_text () const;
-  Result<std::vector<std::byte>> encode_binary (serialization::BinaryEncoding
-                                                = serialization::BinaryEncoding::Compressed) const;
+  Result<std::vector<std::byte>> write_binary (serialization::BinaryEncoding
+                                               = serialization::BinaryEncoding::Compressed) const;
 
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
   explicit OptimizedProgram (std::unique_ptr<Impl>);
-  friend Result<OptimizedProgram> optimize (const ir::Context &, OptimizationOptions);
+  friend Result<OptimizedProgram> optimize (const ir::Program &, OptimizationOptions);
+  friend Result<OptimizedProgram> optimize (ir::Program &&, OptimizationOptions);
   friend Result<OptimizedProgram> optimize (const ir::Module &, OptimizationOptions);
 };
-Result<OptimizedProgram> optimize (const ir::Context &, OptimizationOptions = {});
+Result<OptimizedProgram> optimize (const ir::Program &, OptimizationOptions = {});
+Result<OptimizedProgram> optimize (ir::Program &&, OptimizationOptions = {});
 Result<OptimizedProgram> optimize (const ir::Module &, OptimizationOptions = {});
 }  // namespace mirnext::transforms

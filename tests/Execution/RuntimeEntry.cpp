@@ -17,40 +17,41 @@ TEST_CASE (
   using R = target::X86Register;
   for (auto abi : {target::ABI::X86SysV, target::ABI::X86Windows}) {
     auto frame = codegen::detail::x86_resolver_frame (abi);
-    REQUIRE (frame);
-    CHECK (frame->argument == (abi == target::ABI::X86Windows ? R::CX : R::DI));
-    CHECK (frame->shadow_bytes == (abi == target::ABI::X86Windows ? 32 : 0));
-    CHECK (frame->frame_bytes == (abi == target::ABI::X86Windows ? 656 : 624));
-    CHECK (frame->fx_offset % 16 == 0);
-    CHECK (frame->fx_offset >= frame->shadow_bytes);
-    CHECK (frame->metadata_offset == frame->frame_bytes);
-    CHECK (frame->saves.size () == 13);
+    REQUIRE ((frame).has_value ());
+    CHECK (frame.value ().argument == (abi == target::ABI::X86Windows ? R::CX : R::DI));
+    CHECK (frame.value ().shadow_bytes == (abi == target::ABI::X86Windows ? 32 : 0));
+    CHECK (frame.value ().frame_bytes == (abi == target::ABI::X86Windows ? 656 : 624));
+    CHECK (frame.value ().fx_offset % 16 == 0);
+    CHECK (frame.value ().fx_offset >= frame.value ().shadow_bytes);
+    CHECK (frame.value ().metadata_offset == frame.value ().frame_bytes);
+    CHECK (frame.value ().saves.size () == 13);
     // Ordinary function entry is SP = 8 mod 16. A cold-only metadata push
     // plus this frame gives aligned callback SP and aligned FXSAVE64 storage.
     constexpr std::uintptr_t original_sp = 0x100000008;
-    auto sp = original_sp - 8 - frame->frame_bytes;
+    auto sp = original_sp - 8 - frame.value ().frame_bytes;
     CHECK (sp % 16 == 0);
-    CHECK ((sp + frame->fx_offset) % 16 == 0);
-    CHECK (sp + frame->metadata_offset == original_sp - 8);
+    CHECK ((sp + frame.value ().fx_offset) % 16 == 0);
+    CHECK (sp + frame.value ().metadata_offset == original_sp - 8);
     std::set<R> registers;
     std::set<std::size_t> bytes;
-    for (std::size_t n = 0; n < frame->shadow_bytes; ++n) CHECK (bytes.insert (n).second);
-    for (std::size_t n = 0; n < 512; ++n) CHECK (bytes.insert (frame->fx_offset + n).second);
-    for (auto &save : frame->saves) {
+    for (std::size_t n = 0; n < frame.value ().shadow_bytes; ++n) CHECK (bytes.insert (n).second);
+    for (std::size_t n = 0; n < 512; ++n)
+      CHECK (bytes.insert (frame.value ().fx_offset + n).second);
+    for (auto &save : frame.value ().saves) {
       CHECK (registers.insert (save.reg).second);
       CHECK (save.offset % 8 == 0);
       for (unsigned n = 0; n < 8; ++n) {
         CHECK (bytes.insert (save.offset + n).second);
-        CHECK (save.offset + n < frame->frame_bytes);
+        CHECK (save.offset + n < frame.value ().frame_bytes);
       }
     }
     for (unsigned n = 0; n < 16; ++n)
       CHECK (registers.contains (static_cast<R> (n))
              == (n != unsigned (R::SP) && n != unsigned (R::R10) && n != unsigned (R::R11)));
-    CHECK (sp + frame->frame_bytes + 8 == original_sp);
+    CHECK (sp + frame.value ().frame_bytes + 8 == original_sp);
   }
-  CHECK_FALSE (codegen::detail::x86_resolver_frame (target::ABI::AArch64Linux));
-  CHECK_FALSE (codegen::detail::x86_resolver_frame (static_cast<target::ABI> (99)));
+  CHECK_FALSE ((codegen::detail::x86_resolver_frame (target::ABI::AArch64Linux)).has_value ());
+  CHECK_FALSE ((codegen::detail::x86_resolver_frame (static_cast<target::ABI> (99))).has_value ());
 }
 namespace {
 struct Descriptor {
@@ -82,26 +83,30 @@ std::uintptr_t resolve (Descriptor *descriptor) {
 }
 std::vector<ExecutableCode> entry (Descriptor &descriptor, unsigned x87 = 0) {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  auto resolver = make_lazy_resolver (*target, reinterpret_cast<std::uintptr_t> (&resolve));
-  REQUIRE (resolver);
-  auto gate = make_lazy_entry (*target, {reinterpret_cast<std::uintptr_t> (&descriptor.destination),
-                                         reinterpret_cast<std::uintptr_t> (&descriptor), 4, x87});
-  REQUIRE (gate);
-  CHECK (gate->size () == 64);
-  CHECK (resolver->size () < 1024);
-  const std::array sizes{resolver->size (), gate->size ()};
+  REQUIRE ((target).has_value ());
+  auto resolver
+    = make_lazy_resolver ((target).value (), reinterpret_cast<std::uintptr_t> (&resolve));
+  REQUIRE ((resolver).has_value ());
+  auto gate = make_lazy_entry ((target).value (),
+                               {reinterpret_cast<std::uintptr_t> (&descriptor.destination),
+                                reinterpret_cast<std::uintptr_t> (&descriptor), 4, x87});
+  REQUIRE ((gate).has_value ());
+  CHECK (gate.value ().size () == 64);
+  CHECK (resolver.value ().size () < 1024);
+  const std::array sizes{resolver.value ().size (), gate.value ().size ()};
   auto reserved = CodeMemory ().reserve (sizes);
-  REQUIRE (reserved);
-  auto address = reserved->address (0);
-  REQUIRE (address);
-  gate = make_lazy_entry (*target, {reinterpret_cast<std::uintptr_t> (&descriptor.destination),
-                                    reinterpret_cast<std::uintptr_t> (&descriptor), *address, x87});
-  REQUIRE (gate);
-  const std::array<std::span<const std::uint8_t>, 2> bytes{*resolver, *gate};
-  auto code = reserved->publish (bytes);
-  REQUIRE (code);
-  return std::move (*code);
+  REQUIRE ((reserved).has_value ());
+  auto address = reserved.value ().address (0);
+  REQUIRE ((address).has_value ());
+  gate
+    = make_lazy_entry ((target).value (),
+                       {reinterpret_cast<std::uintptr_t> (&descriptor.destination),
+                        reinterpret_cast<std::uintptr_t> (&descriptor), (address).value (), x87});
+  REQUIRE ((gate).has_value ());
+  const std::array<std::span<const std::uint8_t>, 2> bytes{(resolver).value (), (gate).value ()};
+  auto code = reserved.value ().publish (bytes);
+  REQUIRE ((code).has_value ());
+  return std::move ((code).value ());
 }
 std::int64_t integers (std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d,
                        std::int64_t e, std::int64_t f, std::int64_t g, std::int64_t h,
@@ -169,7 +174,7 @@ TEST_CASE (
   "native resolvers restore floating control and x86 returns precisely one x87 zero after "
   "failure") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   struct Restore {
     std::fenv_t environment;
     Restore () { std::fegetenv (&environment); }
@@ -193,7 +198,7 @@ TEST_CASE (
   descriptor.fail = false;
   CHECK (reinterpret_cast<int (*) ()> (code[1].address ()) () == FE_TONEAREST);
   CHECK (descriptor.callbacks == 3);
-  if (target->architecture () != target::Architecture::X86_64
+  if (target.value ().architecture () != target::Architecture::X86_64
       || sizeof (long double) <= sizeof (double))
     return;
   descriptor = {};
@@ -211,13 +216,13 @@ TEST_CASE (
 }
 TEST_CASE ("native gate validation rejects invalid slots descriptors resolvers and x87 counts") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  CHECK_FALSE (make_lazy_resolver (*target, 0));
+  REQUIRE ((target).has_value ());
+  CHECK_FALSE ((make_lazy_resolver ((target).value (), 0)).has_value ());
   for (auto addresses :
        {LazyEntryAddresses{0, 8, 4}, LazyEntryAddresses{1, 8, 4}, LazyEntryAddresses{8, 0, 4},
         LazyEntryAddresses{8, 8, 0}, LazyEntryAddresses{8, 8, 4, 3}})
-    CHECK_FALSE (make_lazy_entry (*target, addresses));
-  if (target->architecture () != target::Architecture::X86_64
-      || target->abi () == target::ABI::X86Windows)
-    CHECK_FALSE (make_lazy_entry (*target, {8, 8, 4, 1}));
+    CHECK_FALSE ((make_lazy_entry ((target).value (), addresses)).has_value ());
+  if (target.value ().architecture () != target::Architecture::X86_64
+      || target.value ().abi () == target::ABI::X86Windows)
+    CHECK_FALSE ((make_lazy_entry ((target).value (), {8, 8, 4, 1})).has_value ());
 }

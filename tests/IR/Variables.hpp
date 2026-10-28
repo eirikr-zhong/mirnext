@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Typed variable fixtures. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #pragma once
 #include <doctest/doctest.h>
 #include "mirnext/IR/IR.hpp"
@@ -10,20 +12,20 @@ enum class VariableExample {
   Boolean,
   Floating,
   Pointer,
-  Expression,
+  ExpressionInitializer,
   CrossModule,
   Narrow
 };
-inline std::unique_ptr<ir::Context> variable_example (VariableExample mode) {
+inline std::unique_ptr<ir::Program> variable_example (VariableExample mode) {
   using namespace ir;
-  auto context = std::make_unique<Context> ();
-  auto consumer = context->create_module ("consumer");
-  REQUIRE (consumer);
-  auto module = *consumer;
+  auto context = std::make_unique<Program> ();
+  auto consumer = mirnext::ir::detail::access (*(context)).create_module ("consumer");
+  REQUIRE ((consumer).has_value ());
+  auto module = &(consumer).value ();
   if (mode == VariableExample::CrossModule) {
-    auto definition = context->create_module ("definition");
-    REQUIRE (definition);
-    module = *definition;
+    auto definition = mirnext::ir::detail::access (*(context)).create_module ("definition");
+    REQUIRE ((definition).has_value ());
+    module = &(definition).value ();
   }
   auto type = mode == VariableExample::Boolean    ? Type (Type::Kind::Bool)
               : mode == VariableExample::Floating ? Type (Type::Kind::F64)
@@ -31,28 +33,32 @@ inline std::unique_ptr<ir::Context> variable_example (VariableExample mode) {
               : mode == VariableExample::Narrow   ? Type (Type::Kind::I8)
                                                   : Type::i64 ();
   const GlobalVariable *variable = nullptr;
-  if (mode == VariableExample::Expression) {
-    auto function = module->create_function ("expression", {{Type::i64 ()}, {}});
-    REQUIRE (function);
-    auto block = (*function)->create_block ();
-    REQUIRE (block);
-    IRBuilder builder (**block);
+  if (mode == VariableExample::ExpressionInitializer) {
+    auto function = mirnext::ir::detail::access (*(module)).create_function ("expression",
+                                                                             {{Type::i64 ()}, {}});
+    REQUIRE ((function).has_value ());
+    auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+    REQUIRE ((block).has_value ());
+    InstructionBuilder builder ((block).value ());
     auto value = builder.binary (Opcode::Add, 20, 22);
-    REQUIRE (value);
-    REQUIRE (builder.ret (Operand (**value)));
-    auto created = module->create_variable ("value", **function);
-    REQUIRE (created);
-    variable = *created;
+    REQUIRE ((value).has_value ());
+    REQUIRE ((builder.ret (Operand ((value).value ()))).has_value ());
+    auto created
+      = mirnext::ir::detail::access (*(module)).create_variable ("value", (function).value ());
+    REQUIRE ((created).has_value ());
+    variable = &(created).value ();
   } else if (mode == VariableExample::Pointer) {
-    auto target = module->create_variable ("target", Type::i64 (), 42);
-    REQUIRE (target);
-    auto created = module->create_variable ("value", type, Operand ((*target)->symbol ()));
-    REQUIRE (created);
-    variable = *created;
+    auto target
+      = mirnext::ir::detail::access (*(module)).create_variable ("target", Type::i64 (), 42);
+    REQUIRE ((target).has_value ());
+    auto created = mirnext::ir::detail::access (*(module))
+                     .create_variable ("value", type, Operand (target.value ().symbol ()));
+    REQUIRE ((created).has_value ());
+    variable = &(created).value ();
   } else if (mode == VariableExample::Zero) {
-    auto created = module->create_variable ("value", type);
-    REQUIRE (created);
-    variable = *created;
+    auto created = mirnext::ir::detail::access (*(module)).create_variable ("value", type);
+    REQUIRE ((created).has_value ());
+    variable = &(created).value ();
   } else {
     Operand initial = mode == VariableExample::Floating ? Operand (20.5)
                       : mode == VariableExample::Boolean
@@ -61,101 +67,116 @@ inline std::unique_ptr<ir::Context> variable_example (VariableExample mode) {
                                    : mode == VariableExample::Narrow ? -1
                                                                      : 20);
     auto created
-      = module->create_variable ("value", type, initial, mode != VariableExample::Constant);
-    REQUIRE (created);
-    variable = *created;
+      = mirnext::ir::detail::access (*(module)).create_variable ("value", type, initial,
+                                                                 mode != VariableExample::Constant);
+    REQUIRE ((created).has_value ());
+    variable = &(created).value ();
   }
   const Symbol *getter = nullptr;
   if (mode == VariableExample::CrossModule) {
-    REQUIRE (module->export_symbol (variable->symbol ()));
-    auto function = module->create_function ("get_value", {{Type::i64 ()}, {}});
-    REQUIRE (function);
-    auto block = (*function)->create_block ();
-    REQUIRE (block);
-    IRBuilder builder (**block);
+    REQUIRE ((mirnext::ir::detail::access ((((*(module))))).export_symbol (variable->symbol ()))
+               .has_value ());
+    auto function
+      = mirnext::ir::detail::access (*(module)).create_function ("get_value", {{Type::i64 ()}, {}});
+    REQUIRE ((function).has_value ());
+    auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+    REQUIRE ((block).has_value ());
+    InstructionBuilder builder ((block).value ());
     auto value = builder.load (*variable);
-    REQUIRE (value);
-    REQUIRE (builder.ret (Operand (**value)));
-    REQUIRE (module->export_symbol ((*function)->symbol ()));
-    auto imported = (*consumer)->import_variable ("value", type);
-    REQUIRE (imported);
-    variable = *imported;
-    auto imported_getter = (*consumer)->import ("get_value", (*function)->signature ());
-    REQUIRE (imported_getter);
-    getter = *imported_getter;
+    REQUIRE ((value).has_value ());
+    REQUIRE ((builder.ret (Operand ((value).value ()))).has_value ());
+    REQUIRE (
+      (mirnext::ir::detail::access ((((*(module))))).export_symbol (function.value ().symbol ()))
+        .has_value ());
+    auto imported
+      = mirnext::ir::detail::access (((consumer)).value ()).import_variable ("value", type);
+    REQUIRE ((imported).has_value ());
+    variable = &(imported).value ();
+    auto imported_getter = mirnext::ir::detail::access (((consumer)).value ())
+                             .import ("get_value", function.value ().signature ());
+    REQUIRE ((imported_getter).has_value ());
+    getter = &(imported_getter).value ();
   }
-  auto function = (*consumer)->create_function ("entry", {{Type::i64 ()}, {}});
-  REQUIRE (function);
-  auto block = (*function)->create_block ();
-  REQUIRE (block);
-  IRBuilder builder (**block);
+  auto function = mirnext::ir::detail::access (((consumer)).value ())
+                    .create_function ("entry", {{Type::i64 ()}, {}});
+  REQUIRE ((function).has_value ());
+  auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+  REQUIRE ((block).has_value ());
+  InstructionBuilder builder ((block).value ());
   const Register *answer = nullptr;
   auto initial = builder.load (*variable);
-  REQUIRE (initial);
+  REQUIRE ((initial).has_value ());
   if (mode == VariableExample::Boolean) {
-    REQUIRE (builder.store (*variable, 0));
+    REQUIRE ((builder.store (*variable, 0)).has_value ());
     auto zero = builder.load (*variable);
-    REQUIRE (zero);
-    REQUIRE (builder.store (*variable, -9));
+    REQUIRE ((zero).has_value ());
+    REQUIRE ((builder.store (*variable, -9)).has_value ());
     auto one = builder.load (*variable);
-    REQUIRE (one);
-    auto positive = builder.binary (Opcode::Mul, Operand (**initial), Operand (**one));
-    REQUIRE (positive);
-    auto negative = builder.binary (Opcode::Eq, Operand (**zero), 0);
-    REQUIRE (negative);
-    auto valid = builder.binary (Opcode::Mul, Operand (**positive), Operand (**negative));
-    REQUIRE (valid);
-    auto result = builder.binary (Opcode::Mul, Operand (**valid), 42);
-    REQUIRE (result);
-    answer = *result;
+    REQUIRE ((one).has_value ());
+    auto positive
+      = builder.binary (Opcode::Mul, Operand ((initial).value ()), Operand ((one).value ()));
+    REQUIRE ((positive).has_value ());
+    auto negative = builder.binary (Opcode::Eq, Operand ((zero).value ()), 0);
+    REQUIRE ((negative).has_value ());
+    auto valid
+      = builder.binary (Opcode::Mul, Operand ((positive).value ()), Operand ((negative).value ()));
+    REQUIRE ((valid).has_value ());
+    auto result = builder.binary (Opcode::Mul, Operand ((valid).value ()), 42);
+    REQUIRE ((result).has_value ());
+    answer = &(result).value ();
   } else if (mode == VariableExample::Narrow) {
-    auto byte = module->create_variable ("byte", Type (Type::Kind::U8), 255);
-    REQUIRE (byte);
-    auto unsigned_value = builder.load (**byte);
-    REQUIRE (unsigned_value);
-    REQUIRE (builder.store (*variable, -3));
+    auto byte
+      = mirnext::ir::detail::access (*(module)).create_variable ("byte", Type (Type::Kind::U8),
+                                                                 255);
+    REQUIRE ((byte).has_value ());
+    auto unsigned_value = builder.load ((byte).value ());
+    REQUIRE ((unsigned_value).has_value ());
+    REQUIRE ((builder.store (*variable, -3)).has_value ());
     auto signed_value = builder.load (*variable);
-    REQUIRE (signed_value);
-    auto a = builder.binary (Opcode::Add, Operand (**initial), Operand (**unsigned_value));
-    REQUIRE (a);
-    auto b = builder.binary (Opcode::Add, Operand (**a), Operand (**signed_value));
-    REQUIRE (b);
-    auto result = builder.binary (Opcode::Sub, Operand (**b), 209);
-    REQUIRE (result);
-    answer = *result;
+    REQUIRE ((signed_value).has_value ());
+    auto a = builder.binary (Opcode::Add, Operand ((initial).value ()),
+                             Operand ((unsigned_value).value ()));
+    REQUIRE ((a).has_value ());
+    auto b
+      = builder.binary (Opcode::Add, Operand ((a).value ()), Operand ((signed_value).value ()));
+    REQUIRE ((b).has_value ());
+    auto result = builder.binary (Opcode::Sub, Operand ((b).value ()), 209);
+    REQUIRE ((result).has_value ());
+    answer = &(result).value ();
   } else if (mode == VariableExample::Floating) {
-    auto value = builder.binary (Opcode::DAdd, Operand (**initial), 21.5);
-    REQUIRE (value);
-    REQUIRE (builder.store (*variable, Operand (**value)));
+    auto value = builder.binary (Opcode::DAdd, Operand ((initial).value ()), 21.5);
+    REQUIRE ((value).has_value ());
+    REQUIRE ((builder.store (*variable, Operand ((value).value ()))).has_value ());
     auto stored = builder.load (*variable);
-    REQUIRE (stored);
-    auto result = builder.unary (Opcode::D2I, Operand (**stored));
-    REQUIRE (result);
-    answer = *result;
+    REQUIRE ((stored).has_value ());
+    auto result = builder.unary (Opcode::D2I, Operand ((stored).value ()));
+    REQUIRE ((result).has_value ());
+    answer = &(result).value ();
   } else if (mode == VariableExample::Pointer) {
-    auto result = builder.load (Memory{Type::i64 (), *initial});
-    REQUIRE (result);
-    answer = *result;
-  } else if (mode == VariableExample::Constant || mode == VariableExample::Expression)
-    answer = *initial;
+    auto result = builder.load (
+      mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 (), &(initial).value ()));
+    REQUIRE ((result).has_value ());
+    answer = &(result).value ();
+  } else if (mode == VariableExample::Constant || mode == VariableExample::ExpressionInitializer)
+    answer = &(initial).value ();
   else if (mode == VariableExample::CrossModule) {
-    REQUIRE (builder.store (*variable, 42));
+    REQUIRE ((builder.store (*variable, 42)).has_value ());
     auto call = builder.call (*getter);
-    REQUIRE (call);
-    auto value = call->value ();
-    REQUIRE (value);
-    answer = *value;
+    REQUIRE ((call).has_value ());
+    auto value = call.value ().value ();
+    REQUIRE ((value).has_value ());
+    answer = &(value).value ();
   } else {
-    auto value
-      = builder.binary (Opcode::Add, Operand (**initial), mode == VariableExample::Zero ? 42 : 22);
-    REQUIRE (value);
-    REQUIRE (builder.store (*variable, Operand (**value)));
+    auto value = builder.binary (Opcode::Add, Operand ((initial).value ()),
+                                 mode == VariableExample::Zero ? 42 : 22);
+    REQUIRE ((value).has_value ());
+    REQUIRE ((builder.store (*variable, Operand ((value).value ()))).has_value ());
     auto result = builder.load (*variable);
-    REQUIRE (result);
-    answer = *result;
+    REQUIRE ((result).has_value ());
+    answer = &(result).value ();
   }
-  REQUIRE (builder.ret (Operand (*answer)));
-  REQUIRE (context->verify ());
+  REQUIRE ((builder.ret (Operand (*answer))).has_value ());
+  REQUIRE ((context->verify ()).has_value ());
   return context;
 }
 }  // namespace mirnext::test

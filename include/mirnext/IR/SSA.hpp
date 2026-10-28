@@ -4,36 +4,70 @@
 #include <deque>
 
 namespace mirnext::ir {
+namespace detail {
+class NodeAccess;
+}
 class SSAValue;
 class SSAUse;
 class SSAPhi;
 class SSAUseRange {
  public:
   explicit SSAUseRange (const std::list<SSAUse *> &uses) : uses_ (uses) {}
-  auto begin () const { return uses_.begin (); }
-  auto end () const { return uses_.end (); }
-  auto rbegin () const { return uses_.rbegin (); }
-  auto rend () const { return uses_.rend (); }
+  auto begin () const {
+    return NodeIterator<std::list<SSAUse *>::const_iterator, true> (uses_.begin ());
+  }
+  auto end () const {
+    return NodeIterator<std::list<SSAUse *>::const_iterator, true> (uses_.end ());
+  }
+  auto rbegin () const { return std::make_reverse_iterator (end ()); }
+  auto rend () const { return std::make_reverse_iterator (begin ()); }
   bool empty () const { return uses_.empty (); }
   std::size_t size () const { return uses_.size (); }
-  SSAUse *front () const { return uses_.front (); }
+  const SSAUse &front () const { return *uses_.front (); }
 
  private:
+  friend struct detail::ReferenceAccess;
   const std::list<SSAUse *> &uses_;
 };
 enum class SSAOperandPart { Register, MemoryBase, MemoryIndex };
 struct SSAInstructionUse {
-  const Instruction *instruction;
+  SSAInstructionUse (const Instruction &instruction, std::size_t operand, SSAOperandPart part)
+    : SSAInstructionUse (Key{}, &instruction, std::move (operand), std::move (part)) {}
+  const Instruction &instruction () const { return *instruction_; }
   std::size_t operand;
   SSAOperandPart part;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  SSAInstructionUse (Key, const Instruction *instruction, std::size_t operand, SSAOperandPart part)
+    : operand (operand), part (part), instruction_ (instruction) {}
+  const Instruction *instruction_;
 };
 struct SSAPhiUse {
-  const SSAPhi *phi;
+  SSAPhiUse (const SSAPhi &phi, std::size_t input) : SSAPhiUse (Key{}, &phi, std::move (input)) {}
+  const SSAPhi &phi () const { return *phi_; }
   std::size_t input;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  SSAPhiUse (Key, const SSAPhi *phi, std::size_t input) : input (input), phi_ (phi) {}
+  const SSAPhi *phi_;
 };
 struct SSAHardwareUse {
-  const Instruction *ret;
-  const Register *hardware;
+  SSAHardwareUse (const Instruction &ret, const Register &hardware)
+    : SSAHardwareUse (Key{}, &ret, &hardware) {}
+  const Instruction &ret () const { return *ret_; }
+  const Register &hardware () const { return *hardware_; }
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  SSAHardwareUse (Key, const Instruction *ret, const Register *hardware)
+    : ret_ (ret), hardware_ (hardware) {}
+  const Instruction *ret_;
+  const Register *hardware_;
 };
 using SSAUseSite = std::variant<SSAInstructionUse, SSAPhiUse, SSAHardwareUse>;
 
@@ -41,7 +75,8 @@ class SSAValue {
  public:
   enum class Kind { Instruction, Phi, Entry, Undefined };
   class Key {
-    friend class SSARewriter;
+    friend class SSAUpdater;
+    friend class SSAForm;
     Key () = default;
   };
   SSAValue (Key, const SSAForm &form, Kind kind, const Register &reg,
@@ -58,15 +93,20 @@ class SSAValue {
   Kind kind () const { return kind_; }
   const Register &reg () const { return *reg_; }
   const Register &origin () const { return *origin_; }
-  const Instruction *instruction () const { return instruction_; }
+  OptionalRef<const Instruction> instruction () const {
+    return ::mirnext::detail::borrow_optional (instruction_);
+  }
   std::size_t operand () const { return operand_; }
-  const SSAPhi *phi () const { return phi_; }
+  OptionalRef<const SSAPhi> phi () const { return ::mirnext::detail::borrow_optional (phi_); }
   SSAUseRange uses () const { return SSAUseRange (uses_); }
   bool alive () const { return alive_; }
-  const SSAValue *replacement () const { return replacement_; }
+  OptionalRef<const SSAValue> replacement () const {
+    return ::mirnext::detail::borrow_optional (replacement_);
+  }
 
  private:
-  friend class SSARewriter;
+  friend class SSAUpdater;
+  friend class SSAForm;
   const SSAForm *form_;
   Kind kind_;
   const Register *origin_, *reg_;
@@ -80,7 +120,8 @@ class SSAValue {
 class SSAUse {
  public:
   class Key {
-    friend class SSARewriter;
+    friend class SSAUpdater;
+    friend class SSAForm;
     Key () = default;
   };
   SSAUse (Key, const SSAForm &form, SSAUseSite site, SSAValue &value)
@@ -93,7 +134,7 @@ class SSAUse {
   bool alive () const { return alive_; }
 
  private:
-  friend class SSARewriter;
+  friend class SSAUpdater;
   friend class SSAForm;
   const SSAForm *form_;
   SSAUseSite site_;
@@ -104,7 +145,8 @@ class SSAUse {
 class SSAPhi {
  public:
   class Key {
-    friend class SSARewriter;
+    friend class SSAUpdater;
+    friend class SSAForm;
     Key () = default;
   };
   SSAPhi (Key, const SSAForm &form, const BasicBlock &block, SSAValue &output,
@@ -115,13 +157,18 @@ class SSAPhi {
   const SSAForm &form () const { return *form_; }
   const BasicBlock &block () const { return *block_; }
   const SSAValue &output () const { return *output_; }
-  std::span<SSAUse *const> inputs () const { return inputs_; }
-  std::span<const BasicBlock *const> predecessors () const { return predecessors_; }
+  ReferenceRange<SSAUse> inputs () const { return ReferenceRange<SSAUse> (inputs_); }
+  OptionalReferenceRange<const BasicBlock> predecessors () const {
+    return OptionalReferenceRange<const BasicBlock> (predecessors_);
+  }
   bool alive () const { return output_->alive (); }
-  const Instruction *before () const { return before_; }
+  OptionalRef<const Instruction> before () const {
+    return ::mirnext::detail::borrow_optional (before_);
+  }
 
  private:
-  friend class SSARewriter;
+  friend class SSAUpdater;
+  friend class SSAForm;
   const SSAForm *form_;
   const BasicBlock *block_;
   SSAValue *output_;
@@ -131,16 +178,20 @@ class SSAPhi {
 };
 class SSAForm {
  public:
+  SSAForm (SSAForm &&) noexcept;
+  SSAForm &operator= (SSAForm &&) noexcept;
   SSAForm (const SSAForm &) = delete;
   SSAForm &operator= (const SSAForm &) = delete;
   const Function &function () const { return function_; }
-  auto values () const { return NodeRange (values_.cbegin (), values_.cend ()); }
-  auto uses () const { return NodeRange (uses_.cbegin (), uses_.cend ()); }
-  auto phis () const { return NodeRange (phis_.cbegin (), phis_.cend ()); }
-  std::span<SSAPhi *const> phis (const BasicBlock &) const;
-  std::span<SSAValue *const> definitions (const Instruction &) const;
-  std::span<SSAUse *const> inputs (const Instruction &) const;
-  const BasicBlock *use_block (const SSAUse &) const;
+  auto values () const { return NodeRange (values_.cbegin (), values_.cend (), values_.size ()); }
+  auto uses () const { return NodeRange (uses_.cbegin (), uses_.cend (), uses_.size ()); }
+  auto phis () const { return NodeRange (phis_.cbegin (), phis_.cend (), phis_.size ()); }
+  ReferenceRange<SSAPhi> phis (const BasicBlock &) const;
+  ReferenceRange<SSAValue> definitions (const Instruction &) const;
+  ReferenceRange<SSAUse> inputs (const Instruction &) const;
+  OptionalRef<const BasicBlock> use_block (const SSAUse &) const;
+  // Distinguishes successive SSA phases even when node storage is reused.
+  std::uint64_t phase_identity () const { return identity_; }
   bool renamed () const { return renamed_; }
   bool conventional () const { return conventional_; }
   bool current () const {
@@ -154,10 +205,11 @@ class SSAForm {
   Result<void> verify () const;
 
  private:
-  friend class SSARewriter;
-  explicit SSAForm (Function &function)
-    : function_ (function), revisions_ (function.revisions ()) {}
+  friend class SSAUpdater;
+  SSAForm (Function &function, std::uint64_t identity)
+    : function_ (function), identity_ (identity), revisions_ (function.revisions ()) {}
   Function &function_;
+  std::uint64_t identity_;
   Revisions revisions_;
   std::deque<SSAValue> values_;
   std::deque<SSAUse> uses_;
@@ -170,57 +222,7 @@ class SSAForm {
 
 // All SSA edits update canonical operands and both directions of def-use edges.
 // Private PHIs and initial definitions never masquerade as public opcodes.
-class SSARewriter {
- public:
-  explicit SSARewriter (SSAForm &form) : form_ (form), rewriter_ (form.function_, true) {}
-  static Result<std::unique_ptr<SSAForm>> create (Function &);
-  static Result<void> install (std::unique_ptr<SSAForm>);
-  static Result<SSARewriter> get (Function &);
-  Result<SSAValue *> definition (Instruction &, std::size_t operand);
-  Result<SSAValue *> initial (const Register &, SSAValue::Kind);
-  Result<SSAPhi *> phi (const BasicBlock &, const Register &,
-                        std::span<const BasicBlock *const> predecessors);
-  Result<SSAUse *> input (Instruction &, std::size_t operand, SSAOperandPart, SSAValue &);
-  Result<SSAUse *> hardware_input (Instruction &, const Register &, SSAValue &);
-  Result<SSAUse *> phi_input (SSAPhi &, SSAValue &);
-  Result<void> retarget (SSAUse &, SSAValue &);
-  Result<void> replace_all_uses (SSAValue &, SSAValue &);
-  Result<void> replace_uses (std::span<SSAUse *const>, SSAValue &);
-  Result<void> replace_uses (SSAUseRange, SSAValue &);
-  Result<void> rename (SSAValue &, const Register &, bool preserve_addresses = false);
-  Result<const Register *> fresh_register (const Register &);
-  Result<const Register *> fresh_register (Type);
-  Result<void> replace (Instruction &, Opcode, std::span<const Operand>,
-                        std::span<SSAValue *const> inputs);
-  Result<void> replace_memory (Instruction &, std::size_t operand, Memory, SSAValue *base,
-                               SSAValue *index);
-  Result<void> set_memory_location (Instruction &, std::size_t, const MemoryLocation *);
-  Result<SSAValue *> coalesce_copy (Instruction &);
-  Result<void> erase_phi_input (SSAPhi &, std::size_t);
-  Result<void> erase_phi (SSAPhi &, SSAValue &replacement);
-  Result<void> erase_phi (SSAPhi &);
-  Result<void> erase_instruction (Instruction &);
-  Result<void> move_before (Instruction &, BasicBlock &, const Instruction *before = nullptr);
-  Result<BasicBlock *> split_fallthrough (BasicBlock &source, BasicBlock &destination);
-  Result<Instruction *> insert (BasicBlock &, const Instruction *before, Opcode,
-                                std::span<const Operand>, std::span<SSAValue *const> inputs,
-                                const SSAPhi *after_phi = nullptr);
-  Result<void> mark_renamed ();
-  Result<void> mark_conventional ();
-  Result<void> set_phi_position (SSAPhi &, const Instruction *before);
-  Result<void> complete ();
 
- private:
-  Result<void> writable () const;
-  void touched ();
-  SSAUse &add_use (SSAUseSite, SSAValue &);
-  void unlink (SSAUse &);
-  void redirect (SSAUse &, SSAValue &);
-  Result<void> rewrite (std::span<SSAUse *const>, const Register &, bool preserve_addresses,
-                        const SSAValue *definition = nullptr);
-  SSAForm &form_;
-  IRRewriter rewriter_;
-};
 bool ssa_output_operand (const Function &, const Instruction &, std::size_t);
 std::string dump_ssa (const Function &);
 }  // namespace mirnext::ir

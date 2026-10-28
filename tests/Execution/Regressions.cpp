@@ -17,7 +17,7 @@ TEST_CASE (
     REQUIRE (file);
     std::string text ((std::istreambuf_iterator<char> (file)), {});
     auto context = serialization::parse_text (text);
-    REQUIRE (context);
+    REQUIRE ((context).has_value ());
     for (unsigned level = 0; level != 4; ++level)
       for (unsigned engine = 0; engine != 5; ++engine) {
         if (!engine && level) continue;
@@ -30,19 +30,21 @@ TEST_CASE (
             .level = static_cast<transforms::OptimizationLevel> (level)};
         if (engine == 3) options.link.compilation = JITCompilation::Lazy;
         if (engine == 4) options.link.compilation = JITCompilation::BlockVersioning;
-        auto session = ExecutionSession::create (**context, options);
-        INFO ((session ? "" : session.error ().message));
-        REQUIRE (session);
-        auto function = session->find_function ((*context)->modules ().begin ()->name (), "entry");
-        REQUIRE (function);
+        auto session = ExecutionSession::create ((context).value (), options);
+        INFO (((session).has_value () ? "" : session.error ().message));
+        REQUIRE ((session).has_value ());
+        auto function
+          = session.value ().find_function (((context).value ()).modules ().begin ()->name (),
+                                            "entry");
+        REQUIRE ((function).has_value ());
         for (unsigned repeat = 0; repeat != 2; ++repeat) {
-          auto result = function->call ();
-          INFO ((result ? "" : result.error ().message));
-          REQUIRE (result);
-          REQUIRE (result->size () == 1);
-          auto value = result->front ().as_i64 ();
-          REQUIRE (value);
-          CHECK (*value == 42);
+          auto result = function.value ().call ();
+          INFO (((result).has_value () ? "" : result.error ().message));
+          REQUIRE ((result).has_value ());
+          REQUIRE (result.value ().size () == 1);
+          auto value = result.value ().front ().as_i64 ();
+          REQUIRE ((value).has_value ());
+          CHECK ((value).value () == 42);
         }
       }
   }
@@ -71,7 +73,7 @@ TEST_CASE ("quad precision values survive calls that preserve only SIMD lower ha
   auto context = serialization::parse_text (
     "m:module\nimport clobber\np:proto\nf:func ld,ld:x\ncall p,clobber\nret "
     "x\nendfunc\nendmodule\n");
-  REQUIRE (context);
+  REQUIRE (context.has_value ());
   for (unsigned level = 0; level < 4; ++level)
     for (auto engine :
          {JITCompilation::Eager, JITCompilation::Lazy, JITCompilation::BlockVersioning}) {
@@ -85,19 +87,19 @@ TEST_CASE ("quad precision values survive calls that preserve only SIMD lower ha
         return ExternalSymbol{reinterpret_cast<std::uintptr_t> (&clobber_vector_upper_halves),
                               ir::Signature{}};
       };
-      auto session = ExecutionSession::create (**context, options);
-      REQUIRE (session);
-      auto function = session->find_function ("m", "f");
-      REQUIRE (function);
+      auto session = ExecutionSession::create (context.value (), options);
+      REQUIRE (session.has_value ());
+      auto function = session.value ().find_function ("m", "f");
+      REQUIRE (function.has_value ());
       for (long double expected : {1.25L, -10.333333333333333333333333333333L}) {
         std::array arguments{ExecutionArgument (expected)};
-        auto result = function->call (arguments);
-        INFO ((result ? "" : result.error ().message));
-        REQUIRE (result);
-        REQUIRE (result->size () == 1);
-        auto actual = result->front ().as_long_double ();
-        REQUIRE (actual);
-        CHECK (*actual == expected);
+        auto result = function.value ().call (arguments);
+        INFO ((result.has_value () ? "" : result.error ().message));
+        REQUIRE (result.has_value ());
+        REQUIRE (result.value ().size () == 1);
+        auto actual = result.value ().front ().as_long_double ();
+        REQUIRE (actual.has_value ());
+        CHECK (actual.value () == expected);
       }
     }
 }

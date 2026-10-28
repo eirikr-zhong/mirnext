@@ -30,10 +30,10 @@ Result<double> measure (std::size_t count, bool batch) {
     auto start = std::chrono::steady_clock::now ();
     for (std::size_t n = 0; n < (batch ? 1 : count); ++n) {
       auto reserved = memory.reserve (sizes);
-      if (!reserved) return reserved.error ();
-      auto result = reserved->publish (buffers);
-      if (!result) return result.error ();
-      for (auto &handle : *result) handles.push_back (std::move (handle));
+      if (!(reserved).has_value ()) return reserved.error ();
+      auto result = reserved.value ().publish (buffers);
+      if (!(result).has_value ()) return result.error ();
+      for (auto &handle : (result).value ()) handles.push_back (std::move (handle));
     }
     time = std::chrono::duration<double, std::milli> (std::chrono::steady_clock::now () - start)
              .count ();
@@ -52,11 +52,13 @@ int main () {
   for (std::size_t count : {64u, 256u, 1024u}) {
     auto individual = measure (count, false);
     auto batch = measure (count, true);
-    if (!individual || !batch) {
-      std::cerr << (!individual ? individual.error ().message : batch.error ().message) << '\n';
+    if (!(individual).has_value () || !(batch).has_value ()) {
+      std::cerr << (!(individual).has_value () ? individual.error ().message
+                                               : batch.error ().message)
+                << '\n';
       return 1;
     }
-    std::cout << "functions=" << count << " individual_ms=" << *individual << " batch_ms=" << *batch
-              << '\n';
+    std::cout << "functions=" << count << " individual_ms=" << (individual).value ()
+              << " batch_ms=" << (batch).value () << '\n';
   }
 }

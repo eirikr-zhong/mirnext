@@ -18,8 +18,6 @@ class NativeEntry {
   const ir::Signature &signature () const;
 
  private:
-  friend class LinkedProgram;
-  friend class InterpretedProgram;
   friend class ExecutionSession;
   friend class FunctionHandle;
   NativeEntry (std::shared_ptr<detail::ProgramImage> owner, std::size_t index,

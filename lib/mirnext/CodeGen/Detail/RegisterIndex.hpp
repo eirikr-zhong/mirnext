@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Local analysis indices, never register identities. */
+#include "mirnext/CodeGen/Access.hpp"
 #pragma once
 #include "mirnext/CodeGen/MachineIR.hpp"
 namespace mirnext::codegen::detail {
@@ -13,17 +14,25 @@ struct RegisterIndex {
     }
     for (auto &r : f.registers ()) {
       virtuals.emplace (&r, values.size ());
-      values.emplace_back (&r);
+      values.emplace_back (r);
     }
   }
+  std::optional<std::size_t> find (const MachineVirtualRegister *r) const {
+    return find (::mirnext::codegen::detail::NodeAccess::make_MachineRegister (r));
+  }
   std::optional<std::size_t> find (MachineRegister r) const {
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+    if (auto v = std::get_if<const MachineVirtualRegister *> (
+          ::mirnext::codegen::detail::NodeAccess::storage (&r))) {
       auto at = virtuals.find (*v);
       if (at != virtuals.end ()) return at->second;
     } else {
-      auto p = std::get<target::PhysicalRegister> (r);
+      auto p
+        = std::get<target::PhysicalRegister> (::mirnext::codegen::detail::NodeAccess::storage (r));
       auto at = physicals.find (p.encoding ());
-      if (at != physicals.end () && std::get<target::PhysicalRegister> (values[at->second]) == p)
+      if (at != physicals.end ()
+          && std::get<target::PhysicalRegister> (
+               ::mirnext::codegen::detail::NodeAccess::storage (values[at->second]))
+               == p)
         return at->second;
     }
     return {};

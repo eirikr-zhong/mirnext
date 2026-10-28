@@ -1,3 +1,4 @@
+#include "mirnext/CodeGen/Access.hpp"
 /* Rules derived from MIR, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. Symbol addresses remain unresolved. */
 #include "mirnext/CodeGen/Detail/X86Patterns.hpp"
@@ -160,13 +161,15 @@ constexpr auto descriptions = [] {
   return out;
 }();
 std::optional<std::uint64_t> integer (const MachineOperand &o) {
-  if (auto p = o.get<std::int64_t> ()) return std::bit_cast<std::uint64_t> (*p);
-  if (auto p = o.get<std::uint64_t> ()) return *p;
+  if (auto p = detail::operand_access (o).get<std::int64_t> ())
+    return std::bit_cast<std::uint64_t> (*p);
+  if (auto p = detail::operand_access (o).get<std::uint64_t> ()) return *p;
   return {};
 }
 bool is_register (const MachineOperand &o) {
-  if (auto reg = o.get<const MachineVirtualRegister *> ()) return *reg != nullptr;
-  auto physical = o.get<target::PhysicalRegister> ();
+  if (auto reg = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+    return *reg != nullptr;
+  auto physical = detail::operand_access (o).get<target::PhysicalRegister> ();
   return physical && physical->architecture () == target::Architecture::X86_64;
 }
 bool short_branch (X86PatternOptions options) {
@@ -192,7 +195,7 @@ bool match (const CompiledPattern &p, std::span<const MachineOperand> ops,
       break;
     case C::LowRegister:
     case C::Physical: {
-      auto reg = o.get<target::PhysicalRegister> ();
+      auto reg = detail::operand_access (o).get<target::PhysicalRegister> ();
       if (!reg || reg->architecture () != target::Architecture::X86_64
           || (c.kind == C::LowRegister ? reg->encoding () > 3 : reg->encoding () != c.parameter))
         return false;
@@ -211,7 +214,9 @@ bool match (const CompiledPattern &p, std::span<const MachineOperand> ops,
     case C::Immediate: {
       auto value = integer (o);
       if (!value) {
-        if (c.parameter != 64 || (!o.get<MachineSymbolReference> () && !o.get<BuiltinReference> ()))
+        if (c.parameter != 64
+            || (!detail::operand_access (o).get<MachineSymbolReference> ()
+                && !detail::operand_access (o).get<BuiltinReference> ()))
           return false;
       } else if (c.parameter < 64) {
         const auto signed_value = std::bit_cast<std::int64_t> (*value);
@@ -222,11 +227,11 @@ bool match (const CompiledPattern &p, std::span<const MachineOperand> ops,
     }
     case C::Memory: {
       // x87 values remain pseudos until spill rewriting assigns their storage.
-      if (auto reg = o.get<const MachineVirtualRegister *> ();
+      if (auto reg = detail::operand_access (o).get<const MachineVirtualRegister *> ();
           reg && *reg && c.parameter == type_bit (K::LongDouble)
           && (*reg)->type ().kind () == K::LongDouble)
         break;
-      auto m = o.get<MachineMemory> ();
+      auto m = detail::operand_access (o).get<MachineMemory> ();
       if (!m || !(c.parameter & type_bit (m->type.kind ())) || m->displacement < INT32_MIN
           || m->displacement > INT32_MAX
           || (m->index && m->scale != 1 && m->scale != 2 && m->scale != 4 && m->scale != 8))
@@ -234,11 +239,13 @@ bool match (const CompiledPattern &p, std::span<const MachineOperand> ops,
       break;
     }
     case C::ShortLabel:
-      if (!o.get<const MachineLabel *> () || !short_branch (options)) return false;
+      if (!detail::operand_access (o).get<const MachineLabel *> () || !short_branch (options))
+        return false;
       break;
     case C::LongLabel:
-      if (!o.get<const MachineLabel *> () && !o.get<MachineSymbolReference> ()
-          && !o.get<BuiltinReference> ())
+      if (!detail::operand_access (o).get<const MachineLabel *> ()
+          && !detail::operand_access (o).get<MachineSymbolReference> ()
+          && !detail::operand_access (o).get<BuiltinReference> ())
         return false;
       break;
     case C::Same:
@@ -255,8 +262,8 @@ bool x86_operands_equal (const MachineOperand &a, const MachineOperand &b) {
     auto other = integer (b);
     return other && *value == *other;
   }
-  if (auto memory = a.get<MachineMemory> ()) {
-    auto other = b.get<MachineMemory> ();
+  if (auto memory = detail::operand_access (a).get<MachineMemory> ()) {
+    auto other = detail::operand_access (b).get<MachineMemory> ();
     return other && memory->type == other->type && memory->base == other->base
            && memory->index == other->index && memory->displacement == other->displacement
            && (!memory->index || memory->scale == other->scale);

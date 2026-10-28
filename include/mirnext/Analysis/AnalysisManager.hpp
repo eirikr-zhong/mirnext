@@ -57,100 +57,109 @@ class PreservedAnalyses {
 };
 
 namespace detail {
+struct EditingAccess;
 // One cache implementation for both ownership levels. Revision checks are O(1)
 // and do not walk the module's functions on every analysis lookup.
 template <class Unit, class Manager>
 class AnalysisCache {
  public:
-  explicit AnalysisCache (Unit &unit) : unit_ (unit) {}
+  explicit AnalysisCache (Unit &unit) : state_ (std::make_shared<State> (unit)) {}
   template <class Analysis>
-  const typename Analysis::Result *get_cached () const {
-    auto found = entries_.find (detail::key<Analysis> ());
-    if (found == entries_.end ()
+  OptionalRef<const typename Analysis::Result> get_cached () const {
+    auto found = state_->entries.find (detail::key<Analysis> ());
+    if (found == state_->entries.end ()
         || !detail::current (found->second->revisions, revisions (), found->second->dependencies))
-      return nullptr;
-    return &static_cast<const Entry<Analysis> &> (*found->second).value;
+      return {};
+    return static_cast<const Entry<Analysis> &> (*found->second).value;
   }
   template <class Analysis>
-  Result<const typename Analysis::Result *> get () {
+  Result<const typename Analysis::Result &> get () {
+    auto ready = [&] {
+      if constexpr (std::is_same_v<Unit, ir::Function>)
+        return unit ().module ().program ().analysis_status (state_->active_edits != 0);
+      else
+        return unit ().program ().analysis_status (state_->active_edits != 0);
+    }();
+    if (!ready.has_value ()) return ready.error ();
     const auto key = detail::key<Analysis> ();
     auto revisions = this->revisions ();
-    if (auto found = entries_.find (key); found != entries_.end ()) {
+    if (auto found = state_->entries.find (key); found != state_->entries.end ()) {
       if (detail::current (found->second->revisions, revisions, found->second->dependencies))
-        return &static_cast<Entry<Analysis> &> (*found->second).value;
-      entries_.erase (found);
+        return static_cast<Entry<Analysis> &> (*found->second).value;
+      state_->entries.erase (found);
     }
-    if (!running_.insert (key).second)
+    if (!state_->running.insert (key).second)
       return Error{ErrorCode::InvalidArgument, diagnostic_name () + ": analysis dependency cycle"};
     struct Guard {
       std::unordered_set<const unsigned char *> &running;
       const unsigned char *key;
       ~Guard () { running.erase (key); }
-    } guard{running_, key};
+    } guard{state_->running, key};
     auto computed = [&] {
-      if constexpr (requires { Analysis::run (unit_, static_cast<Manager &> (*this)); })
-        return Analysis::run (unit_, static_cast<Manager &> (*this));
+      if constexpr (requires { Analysis::run (unit (), static_cast<Manager &> (*this)); })
+        return Analysis::run (unit (), static_cast<Manager &> (*this));
       else
-        return Analysis::run (unit_);
+        return Analysis::run (unit ());
     }();
-    if (!computed) return computed.error ();
-    auto entry = std::make_unique<Entry<Analysis>> (std::move (*computed), revisions);
+    if (!computed.has_value ()) return computed.error ();
+    auto entry = std::make_unique<Entry<Analysis>> (std::move (computed).value (), revisions);
     auto result = &entry->value;
-    entries_.emplace (key, std::move (entry));
-    return result;
+    state_->entries.emplace (key, std::move (entry));
+    return *result;
   }
   template <class Analysis>
   Result<void> set (typename Analysis::Result value) {
     const auto key = detail::key<Analysis> ();
-    if (running_.contains (key))
+    if (state_->running.contains (key))
       return Error{ErrorCode::InvalidArgument, "cannot replace a running analysis"};
-    entries_.insert_or_assign (key,
-                               std::make_unique<Entry<Analysis>> (std::move (value), revisions ()));
+    state_->entries.insert_or_assign (key, std::make_unique<Entry<Analysis>> (std::move (value),
+                                                                              revisions ()));
     return {};
   }
   template <class Analysis>
   Result<std::optional<typename Analysis::Result>> take_cached () {
     const auto key = detail::key<Analysis> ();
-    if (running_.contains (key))
+    if (state_->running.contains (key))
       return Error{ErrorCode::InvalidArgument, "cannot take a running analysis"};
-    auto found = entries_.find (key);
-    if (found == entries_.end ()) return std::optional<typename Analysis::Result>{};
+    auto found = state_->entries.find (key);
+    if (found == state_->entries.end ()) return std::optional<typename Analysis::Result>{};
     if (!detail::current (found->second->revisions, revisions (), found->second->dependencies)) {
-      entries_.erase (found);
+      state_->entries.erase (found);
       return std::optional<typename Analysis::Result>{};
     }
     std::optional<typename Analysis::Result> result (
       std::move (static_cast<Entry<Analysis> &> (*found->second).value));
-    entries_.erase (found);
+    state_->entries.erase (found);
     return result;
   }
   void invalidate (const PreservedAnalyses &preserved) {
     auto revisions = this->revisions ();
-    std::erase_if (entries_, [&] (const auto &entry) {
+    std::erase_if (state_->entries, [&] (const auto &entry) {
       return !preserved.preserves (entry.first)
              || !detail::current (entry.second->revisions, revisions, entry.second->dependencies);
     });
   }
-  void clear () { entries_.clear (); }
-  std::size_t cached () const { return entries_.size (); }
+  void clear () { state_->entries.clear (); }
+  std::size_t cached () const { return state_->entries.size (); }
 
  protected:
-  Unit &unit_;
+  Unit &unit () const { return state_->unit; }
 
  private:
+  friend struct EditingAccess;
   ir::Revisions revisions () const {
-    auto result = unit_.revisions ();
+    auto result = unit ().revisions ();
     // Symbol lookup is an analysis dependency, not a mutation of a function's
     // body. Keep Function::revisions() stable when another function is declared.
     if constexpr (std::is_same_v<Unit, ir::Function>)
-      result.symbols = unit_.module ().revisions ().symbols;
+      result.symbols = unit ().module ().revisions ().symbols;
     return result;
   }
   std::string diagnostic_name () const {
     if constexpr (std::is_same_v<Unit, ir::Function>)
-      return std::string (unit_.symbol ().name ());
+      return std::string (unit ().symbol ().name ());
     else
-      return std::string (unit_.name ());
+      return std::string (unit ().name ());
   }
   struct EntryBase {
     ir::Revisions revisions;
@@ -165,8 +174,14 @@ class AnalysisCache {
     Entry (typename Analysis::Result value, ir::Revisions revisions)
       : EntryBase (revisions, Analysis::dependencies), value (std::move (value)) {}
   };
-  std::unordered_map<const unsigned char *, std::unique_ptr<EntryBase>> entries_;
-  std::unordered_set<const unsigned char *> running_;
+  struct State {
+    explicit State (Unit &value) : unit (value) {}
+    Unit &unit;
+    unsigned active_edits = 0;
+    std::unordered_map<const unsigned char *, std::unique_ptr<EntryBase>> entries;
+    std::unordered_set<const unsigned char *> running;
+  };
+  std::shared_ptr<State> state_;
 };
 }  // namespace detail
 
@@ -176,32 +191,34 @@ class FunctionAnalysisManager
   : public detail::AnalysisCache<ir::Function, FunctionAnalysisManager> {
  public:
   using AnalysisCache::AnalysisCache;
-  const ir::Function &function () const { return unit_; }
+  const ir::Function &function () const { return unit (); }
 };
 
 class ModuleAnalysisManager : public detail::AnalysisCache<ir::Module, ModuleAnalysisManager> {
  public:
   using AnalysisCache::AnalysisCache;
-  const ir::Module &module () const { return unit_; }
-  Result<FunctionAnalysisManager *> function_analyses (const ir::Function &function) {
-    if (&function.module () != &unit_)
+  const ir::Module &module () const { return unit (); }
+  Result<FunctionAnalysisManager> function_analyses (const ir::Function &function) {
+    if (&function.module () != &unit ())
       return Error{ErrorCode::InvalidArgument, "module analysis: function owner mismatch"};
-    auto &manager = functions_[&function];
+    auto &manager = (*functions_)[&function];
     // The module itself is mutable; const analysis views may populate caches.
     if (!manager)
       manager = std::make_unique<FunctionAnalysisManager> (const_cast<ir::Function &> (function));
-    return manager.get ();
+    return *manager;
   }
   void invalidate (const PreservedAnalyses &preserved) {
     AnalysisCache::invalidate (preserved);
-    for (auto &[function, manager] : functions_) manager->invalidate (preserved);
+    for (auto &[function, manager] : *functions_) manager->invalidate (preserved);
   }
   void clear () {
     AnalysisCache::clear ();
-    for (auto &[function, manager] : functions_) manager->clear ();
+    for (auto &[function, manager] : *functions_) manager->clear ();
   }
 
  private:
-  std::unordered_map<const ir::Function *, std::unique_ptr<FunctionAnalysisManager>> functions_;
+  using Functions
+    = std::unordered_map<const ir::Function *, std::unique_ptr<FunctionAnalysisManager>>;
+  std::shared_ptr<Functions> functions_ = std::make_shared<Functions> ();
 };
 }  // namespace mirnext::analysis

@@ -43,6 +43,8 @@ mirnext_add_example(mirnext_native_session_example mirnext-native-session-exampl
   native-session.cpp)
 mirnext_add_example(mirnext_mixed_engines_example mirnext-mixed-engines-example
   mixed-engines.cpp)
+mirnext_add_example(mirnext_cross_module_example mirnext-cross-module-example
+  native-cross-module.cpp)
 mirnext_add_example(mirnext_native_interpreter_example mirnext-native-interpreter-example
   native-interpreter.cpp)
 mirnext_add_example(mirnext_execution_values_example mirnext-execution-values-example

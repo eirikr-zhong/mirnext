@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Machine ownership and checked mutation. */
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/EditState.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/CodeGen/MachineIR.hpp"
 #include <algorithm>
 #include <bit>
@@ -38,7 +42,7 @@ bool valid_abi_type (const MachineFunction &f, ir::Type type) {
 }  // namespace
 std::string_view opcode_name (MachineOpcode code) {
   if (auto op = std::get_if<ir::Opcode> (&code)) {
-    auto descriptor = ir::instruction_descriptor (*op);
+    auto descriptor = ir::instruction_descriptor (*op).get ();
     return descriptor ? descriptor->name : "invalid-opcode";
   }
   switch (std::get<MachinePseudoOpcode> (code)) {
@@ -69,7 +73,8 @@ MachineInstruction::MachineInstruction (ConstructionKey, MachineBasicBlock &bloc
   : block_ (&block), opcode_ (code), operands_ (std::move (operands)) {}
 MachineFunction::MachineFunction (std::string module, std::string name, ir::Signature signature,
                                   target::TargetMachine target)
-  : module_ (std::move (module)),
+  : edit_state_ (std::make_unique<detail::MachineEditState> (detail::MachineEditState{this})),
+    module_ (std::move (module)),
     name_ (std::move (name)),
     signature_ (std::move (signature)),
     target_ (std::move (target)) {
@@ -78,7 +83,68 @@ MachineFunction::MachineFunction (std::string module, std::string name, ir::Sign
   else
     state_.target = MachineFunctionState::X86{};
 }
-Result<MachineVirtualRegister *> MachineFunction::create_register (
+MachineFunction::MachineFunction (MachineFunction &&other) noexcept
+  : edit_state_ (std::move (other.edit_state_)),
+    module_ (std::move (other.module_)),
+    name_ (std::move (other.name_)),
+    signature_ (std::move (other.signature_)),
+    target_ (std::move (other.target_)),
+    state_ (std::move (other.state_)),
+    blocks_ (std::move (other.blocks_)),
+    registers_ (std::move (other.registers_)),
+    labels_ (std::move (other.labels_)),
+    source_label_ordinals_ (std::move (other.source_label_ordinals_)),
+    slots_ (std::move (other.slots_)),
+    memory_locations_ (std::move (other.memory_locations_)),
+    symbols_ (std::move (other.symbols_)),
+    arguments_ (std::move (other.arguments_)),
+    global_registers_ (std::move (other.global_registers_)),
+    register_names_ (std::move (other.register_names_)),
+    bindings_ (std::move (other.bindings_)),
+    symbol_names_ (std::move (other.symbol_names_)),
+    known_symbols_ (std::move (other.known_symbols_)),
+    revision_ (std::move (other.revision_)),
+    next_instruction_ (std::move (other.next_instruction_)) {
+  if (edit_state_) edit_state_->owner = this;
+  ++other.revision_;
+  for (auto &block : blocks_) block->function_ = this;
+  for (auto &reg : registers_) reg->function_ = this;
+  for (auto &slot : slots_) slot->function_ = this;
+  for (auto &location : memory_locations_) location->function_ = this;
+}
+MachineFunction &MachineFunction::operator= (MachineFunction &&other) noexcept {
+  if (this == &other) return *this;
+  edit_state_ = std::move (other.edit_state_);
+  module_ = std::move (other.module_);
+  name_ = std::move (other.name_);
+  signature_ = std::move (other.signature_);
+  target_ = std::move (other.target_);
+  state_ = std::move (other.state_);
+  blocks_ = std::move (other.blocks_);
+  registers_ = std::move (other.registers_);
+  labels_ = std::move (other.labels_);
+  source_label_ordinals_ = std::move (other.source_label_ordinals_);
+  slots_ = std::move (other.slots_);
+  memory_locations_ = std::move (other.memory_locations_);
+  symbols_ = std::move (other.symbols_);
+  arguments_ = std::move (other.arguments_);
+  global_registers_ = std::move (other.global_registers_);
+  register_names_ = std::move (other.register_names_);
+  bindings_ = std::move (other.bindings_);
+  symbol_names_ = std::move (other.symbol_names_);
+  known_symbols_ = std::move (other.known_symbols_);
+  revision_ = std::move (other.revision_);
+  next_instruction_ = std::move (other.next_instruction_);
+
+  if (edit_state_) edit_state_->owner = this;
+  ++other.revision_;
+  for (auto &block : blocks_) block->function_ = this;
+  for (auto &reg : registers_) reg->function_ = this;
+  for (auto &slot : slots_) slot->function_ = this;
+  for (auto &location : memory_locations_) location->function_ = this;
+  return *this;
+}
+Result<MachineVirtualRegister &> MachineFunction::create_register (
   ir::Type type, std::string name, bool argument, bool memory_backed,
   std::optional<target::PhysicalRegister> binding) {
   if (!type.valid () || (!type.is_scalar () && !(argument && type.is_block ())))
@@ -93,7 +159,7 @@ Result<MachineVirtualRegister *> MachineFunction::create_register (
     return invalid (*this, "duplicate register name: " + name);
   if (binding) {
     if (memory_backed) return invalid (*this, "hardware-bound register cannot have memory storage");
-    auto info = target_.register_info (*binding);
+    auto info = target_.register_info (*binding).get ();
     if (!info || info->reserved || !target_.accepts (*binding, type))
       return invalid (*this, "invalid hardware binding: " + name);
     if (auto found = bindings_.find (binding->encoding ()); found != bindings_.end ()) {
@@ -101,7 +167,7 @@ Result<MachineVirtualRegister *> MachineFunction::create_register (
       if (argument || memory_backed != r->is_memory_backed ()
           || target_.scalar_type (type) != r->type ())
         return invalid (*this, "incompatible repeated hardware binding: " + name);
-      return r;
+      return *(r);
     }
   }
   auto reg = std::unique_ptr<MachineVirtualRegister> (
@@ -117,9 +183,9 @@ Result<MachineVirtualRegister *> MachineFunction::create_register (
   }
   if (argument) arguments_.push_back (ptr);
   ++revision_;
-  return ptr;
+  return *(ptr);
 }
-Result<MachineStackSlot *> MachineFunction::create_stack_slot (std::size_t size,
+Result<MachineStackSlot &> MachineFunction::create_stack_slot (std::size_t size,
                                                                std::size_t alignment) {
   if (!size || !std::has_single_bit (alignment) || size > static_cast<std::size_t> (INT64_MAX))
     return invalid (*this, "invalid stack slot size or alignment");
@@ -127,7 +193,7 @@ Result<MachineStackSlot *> MachineFunction::create_stack_slot (std::size_t size,
   auto ptr = slot.get ();
   slots_.push_back (std::move (slot));
   ++revision_;
-  return ptr;
+  return *(ptr);
 }
 MachineBasicBlock &MachineFunction::create_block (std::string name) {
   blocks_.push_back (
@@ -136,7 +202,7 @@ MachineBasicBlock &MachineFunction::create_block (std::string name) {
   ++revision_;
   return *blocks_.back ();
 }
-Result<MachineLabel *> MachineFunction::create_label (MachineBasicBlock &block, std::string name,
+Result<MachineLabel &> MachineFunction::create_label (MachineBasicBlock &block, std::string name,
                                                       bool address_taken,
                                                       std::optional<std::size_t> source_ordinal,
                                                       bool function_entry) {
@@ -153,9 +219,9 @@ Result<MachineLabel *> MachineFunction::create_label (MachineBasicBlock &block, 
   block.labels_.push_back (ptr);
   if (source_ordinal) source_label_ordinals_.insert (*source_ordinal);
   ++revision_;
-  return ptr;
+  return *(ptr);
 }
-Result<const MachineSymbol *> MachineFunction::intern_symbol (MachineSymbol symbol) {
+Result<const MachineSymbol &> MachineFunction::intern_symbol (MachineSymbol symbol) {
   if (symbol.module.empty () || (symbol.name.empty () && !symbol.anonymous_ordinal)
       || static_cast<unsigned> (symbol.kind)
            > static_cast<unsigned> (MachineSymbol::Kind::BuiltinPrototype))
@@ -167,7 +233,7 @@ Result<const MachineSymbol *> MachineFunction::intern_symbol (MachineSymbol symb
     return invalid (*this, "invalid builtin prototype identity");
   if (symbol.signature) {
     auto valid = symbol.signature->verify ();
-    if (!valid) return invalid (*this, valid.error ().message);
+    if (!(valid).has_value ()) return invalid (*this, valid.error ().message);
   }
   if ((symbol.kind == MachineSymbol::Kind::Function || symbol.kind == MachineSymbol::Kind::Prototype
        || symbol.kind == MachineSymbol::Kind::BuiltinPrototype)
@@ -176,7 +242,7 @@ Result<const MachineSymbol *> MachineFunction::intern_symbol (MachineSymbol symb
   auto found = symbol_names_.find (symbol.name);
   if (found != symbol_names_.end ())
     for (auto candidate : found->second) {
-      if (*candidate == symbol) return candidate;
+      if (*candidate == symbol) return *(candidate);
       if (candidate->module == symbol.module
           && candidate->anonymous_ordinal == symbol.anonymous_ordinal
           && candidate->builtin == symbol.builtin)
@@ -187,7 +253,7 @@ Result<const MachineSymbol *> MachineFunction::intern_symbol (MachineSymbol symb
   known_symbols_.insert (&owned);
   symbol_names_[owned.name].push_back (&owned);
   ++revision_;
-  return &owned;
+  return owned;
 }
 std::size_t MachineFunction::instruction_count () const {
   std::size_t size = 0;
@@ -198,33 +264,38 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
                                         std::span<const MachineOperand> operands,
                                         bool lowered_call) const {
   auto reg_valid = [&] (const MachineRegister &reg, bool address) {
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&reg))
+    if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&reg)))
       return !function_.state ().operands_rewritten && *v && &(*v)->function () == &function_
              && (!address || (*v)->type ().is_integer ());
-    auto physical = std::get<target::PhysicalRegister> (reg);
-    auto info = function_.target ().register_info (physical);
+    auto physical = std::get<target::PhysicalRegister> (detail::NodeAccess::storage (reg));
+    auto info = function_.target ().register_info (physical).get ();
     return info && (!address || info->bank == target::RegisterBank::Integer);
   };
   for (auto &o : operands) {
-    if (auto reg = o.get<const MachineVirtualRegister *> (); reg && !reg_valid (*reg, false))
+    if (auto reg = detail::operand_access (o).get<const MachineVirtualRegister *> ();
+        reg && !reg_valid (detail::NodeAccess::make_MachineRegister (*reg), false))
       return invalid (function_, "foreign or null virtual register");
-    if (auto reg = o.get<target::PhysicalRegister> (); reg && !reg_valid (*reg, false))
+    if (auto reg = detail::operand_access (o).get<target::PhysicalRegister> ();
+        reg && !reg_valid (*reg, false))
       return invalid (function_, "foreign physical register");
-    if (auto label = o.get<const MachineLabel *> ();
+    if (auto label = detail::operand_access (o).get<const MachineLabel *> ();
         label && (!*label || &(*label)->block ().function () != &function_))
       return invalid (function_, "foreign or null label");
-    if (auto symbol = o.get<MachineSymbolReference> ();
-        symbol && !function_.known_symbols_.contains (symbol->symbol))
+    if (auto symbol = detail::operand_access (o).get<MachineSymbolReference> ();
+        symbol && !function_.known_symbols_.contains (detail::NodeAccess::symbol (*(symbol))))
       return invalid (function_, "foreign or null symbol relocation");
-    if (auto slot = o.get<StackSlotReference> ();
-        slot && (!slot->slot || &slot->slot->function () != &function_))
+    if (auto slot = detail::operand_access (o).get<StackSlotReference> ();
+        slot
+        && (!detail::NodeAccess::slot (*(slot))
+            || &detail::NodeAccess::slot (*(slot))->function () != &function_))
       return invalid (function_, "foreign or null stack slot");
-    if (auto builtin = o.get<BuiltinReference> ();
+    if (auto builtin = detail::operand_access (o).get<BuiltinReference> ();
         builtin
         && static_cast<unsigned> (builtin->builtin) > static_cast<unsigned> (Builtin::LongDoubleGe))
       return invalid (function_, "unknown builtin");
-    if (auto memory = o.get<MachineMemory> ()) {
-      if (memory->location && &memory->location->function () != &function_)
+    if (auto memory = detail::operand_access (o).get<MachineMemory> ()) {
+      if (detail::NodeAccess::location (*(memory))
+          && &detail::NodeAccess::location (*(memory))->function () != &function_)
         return invalid (function_, "foreign memory location");
       if (!memory->type.valid () || (memory->base && !reg_valid (*memory->base, true))
           || (memory->index && !reg_valid (*memory->index, true))
@@ -238,23 +309,28 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
   auto matches = [&] (const MachineOperand &o, char r) {
     const bool output = r >= 'A' && r <= 'Z';
     if (output) r += 'a' - 'A';
-    const bool reg = o.get<const MachineVirtualRegister *> () || o.get<target::PhysicalRegister> ();
-    if (r == 'l') return o.get<const MachineLabel *> () != nullptr;
+    const bool reg = detail::operand_access (o).get<const MachineVirtualRegister *> ()
+                     || detail::operand_access (o).get<target::PhysicalRegister> ();
+    if (r == 'l') return detail::operand_access (o).get<const MachineLabel *> () != nullptr;
     if (r == 'r') return reg;
-    if (output && !reg && !o.get<MachineMemory> () && !o.get<StackSlotReference> ()) return false;
+    if (output && !reg && !detail::operand_access (o).get<MachineMemory> ()
+        && !detail::operand_access (o).get<StackSlotReference> ())
+      return false;
     if (r == 'a') return true;
-    if (auto v = o.get<const MachineVirtualRegister *> ()) return role ((*v)->type ()) == r;
-    if (auto v = o.get<target::PhysicalRegister> ())
-      return (function_.target ().register_info (*v)->bank == target::RegisterBank::Integer)
+    if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+      return role ((*v)->type ()) == r;
+    if (auto v = detail::operand_access (o).get<target::PhysicalRegister> ())
+      return (function_.target ().register_info (*v).get ()->bank == target::RegisterBank::Integer)
              == (r == 'i');
-    if (auto m = o.get<MachineMemory> ()) return m->type.is_scalar () && role (m->type) == r;
-    if (o.get<StackSlotReference> ())
+    if (auto m = detail::operand_access (o).get<MachineMemory> ())
+      return m->type.is_scalar () && role (m->type) == r;
+    if (detail::operand_access (o).get<StackSlotReference> ())
       return true;  // Its scalar access type is supplied by the instruction.
-    if (o.get<const MachineLabel *> ()) return false;
-    return o.get<float> ()         ? r == 'f'
-           : o.get<double> ()      ? r == 'd'
-           : o.get<long double> () ? r == 'e'
-                                   : r == 'i';
+    if (detail::operand_access (o).get<const MachineLabel *> ()) return false;
+    return detail::operand_access (o).get<float> ()         ? r == 'f'
+           : detail::operand_access (o).get<double> ()      ? r == 'd'
+           : detail::operand_access (o).get<long double> () ? r == 'e'
+                                                            : r == 'i';
   };
   if (auto pseudo = std::get_if<MachinePseudoOpcode> (&code)) {
     if (*pseudo == MachinePseudoOpcode::Use) {
@@ -263,17 +339,17 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
     } else if (*pseudo == MachinePseudoOpcode::X86Mov128
                || *pseudo == MachinePseudoOpcode::X86Mov128Unaligned) {
       auto vector = [&] (const MachineOperand &o) {
-        auto physical = o.get<target::PhysicalRegister> ();
+        auto physical = detail::operand_access (o).get<target::PhysicalRegister> ();
         return physical
-               && function_.target ().register_info (*physical)->bank
+               && function_.target ().register_info (*physical).get ()->bank
                     == target::RegisterBank::Floating;
       };
       if (function_.target ().architecture () != target::Architecture::X86_64
           || operands.size () != 2
-          || (!vector (operands[0]) && !operands[0].get<MachineMemory> ()
-              && !operands[0].get<StackSlotReference> ())
-          || (!vector (operands[1]) && !operands[1].get<MachineMemory> ()
-              && !operands[1].get<StackSlotReference> ())
+          || (!vector (operands[0]) && !detail::operand_access (operands[0]).get<MachineMemory> ()
+              && !detail::operand_access (operands[0]).get<StackSlotReference> ())
+          || (!vector (operands[1]) && !detail::operand_access (operands[1]).get<MachineMemory> ()
+              && !detail::operand_access (operands[1]).get<StackSlotReference> ())
           || (!vector (operands[0]) && !vector (operands[1])))
         return invalid (function_, "invalid aligned SSE move");
     } else
@@ -281,7 +357,7 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
     return {};
   }
   const auto opcode = std::get<ir::Opcode> (code);
-  auto descriptor = ir::instruction_descriptor (opcode);
+  auto descriptor = ir::instruction_descriptor (opcode).get ();
   if (!descriptor || opcode == ir::Opcode::Label)
     return invalid (function_, "labels are block anchors, not instructions");
   if (descriptor->count == ir::OperandCount::Fixed) {
@@ -292,7 +368,7 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
         return invalid (function_, "wrong operand type for " + std::string (descriptor->name));
     if (opcode == ir::Opcode::Addr || opcode == ir::Opcode::Addr8 || opcode == ir::Opcode::Addr16
         || opcode == ir::Opcode::Addr32)
-      if (auto source = operands[1].get<const MachineVirtualRegister *> ();
+      if (auto source = detail::operand_access (operands[1]).get<const MachineVirtualRegister *> ();
           source && (*source)->binding ())
         return invalid (function_,
                         "hardware-bound register has no memory address; copy it to an ordinary "
@@ -311,21 +387,22 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
       if (!matches (operands[p], 'l')) return invalid (function_, "invalid switch target");
   } else {
     if (operands.size () < 2) return invalid (function_, "call requires signature and target");
-    auto proto = operands[0].get<MachineSymbolReference> ();
-    if (!proto || proto->displacement || !proto->symbol->signature)
+    auto proto = detail::operand_access (operands[0]).get<MachineSymbolReference> ();
+    if (!proto || proto->displacement || !detail::NodeAccess::symbol (*(proto))->signature)
       return invalid (function_, "call requires signature symbol");
     if (!matches (operands[1], 'i')) return invalid (function_, "call target must be an address");
-    const auto &s = *proto->symbol->signature;
+    const auto &s = *detail::NodeAccess::symbol (*(proto))->signature;
     const auto fixed = 2 + s.results.size () + s.parameters.size ();
     auto signature = s.verify ();
-    if (!signature) return invalid (function_, signature.error ().message);
+    if (!(signature).has_value ()) return invalid (function_, signature.error ().message);
     for (auto type : s.parameters)
       if (!valid_abi_type (function_, type))
         return invalid (function_, "invalid prototype block ABI");
     if (operands.size () < fixed || (!s.variadic && operands.size () != fixed))
       return invalid (function_, "wrong call operand count");
     for (std::size_t p = 0; p < s.results.size (); ++p) {
-      if (lowered_call && !operands[p + 2].get<target::PhysicalRegister> ())
+      if (lowered_call
+          && !detail::operand_access (operands[p + 2]).get<target::PhysicalRegister> ())
         return invalid (function_, "lowered result requires a physical register");
       if (!matches (operands[p + 2],
                     role (function_.target ().scalar_type (s.results[p])) + 'A' - 'a'))
@@ -336,9 +413,9 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
       return invalid (function_, "jump call requires an empty signature");
     for (std::size_t p = 2 + s.results.size (); p < operands.size (); ++p) {
       auto param = p - 2 - s.results.size ();
-      auto memory = operands[p].get<MachineMemory> ();
+      auto memory = detail::operand_access (operands[p]).get<MachineMemory> ();
       if (lowered_call) {
-        if (!operands[p].get<target::PhysicalRegister> () && !memory)
+        if (!detail::operand_access (operands[p]).get<target::PhysicalRegister> () && !memory)
           return invalid (function_,
                           "lowered argument requires a physical register or memory location");
         if (memory && memory->type.kind () != ir::Type::Kind::Undef && !memory->type.is_scalar ()
@@ -350,7 +427,7 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
             return invalid (function_, "invalid lowered scalar argument");
           if (!t.is_block () && memory && memory->type.kind () == ir::Type::Kind::Undef)
             return invalid (function_, "undefined memory cannot hold a scalar argument");
-          if (t.is_block () && operands[p].get<target::PhysicalRegister> ()
+          if (t.is_block () && detail::operand_access (operands[p]).get<target::PhysicalRegister> ()
               && !matches (operands[p], 'i'))
             return invalid (function_, "block address requires an integer physical register");
         }
@@ -362,29 +439,30 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
                               role (function_.target ().scalar_type (s.parameters[param]))))
         return invalid (function_, "invalid call argument");
       else if (param >= s.parameters.size ()
-               && (operands[p].get<const MachineLabel *> () || operands[p].get<BuiltinReference> ()
+               && (detail::operand_access (operands[p]).get<const MachineLabel *> ()
+                   || detail::operand_access (operands[p]).get<BuiltinReference> ()
                    || (memory && memory->type.kind () == ir::Type::Kind::ReturnBlock)))
         return invalid (function_, "invalid variadic argument");
     }
   }
   return {};
 }
-Result<MachineInstruction *> MachineRewriter::append (MachineBasicBlock &block, MachineOpcode code,
+Result<MachineInstruction &> MachineRewriter::append (MachineBasicBlock &block, MachineOpcode code,
                                                       std::vector<MachineOperand> operands) {
   if (function_.next_instruction_ == UINT64_MAX)
     return invalid (function_, "instruction identity overflow");
   if (&block.function () != &function_) return invalid (function_, "foreign insert block");
   auto checked = validate (code, operands);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   block.instructions_.emplace_back (MachineInstruction::ConstructionKey{}, block, code,
                                     std::move (operands));
   auto &insn = block.instructions_.back ();
   insn.creation_order_ = function_.next_instruction_++;
   insn.position_ = std::prev (block.instructions_.end ());
   ++function_.revision_;
-  return &insn;
+  return insn;
 }
-Result<MachineInstruction *> MachineRewriter::insert_before (MachineInstruction &anchor,
+Result<MachineInstruction &> MachineRewriter::insert_before (MachineInstruction &anchor,
                                                              MachineOpcode code,
                                                              std::vector<MachineOperand> operands) {
   if (function_.next_instruction_ == UINT64_MAX)
@@ -392,7 +470,7 @@ Result<MachineInstruction *> MachineRewriter::insert_before (MachineInstruction 
   if (&anchor.block ().function () != &function_)
     return invalid (function_, "foreign instruction anchor");
   auto checked = validate (code, operands);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto &block = *anchor.block_;
   auto at = block.instructions_.emplace (anchor.position_, MachineInstruction::ConstructionKey{},
                                          block, code, std::move (operands));
@@ -400,9 +478,9 @@ Result<MachineInstruction *> MachineRewriter::insert_before (MachineInstruction 
   at->creation_order_ = function_.next_instruction_++;
   at->position_ = at;
   ++function_.revision_;
-  return &*at;
+  return *at;
 }
-Result<MachineInstruction *> MachineRewriter::insert_after (MachineInstruction &anchor,
+Result<MachineInstruction &> MachineRewriter::insert_after (MachineInstruction &anchor,
                                                             MachineOpcode code,
                                                             std::vector<MachineOperand> operands) {
   if (function_.next_instruction_ == UINT64_MAX)
@@ -410,7 +488,7 @@ Result<MachineInstruction *> MachineRewriter::insert_after (MachineInstruction &
   if (&anchor.block ().function () != &function_)
     return invalid (function_, "foreign instruction anchor");
   auto checked = validate (code, operands);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto &block = *anchor.block_;
   auto at = block.instructions_.emplace (std::next (anchor.position_),
                                          MachineInstruction::ConstructionKey{}, block, code,
@@ -419,28 +497,30 @@ Result<MachineInstruction *> MachineRewriter::insert_after (MachineInstruction &
   at->creation_order_ = function_.next_instruction_++;
   at->position_ = at;
   ++function_.revision_;
-  return &*at;
+  return *at;
 }
-Result<MachineInstruction *> MachineRewriter::previous (MachineInstruction &insn) const {
+Result<OptionalRef<MachineInstruction>> MachineRewriter::previous (MachineInstruction &insn) const {
   if (&insn.block ().function () != &function_)
     return invalid (function_, "foreign instruction navigation");
-  return insn.position_ == insn.block_->instructions_.begin () ? nullptr
-                                                               : &*std::prev (insn.position_);
+  if (insn.position_ == insn.block_->instructions_.begin ())
+    return OptionalRef<MachineInstruction>{};
+  return OptionalRef<MachineInstruction> (*std::prev (insn.position_));
 }
-Result<MachineInstruction *> MachineRewriter::next (MachineInstruction &insn) const {
+Result<OptionalRef<MachineInstruction>> MachineRewriter::next (MachineInstruction &insn) const {
   if (&insn.block ().function () != &function_)
     return invalid (function_, "foreign instruction navigation");
   auto next = std::next (insn.position_);
-  return next == insn.block_->instructions_.end () ? nullptr : &*next;
+  if (next == insn.block_->instructions_.end ()) return OptionalRef<MachineInstruction>{};
+  return OptionalRef<MachineInstruction> (*next);
 }
 Result<void> MachineRewriter::replace (MachineInstruction &insn, MachineOpcode code,
                                        std::vector<MachineOperand> operands) {
   if (&insn.block ().function () != &function_) return invalid (function_, "foreign instruction");
   auto checked = validate (code, operands, insn.lowered_call_ && call (code));
-  if (!checked) return checked;
+  if (!(checked).has_value ()) return checked;
   if (call (code)) {
     checked = validate_dependencies (code, operands, insn.call_dependencies ());
-    if (!checked) return checked;
+    if (!(checked).has_value ()) return checked;
   }
   insn.opcode_ = code;
   insn.operands_ = std::move (operands);
@@ -457,9 +537,9 @@ Result<void> MachineRewriter::lower_call (MachineInstruction &insn, MachineOpcod
   if (&insn.block ().function () != &function_ || !call (insn.opcode ()) || !call (code))
     return invalid (function_, "lowering requires a call instruction");
   auto checked = validate (code, operands, true);
-  if (!checked) return checked;
+  if (!(checked).has_value ()) return checked;
   checked = validate_dependencies (code, operands, insn.call_dependencies ());
-  if (!checked) return checked;
+  if (!(checked).has_value ()) return checked;
   insn.opcode_ = code;
   insn.operands_ = std::move (operands);
   insn.lowered_call_ = true;
@@ -469,6 +549,8 @@ Result<void> MachineRewriter::lower_call (MachineInstruction &insn, MachineOpcod
 Result<void> MachineRewriter::erase (MachineInstruction &insn) {
   if (&insn.block ().function () != &function_)
     return invalid (function_, "foreign erased instruction");
+  if (function_.edit_state_->tracks_handles)
+    function_.edit_state_->erased[&insn] = function_.revision_ + 1;
   insn.block_->instructions_.erase (insn.position_);
   ++function_.revision_;
   return {};
@@ -520,34 +602,37 @@ Result<void> MachineRewriter::erase_label (MachineLabel &label) {
   for (auto &b : function_.blocks ())
     for (auto &i : b.instructions ())
       for (auto &o : i.operands ())
-        if (auto target = o.get<const MachineLabel *> (); target && *target == &label)
+        if (auto target = detail::operand_access (o).get<const MachineLabel *> ();
+            target && *target == &label)
           return invalid (function_, "cannot erase a referenced label");
+  if (function_.edit_state_->tracks_handles)
+    function_.edit_state_->erased[&label] = function_.revision_ + 1;
   std::erase (label.block_->labels_, &label);
   if (label.source_ordinal_) function_.source_label_ordinals_.erase (*label.source_ordinal_);
   std::erase_if (function_.labels_, [&] (auto &owned) { return owned.get () == &label; });
   ++function_.revision_;
   return {};
 }
-Result<MachineBasicBlock *> MachineRewriter::create_block_before (MachineBasicBlock &anchor) {
+Result<MachineBasicBlock &> MachineRewriter::create_block_before (MachineBasicBlock &anchor) {
   if (&anchor.function () != &function_)
     return invalid (function_, "foreign block insertion anchor");
-  auto &block = function_.create_block ();
+  auto &block = detail::access (function_).create_block ();
   function_.blocks_.splice (anchor.position_, function_.blocks_, block.position_);
-  return &block;
+  return block;
 }
-Result<MachineBasicBlock *> MachineRewriter::create_block_after (MachineBasicBlock &anchor) {
+Result<MachineBasicBlock &> MachineRewriter::create_block_after (MachineBasicBlock &anchor) {
   if (&anchor.function () != &function_)
     return invalid (function_, "foreign block insertion anchor");
-  auto &block = function_.create_block ();
+  auto &block = detail::access (function_).create_block ();
   function_.blocks_.splice (std::next (anchor.position_), function_.blocks_, block.position_);
-  return &block;
+  return block;
 }
 Result<void> MachineRewriter::set_call_arguments (
   MachineInstruction &insn, std::span<const target::PhysicalRegister> registers) {
   if (&insn.block ().function () != &function_ || !call (insn.opcode ()))
     return invalid (function_, "call registers require a call instruction");
   for (auto reg : registers)
-    if (!function_.target ().register_info (reg))
+    if (!function_.target ().register_info (reg).get ())
       return invalid (function_, "foreign physical call register");
   std::vector<target::PhysicalRegister> unique;
   for (auto reg : registers)
@@ -564,9 +649,11 @@ Result<void> MachineRewriter::validate_dependencies (
   std::size_t previous = 0;
   bool first = true;
   for (auto d : dependencies) {
-    auto m = d.operand < ops.size () ? ops[d.operand].get<MachineMemory> () : nullptr;
-    if (!d.value || &d.value->function () != &function_ || !d.value->type ().is_integer ()
-        || d.operand < 2 || !m || m->type.kind () != ir::Type::Kind::Undef || m->base || m->index
+    auto m = d.operand < ops.size () ? detail::operand_access (ops[d.operand]).get<MachineMemory> ()
+                                     : nullptr;
+    if (!detail::NodeAccess::value (d) || &detail::NodeAccess::value (d)->function () != &function_
+        || !detail::NodeAccess::value (d)->type ().is_integer () || d.operand < 2 || !m
+        || m->type.kind () != ir::Type::Kind::Undef || m->base || m->index
         || (!first && d.operand <= previous))
       return invalid (function_, "invalid stack argument dependency");
     previous = d.operand;
@@ -579,7 +666,7 @@ Result<void> MachineRewriter::set_call_dependencies (
   if (&insn.block ().function () != &function_ || !insn.has_lowered_call ())
     return invalid (function_, "argument dependencies require an owned lowered call");
   auto checked = validate_dependencies (insn.opcode (), insn.operands (), dependencies);
-  if (!checked) return checked;
+  if (!(checked).has_value ()) return checked;
   insn.call_dependencies_.assign (dependencies.begin (), dependencies.end ());
   ++function_.revision_;
   return {};
@@ -606,7 +693,7 @@ Result<void> MachineRewriter::set_global_registers (
   std::span<const target::PhysicalRegister> registers) {
   std::vector<target::PhysicalRegister> globals;
   for (auto reg : registers) {
-    auto info = function_.target ().register_info (reg);
+    auto info = function_.target ().register_info (reg).get ();
     if (!info || info->reserved) return invalid (function_, "invalid global physical register");
     if (std::find (globals.begin (), globals.end (), reg) == globals.end ())
       globals.push_back (reg);
@@ -619,7 +706,16 @@ Result<void> MachineRewriter::set_global_registers (
   ++function_.revision_;
   return {};
 }
+MachineFunction::~MachineFunction () = default;
+Result<void> MachineFunction::status () const {
+  if (!edit_state_) return invalid (*this, "moved-from machine function");
+  if (edit_state_->error) return *edit_state_->error;
+  if (edit_state_->pending) return invalid (*this, "machine edit batch has not finished");
+  return {};
+}
 Result<void> MachineFunction::verify () const {
+  auto edit_status = status ();
+  if (!(edit_status).has_value ()) return edit_status.error ();
   if (state_.frame_formed && !state_.post_allocation_optimized)
     return invalid (*this, "frame formation without post-allocation optimization");
   if (state_.post_allocation_optimized && !state_.edge_spills_inserted)
@@ -631,7 +727,7 @@ Result<void> MachineFunction::verify () const {
   if (state_.operands_legalized && !state_.machinized)
     return invalid (*this, "legalized operands without machinization");
   auto signature = signature_.verify ();
-  if (!signature) return invalid (*this, signature.error ().message);
+  if (!(signature).has_value ()) return invalid (*this, signature.error ().message);
   if (arguments_.size () != signature_.parameters.size ())
     return invalid (*this, "missing machine arguments");
   for (auto type : signature_.parameters)
@@ -644,7 +740,7 @@ Result<void> MachineFunction::verify () const {
   for (auto &symbol : symbols_)
     if (symbol->signature) {
       auto valid = symbol->signature->verify ();
-      if (!valid) return invalid (*this, valid.error ().message);
+      if (!(valid).has_value ()) return invalid (*this, valid.error ().message);
       for (auto type : symbol->signature->parameters)
         if (!valid_abi_type (*this, type)) return invalid (*this, "invalid symbol block ABI");
     }
@@ -654,29 +750,31 @@ Result<void> MachineFunction::verify () const {
       if (terminated) return invalid (*this, "control-flow instruction in middle of machine block");
       if (&insn.block () != block.get ()) return invalid (*this, "broken instruction owner");
       auto valid = checked.validate (insn.opcode (), insn.operands (), insn.has_lowered_call ());
-      if (!valid) return valid;
+      if (!(valid).has_value ()) return valid;
       valid = checked.validate_dependencies (insn.opcode (), insn.operands (),
                                              insn.call_dependencies ());
-      if (!valid) return valid;
+      if (!(valid).has_value ()) return valid;
       if (state_.operands_rewritten)
         for (auto &o : insn.operands ()) {
           auto virtual_register = [] (MachineRegister r) {
-            return std::holds_alternative<const MachineVirtualRegister *> (r);
+            return std::holds_alternative<const MachineVirtualRegister *> (
+              detail::NodeAccess::storage (r));
           };
-          if (o.get<const MachineVirtualRegister *> ())
+          if (detail::operand_access (o).get<const MachineVirtualRegister *> ())
             return invalid (*this, "virtual operand after allocation rewrite");
-          if (auto m = o.get<MachineMemory> (); m
-                                                && ((m->base && virtual_register (*m->base))
-                                                    || (m->index && virtual_register (*m->index))))
+          if (auto m = detail::operand_access (o).get<MachineMemory> ();
+              m
+              && ((m->base && virtual_register (*m->base))
+                  || (m->index && virtual_register (*m->index))))
             return invalid (*this, "virtual address after allocation rewrite");
         }
       if (!call (insn.opcode ()) && !insn.call_arguments ().empty ())
         return invalid (*this, "call metadata on non-call");
       for (auto reg : insn.call_arguments ())
-        if (!target_.register_info (reg)) return invalid (*this, "foreign call register");
+        if (!target_.register_info (reg).get ()) return invalid (*this, "foreign call register");
       auto code = insn.opcode ();
       if (auto opcode = std::get_if<ir::Opcode> (&code))
-        terminated = ir::instruction_descriptor (*opcode)->flow != ir::ControlFlow::Next;
+        terminated = ir::instruction_descriptor (*opcode).get ()->flow != ir::ControlFlow::Next;
     }
   }
   return {};
@@ -689,7 +787,7 @@ std::string MachineFunction::dump () const {
     auto id = regs.size ();
     regs.emplace (reg.get (), id);
     out << "  %" << id << ' ' << reg->name ();
-    if (auto binding = reg->binding ()) out << ':' << target_.register_info (*binding)->name;
+    if (auto binding = reg->binding ()) out << ':' << target_.register_info (*binding).get ()->name;
     out << " type=" << static_cast<unsigned> (reg->type ().kind ());
     if (reg->is_memory_backed ()) out << " memory-backed";
     out << '\n';
@@ -699,38 +797,46 @@ std::string MachineFunction::dump () const {
   std::unordered_map<const MachineStackSlot *, std::size_t> slots;
   for (auto &slot : slots_) slots.emplace (slot.get (), slots.size ());
   auto reg = [&] (MachineRegister value) {
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&value))
+    if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&value)))
       out << '%' << regs.at (*v);
     else
-      out << '$' << target_.register_info (std::get<target::PhysicalRegister> (value))->name;
+      out << '$'
+          << target_
+               .register_info (
+                 std::get<target::PhysicalRegister> (detail::NodeAccess::storage (value)))
+               .get ()
+               ->name;
   };
   std::size_t b = 0;
   for (auto &block : blocks_) {
     out << "bb" << b++ << ' ' << block->name () << ":\n";
-    for (auto label : block->labels ())
+    for (auto label : ir::detail::ReferenceAccess::pointers (block->labels ()))
       out << "  L" << labels.at (label) << ' ' << label->name ()
           << (label->address_taken () ? " address-taken" : "") << '\n';
     for (auto &insn : block->instructions ()) {
       out << "    " << opcode_name (insn.opcode ());
       for (auto &o : insn.operands ()) {
         out << ' ';
-        if (auto v = o.get<const MachineVirtualRegister *> ())
+        if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+          reg (detail::NodeAccess::make_MachineRegister (*v));
+        else if (auto v = detail::operand_access (o).get<target::PhysicalRegister> ())
           reg (*v);
-        else if (auto v = o.get<target::PhysicalRegister> ())
-          reg (*v);
-        else if (auto v = o.get<const MachineLabel *> ())
+        else if (auto v = detail::operand_access (o).get<const MachineLabel *> ())
           out << 'L' << labels.at (*v);
-        else if (auto v = o.get<MachineSymbolReference> ()) {
-          out << '@' << v->symbol->module << '/' << v->symbol->name;
-          if (v->symbol->anonymous_ordinal) out << "anonymous#" << *v->symbol->anonymous_ordinal;
-          if (v->symbol->builtin)
-            out << "{builtin-prototype:" << static_cast<unsigned> (*v->symbol->builtin) << '}';
+        else if (auto v = detail::operand_access (o).get<MachineSymbolReference> ()) {
+          out << '@' << detail::NodeAccess::symbol (*(v))->module << '/'
+              << detail::NodeAccess::symbol (*(v))->name;
+          if (detail::NodeAccess::symbol (*(v))->anonymous_ordinal)
+            out << "anonymous#" << *detail::NodeAccess::symbol (*(v))->anonymous_ordinal;
+          if (detail::NodeAccess::symbol (*(v))->builtin)
+            out << "{builtin-prototype:"
+                << static_cast<unsigned> (*detail::NodeAccess::symbol (*(v))->builtin) << '}';
           out << '+' << v->displacement;
-        } else if (auto v = o.get<StackSlotReference> ())
-          out << "slot" << slots.at (v->slot) << '+' << v->displacement;
-        else if (auto v = o.get<BuiltinReference> ())
+        } else if (auto v = detail::operand_access (o).get<StackSlotReference> ())
+          out << "slot" << slots.at (detail::NodeAccess::slot (*(v))) << '+' << v->displacement;
+        else if (auto v = detail::operand_access (o).get<BuiltinReference> ())
           out << "builtin:" << static_cast<unsigned> (v->builtin);
-        else if (auto m = o.get<MachineMemory> ()) {
+        else if (auto m = detail::operand_access (o).get<MachineMemory> ()) {
           out << "mem(" << static_cast<unsigned> (m->type.kind ()) << ',' << m->type.block_size ()
               << ',' << m->displacement;
           if (m->base) {
@@ -743,15 +849,15 @@ std::string MachineFunction::dump () const {
             out << '*' << m->scale;
           }
           out << ",alias=" << m->alias << ",nonalias=" << m->nonalias << ')';
-        } else if (auto v = o.get<std::int64_t> ())
+        } else if (auto v = detail::operand_access (o).get<std::int64_t> ())
           out << *v;
-        else if (auto v = o.get<std::uint64_t> ())
+        else if (auto v = detail::operand_access (o).get<std::uint64_t> ())
           out << *v << 'u';
-        else if (auto v = o.get<float> ())
+        else if (auto v = detail::operand_access (o).get<float> ())
           out << "f:0x" << std::hex << std::bit_cast<std::uint32_t> (*v) << std::dec;
-        else if (auto v = o.get<double> ())
+        else if (auto v = detail::operand_access (o).get<double> ())
           out << "d:0x" << std::hex << std::bit_cast<std::uint64_t> (*v) << std::dec;
-        else if (auto v = o.get<long double> ()) {
+        else if (auto v = detail::operand_access (o).get<long double> ()) {
           constexpr auto bytes
             = std::numeric_limits<long double>::digits == 64 ? 10 : sizeof (long double);
           out << "ld:0x" << std::hex << std::setfill ('0');
@@ -763,12 +869,12 @@ std::string MachineFunction::dump () const {
       }
       if (!insn.call_arguments ().empty ()) {
         out << " [call-regs";
-        for (auto r : insn.call_arguments ()) out << ' ' << target_.register_info (r)->name;
+        for (auto r : insn.call_arguments ()) out << ' ' << target_.register_info (r).get ()->name;
         out << ']';
       }
       for (auto d : insn.call_dependencies ()) {
         out << " [stack-argument " << d.operand << " depends-on ";
-        reg (d.value);
+        reg (detail::NodeAccess::make_MachineRegister (detail::NodeAccess::value (d)));
         out << ']';
       }
       out << '\n';
@@ -778,28 +884,28 @@ std::string MachineFunction::dump () const {
 }
 Result<MachineControlFlow> MachineControlFlow::build (const MachineFunction &function) {
   auto valid = function.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   MachineControlFlow cfg;
   cfg.owner_ = &function;
   cfg.revision = function.revision ();
-  cfg.blocks = {nullptr, nullptr};
+  detail::NodeAccess::blocks (cfg) = {nullptr, nullptr};
   std::unordered_map<const MachineBasicBlock *, std::size_t> indices;
   for (auto &block : function.blocks ()) {
-    indices.emplace (&block, cfg.blocks.size ());
-    cfg.blocks.push_back (&block);
+    indices.emplace (&block, detail::NodeAccess::blocks (cfg).size ());
+    detail::NodeAccess::blocks (cfg).push_back (&block);
   }
-  std::vector<bool> addressed (cfg.blocks.size ());
+  std::vector<bool> addressed (detail::NodeAccess::blocks (cfg).size ());
   for (auto &block : function.blocks ()) {
-    for (auto label : block.labels ())
+    for (auto label : ir::detail::ReferenceAccess::pointers (block.labels ()))
       if (label->address_taken ()) addressed[indices.at (&label->block ())] = true;
     for (auto &insn : block.instructions ())
       if (insn.opcode () == MachineOpcode (ir::Opcode::LAddr)) {
-        auto label = *insn.operands ()[1].get<const MachineLabel *> ();
+        auto label = *detail::operand_access (insn.operands ()[1]).get<const MachineLabel *> ();
         addressed[indices.at (&label->block ())] = true;
       }
   }
-  cfg.incoming.resize (cfg.blocks.size ());
-  cfg.outgoing.resize (cfg.blocks.size ());
+  cfg.incoming.resize (detail::NodeAccess::blocks (cfg).size ());
+  cfg.outgoing.resize (detail::NodeAccess::blocks (cfg).size ());
   auto edge
     = [&] (std::size_t from, std::size_t to, EdgeKind kind, std::size_t operand = SIZE_MAX) {
         auto id = cfg.edges.size ();
@@ -807,35 +913,37 @@ Result<MachineControlFlow> MachineControlFlow::build (const MachineFunction &fun
         cfg.outgoing[from].push_back (id);
         cfg.incoming[to].push_back (id);
       };
-  for (std::size_t b = 2; b < cfg.blocks.size (); ++b) {
+  for (std::size_t b = 2; b < detail::NodeAccess::blocks (cfg).size (); ++b) {
     const MachineInstruction *last = nullptr;
-    auto instructions = cfg.blocks[b]->instructions ();
+    auto instructions = detail::NodeAccess::blocks (cfg)[b]->instructions ();
     if (instructions.begin () != instructions.end ()) last = &*std::prev (instructions.end ());
     auto code = last ? last->opcode () : MachineOpcode (MachinePseudoOpcode::Use);
     auto opcode = std::get_if<ir::Opcode> (&code);
     bool fallthrough = true;
     if (opcode) {
-      auto descriptor = ir::instruction_descriptor (*opcode);
+      auto descriptor = ir::instruction_descriptor (*opcode).get ();
       fallthrough = descriptor->flow != ir::ControlFlow::Exit && *opcode != ir::Opcode::Jmp;
-      if (fallthrough && b + 1 < cfg.blocks.size ()) edge (b, b + 1, EdgeKind::Fallthrough);
+      if (fallthrough && b + 1 < detail::NodeAccess::blocks (cfg).size ())
+        edge (b, b + 1, EdgeKind::Fallthrough);
       if (descriptor->flow != ir::ControlFlow::Next)
         for (std::size_t p = 0; p < last->operands ().size (); ++p)
-          if (auto label = last->operands ()[p].get<const MachineLabel *> ())
+          if (auto label
+              = detail::operand_access (last->operands ()[p]).get<const MachineLabel *> ())
             edge (b, indices.at (&(*label)->block ()),
                   *opcode == ir::Opcode::Switch ? EdgeKind::SwitchCase : EdgeKind::Branch, p);
-    } else if (b + 1 < cfg.blocks.size ())
+    } else if (b + 1 < detail::NodeAccess::blocks (cfg).size ())
       edge (b, b + 1, EdgeKind::Fallthrough);
   }
   // As in the original generator, append indirect edges after direct edges;
   // target layout order also fixes incoming order for later data-flow analyses.
-  for (std::size_t b = 2; b < cfg.blocks.size (); ++b) {
-    auto instructions = cfg.blocks[b]->instructions ();
+  for (std::size_t b = 2; b < detail::NodeAccess::blocks (cfg).size (); ++b) {
+    auto instructions = detail::NodeAccess::blocks (cfg)[b]->instructions ();
     if (instructions.begin () != instructions.end ()
         && std::prev (instructions.end ())->opcode () == MachineOpcode (ir::Opcode::JmpIndirect))
-      for (std::size_t to = 2; to < cfg.blocks.size (); ++to)
+      for (std::size_t to = 2; to < detail::NodeAccess::blocks (cfg).size (); ++to)
         if (addressed[to]) edge (b, to, EdgeKind::Indirect);
   }
-  for (std::size_t b = 0; b < cfg.blocks.size (); ++b) {
+  for (std::size_t b = 0; b < detail::NodeAccess::blocks (cfg).size (); ++b) {
     if (b != 0 && cfg.incoming[b].empty ()) edge (0, b, EdgeKind::Entry);
     if (b != 1 && cfg.outgoing[b].empty ()) edge (b, 1, EdgeKind::Exit);
   }
@@ -844,12 +952,13 @@ Result<MachineControlFlow> MachineControlFlow::build (const MachineFunction &fun
 Result<void> MachineControlFlow::verify (const MachineFunction &function) const {
   if (!current (function)) return invalid (function, "stale or foreign machine CFG");
   auto canonical = build (function);
-  if (!canonical) return canonical.error ();
-  if (blocks != canonical->blocks || incoming.size () != blocks.size ()
-      || outgoing.size () != blocks.size () || edges.size () != canonical->edges.size ())
+  if (!(canonical).has_value ()) return canonical.error ();
+  if (blocks_ != detail::NodeAccess::blocks (((canonical)).value ())
+      || incoming.size () != blocks_.size () || outgoing.size () != blocks_.size ()
+      || edges.size () != canonical.value ().edges.size ())
     return invalid (function, "invalid machine CFG dimensions/layout");
   std::vector<unsigned char> in (edges.size ()), out (edges.size ());
-  for (std::size_t b = 0; b < blocks.size (); ++b) {
+  for (std::size_t b = 0; b < blocks_.size (); ++b) {
     for (auto e : incoming[b])
       if (e >= edges.size () || edges[e].destination != b || in[e]++)
         return invalid (function, "invalid incoming machine edge");
@@ -865,7 +974,7 @@ Result<void> MachineControlFlow::verify (const MachineFunction &function) const 
     std::sort (v.begin (), v.end ());
     return v;
   };
-  if (keys (*this) != keys (*canonical))
+  if (keys (*this) != keys ((canonical).value ()))
     return invalid (function, "machine edges disagree with block-owned control flow");
   return {};
 }

@@ -6,5 +6,5 @@
 int main (int argc, char **argv, char **environment) {
   auto input = std::as_bytes (std::span (mir_code));
   auto result = mirnext::tools::run_program (input, argc, argv, environment);
-  return result ? *result : mirnext::tools::report (result.error ());
+  return result.has_value () ? result.value () : mirnext::tools::report (result.error ());
 }

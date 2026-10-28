@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Real native ABI entries into owned C++ IR. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "NativeTarget.hpp"
@@ -14,31 +16,32 @@ namespace {
 bool native () { return test::native_execution_available (); }
 auto parse (std::string_view text) {
   auto c = serialization::parse_text (test::native_hardware_text (text));
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
-  return std::move (*c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
+  return std::make_unique<Program> (std::move ((c).value ()));
 }
-ExecutionSession session (const Context &c,
+ExecutionSession session (const Program &c,
                           ExecutionOptions options
                           = {.mode = ExecutionMode::Interpreter, .native_entries = true}) {
   auto s = ExecutionSession::create (c, std::move (options));
-  INFO ((s ? "" : s.error ().message));
-  REQUIRE (s);
-  return std::move (*s);
+  INFO (((s).has_value () ? "" : s.error ().message));
+  REQUIRE ((s).has_value ());
+  return std::move ((s).value ());
 }
 NativeEntry entry (const ExecutionSession &s, std::string_view module, std::string_view name) {
   auto f = s.find_function (module, name);
-  REQUIRE (f);
-  auto e = s.native_entry (*f);
-  INFO ((e ? "" : e.error ().message));
-  REQUIRE (e);
-  return *e;
+  REQUIRE ((f).has_value ());
+  auto e = s.native_entry ((f).value ());
+  INFO (((e).has_value () ? "" : e.error ().message));
+  REQUIRE ((e).has_value ());
+  return (e).value ();
 }
 ExecutionSession import_entry (const NativeEntry &e) {
-  Context c;
-  auto m = c.create_module ("host");
-  REQUIRE (m);
-  REQUIRE ((*m)->import ("callee", e.signature ()));
+  Program c;
+  auto m = mirnext::ir::detail::access (c).create_module ("host");
+  REQUIRE ((m).has_value ());
+  REQUIRE (
+    (mirnext::ir::detail::access (((m)).value ()).import ("callee", e.signature ())).has_value ());
   return session (c, {.mode = ExecutionMode::Interpreter,
                       .link = {.resolve = [&] (auto &) -> Result<ExternalSymbol> {
                         return ExternalSymbol{e.address (), e.signature (), {}};
@@ -66,24 +69,24 @@ TEST_CASE (
     CHECK (e.signature ().parameters.size () == 1);
     for (auto name : {"slot", "initialized"}) {
       auto data = s.find_data ("m", name);
-      REQUIRE (data);
+      REQUIRE ((data).has_value ());
       std::uintptr_t address;
-      std::memcpy (&address, data->bytes ().data (), 8);
+      std::memcpy (&address, data.value ().bytes ().data (), 8);
       CHECK (address == e.address ());
     }
     CHECK (s.statistics ().code_batches == 1);
     CHECK (s.statistics ().code_bytes > 0);
     CHECK (s.host_entry_count () == 2);
     auto f = s.find_function ("m", "add");
-    REQUIRE (f);
+    REQUIRE ((f).has_value ());
     auto moved = std::move (s);
-    CHECK_FALSE (s.native_entry (*f));
-    CHECK (moved.native_entry (*f)->address () == e.address ());
+    CHECK_FALSE ((s.native_entry ((f).value ())).has_value ());
+    CHECK (moved.native_entry ((f).value ()).value ().address () == e.address ());
     retained = e;
   }
   ExecutionInvocation invocation;
   CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (retained->address ()) (41) == 42);
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
 }
 TEST_CASE (
   "native interpreted entries roundtrip every call fixture and optimization level through actual "
@@ -110,7 +113,7 @@ TEST_CASE (
       auto e = entry (s, "calls", "sum");
       auto host = import_entry (e);
       auto f = host.find_function ("host", "callee");
-      REQUIRE (f);
+      REQUIRE ((f).has_value ());
       std::array<std::int64_t, 2> bytes{20, 22};
       std::vector<ExecutionArgument> args;
       if (kind == test::CallExample::Block)
@@ -126,19 +129,19 @@ TEST_CASE (
         args.emplace_back (20);
         args.emplace_back (22);
       }
-      auto result = host.call (*f, args);
-      INFO ((result ? "" : result.error ().message));
-      REQUIRE (result);
+      auto result = host.call ((f).value (), args);
+      INFO (((result).has_value () ? "" : result.error ().message));
+      REQUIRE ((result).has_value ());
       if (kind == test::CallExample::ReturnBlock) {
-        CHECK (result->empty ());
+        CHECK (result.value ().empty ());
         CHECK (bytes[0] == 42);
       } else if (kind == test::CallExample::MultipleResults) {
-        REQUIRE (result->size () == 2);
-        CHECK (*(*result)[0].as_i64 () == 20);
-        CHECK (*(*result)[1].as_i64 () == 22);
+        REQUIRE (result.value ().size () == 2);
+        CHECK ((((result).value ())[0].as_i64 ()).value () == 20);
+        CHECK ((((result).value ())[1].as_i64 ()).value () == 22);
       } else {
-        REQUIRE (result->size () == 1);
-        CHECK (*(*result)[0].as_i64 () == 42);
+        REQUIRE (result.value ().size () == 1);
+        CHECK ((((result).value ())[0].as_i64 ()).value () == 42);
       }
       CHECK (host.host_entry_count () == 1);
     }
@@ -158,33 +161,35 @@ TEST_CASE ("native entries retain mixed scalar bits and exhausted argument regis
   CHECK (std::bit_cast<std::uint64_t> (value) == bits);
   CHECK (std::bit_cast<std::uint32_t> (reinterpret_cast<float (*) (float)> (g.address ()) (-0.0f))
          == UINT32_C (0x80000000));
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
   for (bool floating : {false, true}) {
-    Context context;
-    auto m = context.create_module ("many");
-    REQUIRE (m);
+    Program context;
+    auto m = mirnext::ir::detail::access (context).create_module ("many");
+    REQUIRE ((m).has_value ());
     auto type = floating ? Type (Type::Kind::F64) : Type::i64 ();
-    auto fn = (*m)->create_function ("sum", {{type}, std::vector<Type> (17, type)});
-    REQUIRE (fn);
-    auto b = (*fn)->create_block ();
-    REQUIRE (b);
-    IRBuilder body (**b);
+    auto fn = mirnext::ir::detail::access (((m)).value ())
+                .create_function ("sum", {{type}, std::vector<Type> (17, type)});
+    REQUIRE ((fn).has_value ());
+    auto b = mirnext::ir::detail::access (((fn)).value ()).create_block ();
+    REQUIRE ((b).has_value ());
+    InstructionBuilder body ((b).value ());
     auto sum = body.literal (type, floating ? Operand (0.0) : Operand (0));
-    for (auto a : (*fn)->arguments ()) sum = sum + body.expression (*a);
-    REQUIRE (body.ret (sum));
+    for (auto a : mirnext::ir::detail::ReferenceAccess::pointers (fn.value ().arguments ()))
+      sum = sum + body.expression (*a);
+    REQUIRE ((body.ret (sum)).has_value ());
     auto program = session (context);
     auto exposed = entry (program, "many", "sum");
     auto caller = import_entry (exposed);
     auto target = caller.find_function ("host", "callee");
-    REQUIRE (target);
+    REQUIRE ((target).has_value ());
     std::vector<ExecutionArgument> args (17, floating ? ExecutionArgument (2.5)
                                                       : ExecutionArgument (3));
-    auto result = caller.call (*target, args);
-    REQUIRE (result);
+    auto result = caller.call ((target).value (), args);
+    REQUIRE ((result).has_value ());
     if (floating)
-      CHECK (*(*result)[0].as_double () == 42.5);
+      CHECK ((((result).value ())[0].as_double ()).value () == 42.5);
     else
-      CHECK (*(*result)[0].as_i64 () == 51);
+      CHECK ((((result).value ())[0].as_i64 ()).value () == 51);
   }
 }
 TEST_CASE ("native entries consume real scalar and copied variadic cursors from a C++ caller") {
@@ -203,7 +208,7 @@ TEST_CASE ("native entries consume real scalar and copied variadic cursors from 
   auto value = reinterpret_cast<std::int64_t (*) (std::int64_t, ...)> (
     e.address ()) (0, std::int64_t{10}, 22.0);
   CHECK (value == 42);
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
 }
 TEST_CASE ("native variadic activation retains bounds checks for nested synthetic varargs") {
   if (!native ()) return;
@@ -224,11 +229,11 @@ TEST_CASE ("native variadic activation retains bounds checks for nested syntheti
         e.address ()) (0, std::int64_t{42});
       if (complete) {
         CHECK (value == 42);
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
       } else {
         CHECK (value == 0);
         auto status = invocation.status ();
-        REQUIRE_FALSE (status);
+        REQUIRE_FALSE ((status).has_value ());
         CHECK (status.error ().message.find ("variadic argument exceeds its invocation area")
                != std::string::npos);
       }
@@ -253,28 +258,28 @@ TEST_CASE (
                            .call_depth_limit = instructions ? 0u : 4u,
                            .native_entries = true});
     auto f = s.find_function ("m", "f");
-    REQUIRE (f);
+    REQUIRE ((f).has_value ());
     std::array<std::int64_t, 1> args{10};
-    auto result = s.call_i64 (*f, args);
-    REQUIRE_FALSE (result);
+    auto result = s.call_i64 ((f).value (), args);
+    REQUIRE_FALSE ((result).has_value ());
     CHECK (result.error ().message.find (instructions ? "instruction limit" : "depth limit")
            != std::string::npos);
     args[0] = 1;
-    result = s.call_i64 (*f, args);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    CHECK (*result == 1);
-    auto e = s.native_entry (*f);
-    REQUIRE (e);
+    result = s.call_i64 ((f).value (), args);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    CHECK ((result).value () == 1);
+    auto e = s.native_entry ((f).value ());
+    REQUIRE ((e).has_value ());
     {
       ExecutionInvocation invocation;
-      CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e->address ()) (10) == 0);
-      CHECK_FALSE (invocation.status ());
+      CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e.value ().address ()) (10) == 0);
+      CHECK_FALSE ((invocation.status ()).has_value ());
     }
     {
       ExecutionInvocation invocation;
-      CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e->address ()) (1) == 1);
-      CHECK (invocation.status ());
+      CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e.value ().address ()) (1) == 1);
+      CHECK ((invocation.status ()).has_value ());
     }
   }
 }
@@ -284,22 +289,22 @@ TEST_CASE (
   auto c = parse ("m:module\nf:func i64,i64:x\nret x\nendfunc\nendmodule\n");
   auto raw = session (*c, {.mode = ExecutionMode::Interpreter});
   auto f = raw.find_function ("m", "f");
-  REQUIRE (f);
-  CHECK_FALSE (raw.native_entry (*f));
+  REQUIRE ((f).has_value ());
+  CHECK_FALSE ((raw.native_entry ((f).value ())).has_value ());
   auto other = session (*c, {.mode = ExecutionMode::Interpreter});
-  CHECK_FALSE (other.native_entry (*f));
-  CHECK_FALSE (ExecutionSession::create (*c, {.native_entries = true}));
+  CHECK_FALSE ((other.native_entry ((f).value ())).has_value ());
+  CHECK_FALSE ((ExecutionSession::create (*c, {.native_entries = true})).has_value ());
   auto program = session (*c);
   auto pf = program.find_function ("m", "f");
-  REQUIRE (pf);
-  CHECK_FALSE (program.native_entry (*f));
+  REQUIRE ((pf).has_value ());
+  CHECK_FALSE ((program.native_entry ((f).value ())).has_value ());
   auto native = session (*c, {.mode = ExecutionMode::JIT});
   auto nf = native.find_function ("m", "f");
-  REQUIRE (nf);
-  auto ne = native.native_entry (*nf);
-  REQUIRE (ne);
-  CHECK (nf->artifact ());
-  CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (ne->address ()) (42) == 42);
+  REQUIRE ((nf).has_value ());
+  auto ne = native.native_entry ((nf).value ());
+  REQUIRE ((ne).has_value ());
+  CHECK ((nf.value ().artifact ()).has_value ());
+  CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (ne.value ().address ()) (42) == 42);
   auto calls = parse (
     "m:module\nimport host\np:proto i64,p:callback,i64:n\nf:func i64,i64:n\nret "
     "n\nendfunc\nentry:func i64\nlocal i64:r\ncall p,host,r,f,42\nret r\nendfunc\nendmodule\n");
@@ -312,9 +317,9 @@ TEST_CASE (
                                         {}};
                 }}});
   auto caller = unsafe.find_function ("m", "entry");
-  REQUIRE (caller);
-  auto result = unsafe.call (*caller);
-  REQUIRE_FALSE (result);
+  REQUIRE ((caller).has_value ());
+  auto result = unsafe.call ((caller).value ());
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("requires native_entries at load time")
          != std::string::npos);
 }
@@ -335,7 +340,7 @@ TEST_CASE (
                                                          "rejected entry compilation"};
                                           }},
                                           .native_entries = true});
-  REQUIRE_FALSE (s);
+  REQUIRE_FALSE ((s).has_value ());
   CHECK (seen == 1);
   CHECK (dump (*c) == before);
   CHECK (s.error ().message.find ("native-entry") != std::string::npos);
@@ -355,10 +360,10 @@ TEST_CASE ("native entry mode keeps internal JCALL and label references in the i
   auto e = entry (s, "m", "entry");
   ExecutionInvocation invocation;
   CHECK (reinterpret_cast<std::int64_t (*) ()> (e.address ()) () == 42);
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
   auto jump = s.find_function ("m", "callee");
-  REQUIRE (jump);
-  CHECK_FALSE (s.native_entry (*jump));
+  REQUIRE ((jump).has_value ());
+  CHECK_FALSE ((s.native_entry ((jump).value ())).has_value ());
 }
 TEST_CASE (
   "callback-only native entries share imported symbol identity and keep typed callbacks alive") {
@@ -376,10 +381,10 @@ TEST_CASE (
                         ExternalSymbol symbol{0, Signature{{Type::i64 ()}, {Type::i64 ()}}, {}};
                         symbol.interpret = [calls = std::make_shared<unsigned> (0)] (
                                              auto args) -> Result<std::vector<ScalarValue>> {
-                          auto value = args[0].scalar ()->as_i64 ();
-                          if (!value) return value.error ();
+                          auto value = args[0].scalar ().value ().as_i64 ();
+                          if (!value.has_value ()) return value.error ();
                           ++*calls;
-                          return std::vector<ScalarValue>{ScalarValue (*value + *calls)};
+                          return std::vector<ScalarValue>{ScalarValue (value.value () + *calls)};
                         };
                         return symbol;
                       }},
@@ -389,28 +394,28 @@ TEST_CASE (
     CHECK (resolutions == 1);
     CHECK (s.host_entry_count () == 1);
     auto d = s.find_data ("b", "slot");
-    REQUIRE (d);
+    REQUIRE ((d).has_value ());
     std::uintptr_t bits;
-    std::memcpy (&bits, d->bytes ().data (), 8);
+    std::memcpy (&bits, d.value ().bytes ().data (), 8);
     CHECK (bits == a.address ());
     ExecutionInvocation invocation;
     CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (a.address ()) (40) == 41);
-    CHECK (invocation.status ());
+    CHECK ((invocation.status ()).has_value ());
     retained = b;
   }
   ExecutionInvocation invocation;
   CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (retained->address ()) (40) == 42);
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
 }
 TEST_CASE (
   "fixed native entries preserve the interpreter callback priority over an optional native "
   "implementation") {
   if (!native ()) return;
-  Context c;
-  auto m = c.create_module ("m");
-  REQUIRE (m);
+  Program c;
+  auto m = mirnext::ir::detail::access (c).create_module ("m");
+  REQUIRE ((m).has_value ());
   Signature signature{{Type::i64 ()}, {Type::i64 ()}};
-  REQUIRE ((*m)->import ("host", signature));
+  REQUIRE ((mirnext::ir::detail::access (((m)).value ()).import ("host", signature)).has_value ());
   auto s
     = session (c,
                {.mode = ExecutionMode::Interpreter,
@@ -418,22 +423,22 @@ TEST_CASE (
                   auto native = +[] (std::int64_t) -> std::int64_t { return -1; };
                   ExternalSymbol symbol{reinterpret_cast<std::uintptr_t> (native), signature, {}};
                   symbol.interpret = [] (auto args) -> Result<std::vector<ScalarValue>> {
-                    return std::vector<ScalarValue>{*args[0].scalar ()};
+                    return std::vector<ScalarValue>{args[0].scalar ().value ()};
                   };
                   return symbol;
                 }},
                 .native_entries = true});
   auto f = s.find_function ("m", "host");
-  REQUIRE (f);
+  REQUIRE ((f).has_value ());
   std::array<std::int64_t, 1> args{42};
-  auto result = s.call_i64 (*f, args);
-  REQUIRE (result);
-  CHECK (*result == 42);
-  auto e = s.native_entry (*f);
-  REQUIRE (e);
+  auto result = s.call_i64 ((f).value (), args);
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == 42);
+  auto e = s.native_entry ((f).value ());
+  REQUIRE ((e).has_value ());
   ExecutionInvocation invocation;
-  CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e->address ()) (42) == 42);
-  CHECK (invocation.status ());
+  CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e.value ().address ()) (42) == 42);
+  CHECK ((invocation.status ()).has_value ());
 }
 TEST_CASE ("native entries pass all block classes by value and write RBLK buffers") {
   if (!native ()) return;
@@ -454,7 +459,7 @@ TEST_CASE ("native entries pass all block classes by value and write RBLK buffer
   struct Large {
     std::int64_t x, y, z;
   };
-  const bool sysv = target::TargetMachine::native ()->abi () == target::ABI::X86SysV;
+  const bool sysv = target::TargetMachine::native ().value ().abi () == target::ABI::X86SysV;
   for (unsigned level = 0; level < 4; ++level) {
     CAPTURE (level);
     auto check = [&] (unsigned category, auto value) {
@@ -483,7 +488,7 @@ TEST_CASE ("native entries pass all block classes by value and write RBLK buffer
       ExecutionInvocation invocation;
       CHECK (reinterpret_cast<std::int64_t (*) (Aggregate)> (e.address ()) (value) == expected);
       CHECK (std::bit_cast<Words> (value) == before);
-      CHECK (invocation.status ());
+      CHECK ((invocation.status ()).has_value ());
     };
     // A 24-byte C++ aggregate is MEMORY on SysV. The four small classes
     // select INTEGER/INTEGER, SSE/SSE, INTEGER/SSE and SSE/INTEGER there.
@@ -508,14 +513,14 @@ TEST_CASE ("native entries pass all block classes by value and write RBLK buffer
   auto le = entry (large, "m", "f");
   ExecutionInvocation invocation;
   Large result{};
-  if (target::TargetMachine::native ()->architecture () == target::Architecture::X86_64)
+  if (target::TargetMachine::native ().value ().architecture () == target::Architecture::X86_64)
     reinterpret_cast<void (*) (Large *, std::int64_t)> (le.address ()) (&result, 20);
   else
     result = reinterpret_cast<Large (*) (std::int64_t)> (le.address ()) (20);
   CHECK (result.x == 20);
   CHECK (result.y == 21);
   CHECK (result.z == 22);
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
 }
 TEST_CASE ("native callback diagnostics are scoped first errors and do not poison later entries") {
   if (!native ()) return;
@@ -528,30 +533,30 @@ TEST_CASE ("native callback diagnostics are scoped first errors and do not poiso
     ExecutionInvocation outer;
     CHECK (call (0) == 0);
     auto original = outer.status ();
-    REQUIRE_FALSE (original);
+    REQUIRE_FALSE ((original).has_value ());
     CHECK (original.error ().message.find ("m/f") != std::string::npos);
     CHECK (original.error ().message.find ("division by zero") != std::string::npos);
     {
       ExecutionInvocation inner;
       CHECK (call (1) == 42);
-      CHECK (inner.status ());
+      CHECK ((inner.status ()).has_value ());
     }
     CHECK (call (1) == 42);
     CHECK (outer.status ().error ().message == original.error ().message);
   }
   ExecutionInvocation retry;
   CHECK (call (1) == 42);
-  CHECK (retry.status ());
+  CHECK ((retry.status ()).has_value ());
 }
 TEST_CASE (
   "native entry publication reports unsupported callback metadata and allocation errors without "
   "fallback") {
   if (!native ()) return;
-  Context c;
-  auto m = c.create_module ("m");
-  REQUIRE (m);
+  Program c;
+  auto m = mirnext::ir::detail::access (c).create_module ("m");
+  REQUIRE ((m).has_value ());
   Signature signature{{Type::i64 ()}, {Type::i64 ()}, true};
-  REQUIRE ((*m)->import ("host", signature));
+  REQUIRE ((mirnext::ir::detail::access (((m)).value ()).import ("host", signature)).has_value ());
   auto unsupported
     = ExecutionSession::create (c, {.mode = ExecutionMode::Interpreter,
                                     .link = {.resolve = [&] (auto &) -> Result<ExternalSymbol> {
@@ -563,7 +568,7 @@ TEST_CASE (
                                       return symbol;
                                     }},
                                     .native_entries = true});
-  REQUIRE_FALSE (unsupported);
+  REQUIRE_FALSE ((unsupported).has_value ());
   CHECK (unsupported.error ().message.find ("variadic callback-only import") != std::string::npos);
   struct Reject final : CodeMemoryProvider {
     unsigned allocations = 0;
@@ -582,11 +587,11 @@ TEST_CASE (
   auto failed = ExecutionSession::create (*source, {.mode = ExecutionMode::Interpreter,
                                                     .link = {.memory_provider = provider},
                                                     .native_entries = true});
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (provider->allocations == 1);
   CHECK (failed.error ().message.find ("rejected native entry allocation") != std::string::npos);
   auto plain = ExecutionSession::create (*source, {.mode = ExecutionMode::Interpreter,
                                                    .link = {.memory_provider = provider}});
-  REQUIRE (plain);
+  REQUIRE ((plain).has_value ());
   CHECK (provider->allocations == 1);
 }

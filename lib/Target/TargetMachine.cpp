@@ -6,7 +6,7 @@
 namespace mirnext::target {
 Result<TargetMachine> TargetMachine::native (Architecture requested) {
   auto rules = AddressingRules::get (requested);
-  if (!rules) return rules.error ();
+  if (!(rules).has_value ()) return rules.error ();
 #if defined(__aarch64__) || defined(_M_ARM64)
   constexpr auto architecture = Architecture::AArch64;
 #ifdef __APPLE__
@@ -25,7 +25,7 @@ Result<TargetMachine> TargetMachine::native (Architecture requested) {
   return Error{ErrorCode::InvalidArgument, "no native machine target"};
 #endif
 #if defined(__aarch64__) || defined(_M_ARM64) || defined(__x86_64__) || defined(_M_X64)
-  if (rules->architecture () != architecture)
+  if (rules.value ().architecture () != architecture)
     return Error{ErrorCode::InvalidArgument, "cross-target machine compilation is unsupported"};
   TargetMachine machine (architecture, abi);
   static constexpr std::string_view arm[]
@@ -74,13 +74,13 @@ Result<PhysicalRegister> TargetMachine::find_register (std::string_view name) co
                                              + std::string (this->name ()) + ": "
                                              + std::string (name)};
 }
-const PhysicalRegisterInfo *TargetMachine::register_info (PhysicalRegister reg) const {
+OptionalRef<const PhysicalRegisterInfo> TargetMachine::register_info (PhysicalRegister reg) const {
   return reg.architecture () == architecture_ && reg.encoding () < registers_.size ()
-           ? &registers_[reg.encoding ()]
-           : nullptr;
+           ? OptionalRef<const PhysicalRegisterInfo> (registers_[reg.encoding ()])
+           : OptionalRef<const PhysicalRegisterInfo>{};
 }
 bool TargetMachine::accepts (PhysicalRegister reg, ir::Type type) const {
-  auto info = register_info (reg);
+  auto info = register_info (reg).get ();
   if (!info || !type.valid () || (!type.is_scalar () && !type.is_block ())) return false;
   type = scalar_type (type);
   if (architecture_ == Architecture::X86_64 && type.kind () == ir::Type::Kind::LongDouble)
@@ -89,7 +89,7 @@ bool TargetMachine::accepts (PhysicalRegister reg, ir::Type type) const {
                           : info->bank == RegisterBank::Integer;
 }
 bool TargetMachine::call_clobbers (PhysicalRegister reg, ir::Type type) const {
-  if (!register_info (reg)) return false;
+  if (!register_info (reg).get ()) return false;
   const auto n = reg.encoding ();
   if (architecture_ == Architecture::AArch64)
     return n < 32 ? !(19 <= n && n <= 28)

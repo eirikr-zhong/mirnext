@@ -8,7 +8,7 @@ class SSACombinePass final : public FunctionPass {
   explicit SSACombinePass (target::Architecture architecture = target::Architecture::Native)
     : architecture_ (architecture) {}
   std::string_view name () const noexcept override { return "ssa-combine"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 
  private:
   target::Architecture architecture_;

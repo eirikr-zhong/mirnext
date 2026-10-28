@@ -14,7 +14,7 @@ Result<CompiledFunction> detail::ArtifactBuilder::finish (CompiledFunctionData d
     result.labels_.push_back ({CompiledLabel (result.labels_.size (), result.identity_),
                                std::move (label.name), label.offset, label.source_ordinal});
   auto valid = result.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   return result;
 }
 namespace {
@@ -118,7 +118,7 @@ Result<void> CompiledFunction::verify () const {
 Result<std::vector<std::uint8_t>> CompiledFunction::relocate (
   std::uint64_t base, const CodeSymbolResolver &resolve) const {
   auto valid = verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   if ((architecture_ == target::Architecture::AArch64 && base % 4)
       || bytes_.size () > UINT64_MAX - base)
     return invalid (*this, "unaligned or overflowing code base");
@@ -142,13 +142,15 @@ Result<std::vector<std::uint8_t>> CompiledFunction::relocate (
       address = found->value;
     else {
       if (!resolve) return invalid (*this, "unresolved code symbol");
-      auto value = resolve ({r.symbol ? &*r.symbol : nullptr, r.builtin});
-      if (!value) {
+      auto value = resolve (
+        CodeSymbolRequest (::mirnext::detail::borrow_optional (r.symbol ? &*r.symbol : nullptr),
+                           r.builtin));
+      if (!(value).has_value ()) {
         auto e = invalid (*this, value.error ().message);
         e.code = value.error ().code;
         return e;
       }
-      address = *value;
+      address = (value).value ();
       addresses.push_back ({&r, address});
     }
     address += std::bit_cast<std::uint64_t> (r.displacement);
@@ -180,7 +182,7 @@ Result<CompiledLabel> CompiledFunction::find_label (std::string_view name) const
 Result<std::vector<std::uint64_t>> CompiledFunction::label_addresses (
   std::uint64_t base, std::span<const LabelAddress> refs) const {
   auto valid = verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   std::vector<std::uint64_t> values;
   values.reserve (refs.size ());
   auto offset = [&] (const CompiledLabel &label) -> Result<std::size_t> {
@@ -190,12 +192,12 @@ Result<std::vector<std::uint64_t>> CompiledFunction::label_addresses (
   };
   for (auto &r : refs) {
     auto label = offset (r.label);
-    if (!label) return label.error ();
-    auto value = *label + std::bit_cast<std::uint64_t> (r.displacement);
+    if (!(label).has_value ()) return label.error ();
+    auto value = (label).value () + std::bit_cast<std::uint64_t> (r.displacement);
     if (r.relative_to) {
       auto other = offset (*r.relative_to);
-      if (!other) return other.error ();
-      value -= *other;
+      if (!(other).has_value ()) return other.error ();
+      value -= (other).value ();
     } else
       value += base;
     values.push_back (value);

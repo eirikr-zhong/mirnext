@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Isolated DSE timings with stable SSA fingerprints. */
+#include "mirnext/Transforms/Testing.hpp"
 #include "mirnext/Transforms/GVN.hpp"
 #include "mirnext/Transforms/CopyPropagation.hpp"
 #include "mirnext/Transforms/DeadStores.hpp"
@@ -50,8 +51,8 @@ int main () {
       std::uint64_t fingerprint = 0;
       for (unsigned repetition = 0; repetition < repeats; ++repetition) {
         auto parsed = serialization::parse_text (text);
-        if (!parsed) return 1;
-        auto &function = *(*parsed)->modules ().begin ()->functions ().begin ();
+        if (!(parsed).has_value ()) return 1;
+        auto &function = *parsed.value ().modules ().begin ()->functions ().begin ();
         FunctionAnalysisManager analyses (function);
         FunctionPassManager prepare;
         prepare.add<SimplifyPass> ();
@@ -60,32 +61,34 @@ int main () {
         prepare.add<GVNPass> ();
         prepare.add<CopyPropagationPass> ();
         auto ready = prepare.run (function, analyses);
-        if (!ready) {
+        if (!(ready).has_value ()) {
           std::cerr << ready.error ().message << '\n';
           return 1;
         }
         allocations = 0;
         measuring = true;
         auto start = std::chrono::steady_clock::now ();
-        auto result = DeadStoresPass ().run (function, analyses);
+        auto result
+          = ::mirnext::transforms::detail::run_pass (DeadStoresPass (), function, analyses);
         auto end = std::chrono::steady_clock::now ();
         measuring = false;
-        if (!result) {
+        if (!(result).has_value ()) {
           std::cerr << result.error ().message << '\n';
           return 1;
         }
-        if (!function.verify ()) return 1;
+        if (!(function.verify ()).has_value ()) return 1;
         std::uint64_t hash = 14695981039346656037ULL;
         for (unsigned char c : dump (function)) hash = (hash ^ c) * 1099511628211ULL;
-        for (auto &use : function.ssa_form ()->uses ())
+        for (auto &use : function.ssa_form ().get ()->uses ())
           if (use.alive ()) {
             hash = (hash ^ use.value ().operand ()) * 1099511628211ULL;
             for (unsigned char c : use.value ().reg ().name ())
               hash = (hash ^ c) * 1099511628211ULL;
           }
-        if (repetition && (fingerprint != hash || changes != result->transformations)) return 2;
+        if (repetition && (fingerprint != hash || changes != result.value ().transformations))
+          return 2;
         fingerprint = hash;
-        changes = result->transformations;
+        changes = result.value ().transformations;
         counts.push_back (allocations);
         times.push_back (std::chrono::duration<double, std::milli> (end - start).count ());
       }

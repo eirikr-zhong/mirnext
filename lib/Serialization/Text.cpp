@@ -1,3 +1,5 @@
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 /* Licensed under the MIT License. Grammar derived from MIR,
    Copyright 2018-2024 Vladimir Makarov. No engine objects or parser callbacks. */
 #include "mirnext/Serialization/Format.hpp"
@@ -88,10 +90,10 @@ class Lexer {
       case ')': token.kind = Token::Kind::Right; break;
       case '"': {
         auto value = quoted (line, column);
-        if (!value) return value.error ();
+        if (!(value).has_value ()) return value.error ();
         token.kind = Token::Kind::Literal;
         token.literal = literals.size ();
-        literals.emplace_back (std::move (*value));
+        literals.emplace_back (std::move ((value).value ()));
         break;
       }
       default:
@@ -105,10 +107,10 @@ class Lexer {
             get ();
           }
           auto value = number (input_.substr (start, position_ - start), line, column);
-          if (!value) return value.error ();
+          if (!(value).has_value ()) return value.error ();
           token.kind = Token::Kind::Literal;
           token.literal = literals.size ();
-          literals.push_back (std::move (*value));
+          literals.push_back (std::move ((value).value ()));
         } else if (name_character (c, true)) {
           auto start = position_ - 1;
           while (position_ < input_.size () && name_character (input_[position_], false)) get ();
@@ -292,8 +294,8 @@ class Cursor {
   }
   Result<std::int64_t> integer () {
     auto value = literal ();
-    if (!value) return value.error ();
-    auto i = value->get<std::int64_t> ();
+    if (!(value).has_value ()) return value.error ();
+    auto i = ir::detail::operand_access (((value)).value ()).get<std::int64_t> ();
     if (!i) return Error{ErrorCode::InvalidOperand, "expected an integer"};
     return *i;
   }
@@ -305,36 +307,37 @@ class Cursor {
 };
 Result<Declaration> declaration (Cursor &cursor, bool hardware = false) {
   auto spelling = cursor.name ();
-  if (!spelling) return spelling.error ();
-  auto type = named_type (*spelling);
-  if (!type) return Error{ErrorCode::InvalidOperand, "unknown type: " + std::string (*spelling)};
+  if (!(spelling).has_value ()) return spelling.error ();
+  auto type = named_type ((spelling).value ());
+  if (!type)
+    return Error{ErrorCode::InvalidOperand, "unknown type: " + std::string ((spelling).value ())};
   Declaration value{*type, {}, {}};
   if (!cursor.take (Token::Kind::Colon)) return value;
   if (type->is_block ()) {
     auto size = cursor.integer ();
-    if (!size) return size.error ();
-    if (*size <= 0) return Error{ErrorCode::InvalidOperand, "invalid block size"};
+    if (!(size).has_value ()) return size.error ();
+    if ((size).value () <= 0) return Error{ErrorCode::InvalidOperand, "invalid block size"};
     value.type = type->kind () == Type::Kind::ReturnBlock
-                   ? Type::return_block (*size)
-                   : Type::block (*size, type->block_class ());
+                   ? Type::return_block ((size).value ())
+                   : Type::block ((size).value (), type->block_class ());
     auto open = cursor.expect (Token::Kind::Left, "expected block argument name");
-    if (!open) return open.error ();
+    if (!(open).has_value ()) return open.error ();
     auto name = cursor.name ();
-    if (!name) return name.error ();
-    value.name = *name;
+    if (!(name).has_value ()) return name.error ();
+    value.name = (name).value ();
     auto close = cursor.expect (Token::Kind::Right, "expected ')' after block argument");
-    if (!close) return close.error ();
+    if (!(close).has_value ()) return close.error ();
   } else {
     auto name = cursor.name ();
-    if (!name) return name.error ();
-    value.name = *name;
+    if (!(name).has_value ()) return name.error ();
+    value.name = (name).value ();
   }
   if (hardware) {
     auto colon = cursor.expect (Token::Kind::Colon, "expected hardware binding");
-    if (!colon) return colon.error ();
+    if (!(colon).has_value ()) return colon.error ();
     auto name = cursor.name ();
-    if (!name) return name.error ();
-    value.hardware = *name;
+    if (!(name).has_value ()) return name.error ();
+    value.hardware = (name).value ();
   }
   return value;
 }
@@ -356,42 +359,40 @@ Result<ParsedSignature> signature (std::span<const Token> tokens,
       break;
     }
     auto value = declaration (cursor);
-    if (!value) return value.error ();
-    if (!value->name.empty ()) arguments = true;
+    if (!(value).has_value ()) return value.error ();
+    if (!value.value ().name.empty ()) arguments = true;
     if (arguments) {
-      if (value->name.empty ()) return Error{ErrorCode::InvalidOperand, "parameter has no name"};
-      result.signature.parameters.push_back (value->type);
-      result.names.push_back (value->name);
+      if (value.value ().name.empty ())
+        return Error{ErrorCode::InvalidOperand, "parameter has no name"};
+      result.signature.parameters.push_back (value.value ().type);
+      result.names.push_back (value.value ().name);
     } else
-      result.signature.results.push_back (value->type);
+      result.signature.results.push_back (value.value ().type);
     if (cursor.empty ()) break;
     auto comma = cursor.expect (Token::Kind::Comma, "expected ',' in signature");
-    if (!comma) return comma.error ();
+    if (!(comma).has_value ()) return comma.error ();
     if (cursor.empty ()) return Error{ErrorCode::InvalidOperand, "trailing signature comma"};
   }
   auto valid = result.signature.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   return result;
 }
 class Parser {
  public:
   Parser (const TokenStream &stream, ParseOptions options)
-    : tokens_ (stream.tokens),
-      literals_ (stream.literals),
-      options_ (options),
-      result_ (std::make_unique<Context> ()) {}
-  Result<std::unique_ptr<Context>> run () {
+    : tokens_ (stream.tokens), literals_ (stream.literals), options_ (options), result_ () {}
+  Result<Program> run () {
     auto statements = split ();
-    if (!statements) return statements.error ();
-    statements_ = std::move (*statements);
+    if (!(statements).has_value ()) return statements.error ();
+    statements_ = std::move ((statements).value ());
     for (std::size_t n = 0; n < statements_.size ();) {
       auto &start = statements_[n];
       current_ = &start;
       if (start.name != "module" || start.labels.size () != 1 || !start.arguments.empty ())
         return invalid ("expected named module");
-      auto created = result_->create_module (start.labels[0]);
-      if (!created) return diagnose (created.error ());
-      module_ = *created;
+      auto created = ir::detail::access (result_).create_module (start.labels[0]);
+      if (!(created).has_value ()) return diagnose (created.error ());
+      module_ = &(created).value ();
       auto end = n + 1;
       while (end < statements_.size () && statements_[end].name != "endmodule") ++end;
       if (end == statements_.size ()) return invalid ("missing endmodule");
@@ -400,11 +401,11 @@ class Parser {
         return invalid ("invalid endmodule");
       }
       auto built = module (n + 1, end);
-      if (!built) return built.error ();
+      if (!(built).has_value ()) return built.error ();
       n = end + 1;
     }
-    auto valid = result_->verify ();
-    if (!valid) return diagnose (valid.error ());
+    auto valid = result_.verify ();
+    if (!(valid).has_value ()) return diagnose (valid.error ());
     return std::move (result_);
   }
 
@@ -417,7 +418,7 @@ class Parser {
   std::span<const Token> tokens_;
   std::span<const Operand> literals_;
   ParseOptions options_;
-  std::unique_ptr<Context> result_;
+  Program result_;
   std::vector<Statement> statements_;
   const Statement *current_ = nullptr;
   Module *module_ = nullptr;
@@ -475,11 +476,12 @@ class Parser {
            || statement.name == "ref" || statement.name == "lref" || statement.name == "expr"
            || statement.name == "string";
   }
-  Result<void> emit (IRBuilder &builder, Opcode opcode, std::span<const Operand> operands) {
+  Result<void> emit (InstructionBuilder &builder, Opcode opcode,
+                     std::span<const Operand> operands) {
     if (instruction_count_ >= options_.max_instructions)
       return invalid ("instruction limit exceeded");
     auto instruction = builder.emit (opcode, operands);
-    if (!instruction) return diagnose (instruction.error ());
+    if (!(instruction).has_value ()) return diagnose (instruction.error ());
     ++instruction_count_;
     return {};
   }
@@ -504,19 +506,19 @@ class Parser {
         if ((s.name == "func" || s.name == "proto") ? s.labels.size () != 1 : s.labels.size () > 1)
           return invalid ("wrong number of item names");
         if (!s.labels.empty ()) {
-          auto reserved = module_->reserve_symbol (s.labels[0]);
-          if (!reserved) return diagnose (reserved.error ());
+          auto reserved = ir::detail::access (*(module_)).reserve_symbol (s.labels[0]);
+          if (!(reserved).has_value ()) return diagnose (reserved.error ());
         }
       } else if (s.name == "import" || s.name == "export" || s.name == "forward") {
         Cursor cursor (s.arguments, literals_);
         while (!cursor.empty ()) {
           auto name = cursor.name ();
-          if (!name) return diagnose (name.error ());
-          auto reserved = module_->reserve_symbol (*name);
-          if (!reserved) return diagnose (reserved.error ());
+          if (!(name).has_value ()) return diagnose (name.error ());
+          auto reserved = ir::detail::access (*(module_)).reserve_symbol ((name).value ());
+          if (!(reserved).has_value ()) return diagnose (reserved.error ());
           if (!cursor.empty ()) {
             auto comma = cursor.expect (Token::Kind::Comma, "expected declaration comma");
-            if (!comma) return diagnose (comma.error ());
+            if (!(comma).has_value ()) return diagnose (comma.error ());
             if (cursor.empty ()) return invalid ("trailing declaration comma");
           }
         }
@@ -528,43 +530,46 @@ class Parser {
       current_ = &s;
       if (s.name == "func" || s.name == "proto") {
         auto parsed = signature (s.arguments, literals_);
-        if (!parsed) return diagnose (parsed.error ());
+        if (!(parsed).has_value ()) return diagnose (parsed.error ());
         if (s.name == "proto") {
-          auto prototype = module_->prototype (s.labels[0], std::move (parsed->signature));
-          if (!prototype) return diagnose (prototype.error ());
+          auto prototype = ir::detail::access (*(module_))
+                             .prototype (s.labels[0], std::move (parsed.value ().signature));
+          if (!(prototype).has_value ()) return diagnose (prototype.error ());
           continue;
         }
-        auto function
-          = module_->create_function (s.labels[0], std::move (parsed->signature), parsed->names);
-        if (!function) return diagnose (function.error ());
+        auto function = ir::detail::access (*(module_))
+                          .create_function (s.labels[0], std::move (parsed.value ().signature),
+                                            parsed.value ().names);
+        if (!(function).has_value ()) return diagnose (function.error ());
         auto end = n + 1;
         while (end < last && statements_[end].name != "endfunc") ++end;
-        Body body{*function, n + 1, end, std::vector<BasicBlock *> (end - n - 1)};
+        Body body{&(function).value (), n + 1, end, std::vector<BasicBlock *> (end - n - 1)};
         auto prepared = prepare (body);
-        if (!prepared) return prepared;
+        if (!(prepared).has_value ()) return prepared;
         bodies.push_back (std::move (body));
         n = end;
       } else if (datum (s)) {
-        auto declared
-          = module_->declare_data (s.labels.empty () ? std::string_view{} : s.labels[0]);
-        if (!declared) return diagnose (declared.error ());
-        data_.emplace_back (n, *declared);
+        auto declared = ir::detail::access (*(module_))
+                          .declare_data (s.labels.empty () ? std::string_view{} : s.labels[0]);
+        if (!(declared).has_value ()) return diagnose (declared.error ());
+        data_.emplace_back (n, &(declared).value ());
       } else if (s.name == "import" || s.name == "export" || s.name == "forward") {
         if (!s.labels.empty () || s.arguments.empty ()) return invalid ("invalid declaration");
         Cursor cursor (s.arguments, literals_);
         while (!cursor.empty ()) {
           auto name = cursor.name ();
-          if (!name) return diagnose (name.error ());
+          if (!(name).has_value ()) return diagnose (name.error ());
           Result<void> added;
           if (s.name == "import") {
-            auto value = module_->import (*name);
-            if (!value) added = value.error ();
+            auto value = ir::detail::access (*(module_)).import ((name).value ());
+            if (!(value).has_value ()) added = value.error ();
           } else if (s.name == "forward") {
-            auto value = module_->forward (*name);
-            if (!value) added = value.error ();
+            auto value = ir::detail::access (*(module_)).forward ((name).value ());
+            if (!(value).has_value ()) added = value.error ();
           } else
-            added = module_->export_symbol (*module_->find_symbol (*name));
-          if (!added) return diagnose (added.error ());
+            added = ir::detail::access (*(module_))
+                      .export_symbol (*module_->find_symbol ((name).value ()).get ());
+          if (!(added).has_value ()) return diagnose (added.error ());
           if (!cursor.empty ()) cursor.take (Token::Kind::Comma);
         }
       } else
@@ -572,21 +577,22 @@ class Parser {
     }
     for (auto &body : bodies) {
       auto built = instructions (body);
-      if (!built) return built;
+      if (!(built).has_value ()) return built;
     }
     for (auto [n, symbol] : data_) {
       current_ = &statements_[n];
       auto value = initializer (*current_);
-      if (!value) return value.error ();
-      auto defined = module_->define_data (*symbol, std::move (*value));
-      if (!defined) return diagnose (defined.error ());
+      if (!(value).has_value ()) return value.error ();
+      auto defined
+        = ir::detail::access (*(module_)).define_data (*symbol, std::move ((value).value ()));
+      if (!(defined).has_value ()) return diagnose (defined.error ());
     }
     return {};
   }
   Result<void> prepare (Body &body) {
-    auto entry = body.function->create_block ();
-    if (!entry) return diagnose (entry.error ());
-    auto block = *entry;
+    auto entry = ir::detail::access (*(body.function)).create_block ();
+    if (!(entry).has_value ()) return diagnose (entry.error ());
+    auto block = &(entry).value ();
     bool has_instruction = false, terminated = false;
     for (auto n = body.first; n < body.last; ++n) {
       auto &s = statements_[n];
@@ -597,14 +603,16 @@ class Parser {
         Cursor cursor (s.arguments, literals_);
         while (!cursor.empty ()) {
           auto value = declaration (cursor, s.name == "global");
-          if (!value) return diagnose (value.error ());
-          if (value->name.empty () || !value->type.is_scalar ())
+          if (!(value).has_value ()) return diagnose (value.error ());
+          if (value.value ().name.empty () || !value.value ().type.is_scalar ())
             return invalid ("local/global variable must be named and scalar");
-          auto reg = body.function->create_register (value->type, value->name, value->hardware);
-          if (!reg) return diagnose (reg.error ());
+          auto reg = ir::detail::access (*(body.function))
+                       .create_register (value.value ().type, value.value ().name,
+                                         value.value ().hardware);
+          if (!(reg).has_value ()) return diagnose (reg.error ());
           if (cursor.empty ()) break;
           auto comma = cursor.expect (Token::Kind::Comma, "expected variable comma");
-          if (!comma) return diagnose (comma.error ());
+          if (!(comma).has_value ()) return diagnose (comma.error ());
           if (cursor.empty ()) return invalid ("trailing variable comma");
         }
         continue;
@@ -614,28 +622,28 @@ class Parser {
         return invalid ("unknown or private opcode: " + std::string (s.name));
       if (terminated
           || (has_instruction && (!s.labels.empty () || opcode->second == Opcode::Label))) {
-        auto created = body.function->create_block ();
-        if (!created) return diagnose (created.error ());
-        block = *created;
+        auto created = ir::detail::access (*(body.function)).create_block ();
+        if (!(created).has_value ()) return diagnose (created.error ());
+        block = &(created).value ();
         has_instruction = false;
       }
       for (auto name : s.labels) {
         if (labels_.contains (name))
           return invalid ("duplicate module label: " + std::string (name));
-        auto label = body.function->create_label (*block, name);
-        if (!label) return diagnose (label.error ());
-        labels_.emplace (name, *label);
+        auto label = ir::detail::access (*(body.function)).create_label (*block, name);
+        if (!(label).has_value ()) return diagnose (label.error ());
+        labels_.emplace (name, &(label).value ());
       }
       if (opcode->second == Opcode::Label) {
         if (!s.arguments.empty ()) return invalid ("label opcode takes no operands");
         if (s.labels.empty ()) {
-          auto anchor = body.function->create_label (*block);
-          if (!anchor) return diagnose (anchor.error ());
+          auto anchor = ir::detail::access (*(body.function)).create_label (*block);
+          if (!(anchor).has_value ()) return diagnose (anchor.error ());
         }
         terminated = false;
       } else {
         has_instruction = true;
-        terminated = instruction_descriptor (opcode->second)->flow != ControlFlow::Next;
+        terminated = instruction_descriptor (opcode->second).get ()->flow != ControlFlow::Next;
       }
       body.blocks[n - body.first] = block;
     }
@@ -644,47 +652,50 @@ class Parser {
       return invalid ("invalid endfunc");
     return {};
   }
-  Result<Operand> memory (Cursor &cursor, Type type, Function &function, IRBuilder &builder) {
-    Memory result{type};
+  Result<Operand> memory (Cursor &cursor, Type type, Function &function,
+                          InstructionBuilder &builder) {
+    Memory result = ir::detail::NodeAccess::make_Memory (type);
     std::optional<std::int64_t> displacement;
     const Symbol *symbol = nullptr;
     if (cursor.peek () && cursor.peek ()->kind == Token::Kind::Literal) {
       auto value = cursor.integer ();
-      if (!value) return diagnose (value.error ());
-      displacement = *value;
+      if (!(value).has_value ()) return diagnose (value.error ());
+      displacement = (value).value ();
     } else if (cursor.peek () && cursor.peek ()->kind == Token::Kind::Name) {
       auto name = cursor.name ();
-      if (!name) return diagnose (name.error ());
-      symbol = module_->find_symbol (*name);
+      if (!(name).has_value ()) return diagnose (name.error ());
+      symbol = module_->find_symbol ((name).value ()).get ();
       if (!symbol || symbol->kind () == Symbol::Kind::Prototype)
         return invalid ("undeclared memory symbol");
     }
     if (cursor.take (Token::Kind::Left)) {
-      auto reg = [&] () -> Result<const Register *> {
+      auto reg = [&] () -> Result<const Register &> {
         auto name = cursor.name ();
-        if (!name) return diagnose (name.error ());
-        auto value = function.find_register (*name);
-        if (!value) return invalid ("undeclared address register: " + std::string (*name));
-        return value;
+        if (!(name).has_value ()) return diagnose (name.error ());
+        auto value = function.find_register ((name).value ()).get ();
+        if (!value)
+          return invalid ("undeclared address register: " + std::string ((name).value ()));
+        return *(value);
       };
       if (cursor.peek () && cursor.peek ()->kind == Token::Kind::Name) {
         auto value = reg ();
-        if (!value) return value.error ();
-        result.base = *value;
+        if (!(value).has_value ()) return value.error ();
+        ir::detail::NodeAccess::base (result) = &(value).value ();
       }
       if (cursor.take (Token::Kind::Comma)) {
         auto value = reg ();
-        if (!value) return value.error ();
-        result.index = *value;
+        if (!(value).has_value ()) return value.error ();
+        ir::detail::NodeAccess::index (result) = &(value).value ();
         if (cursor.take (Token::Kind::Comma)) {
           auto scale = cursor.integer ();
-          if (!scale) return scale.error ();
-          if (*scale < 0 || *scale > 255) return invalid ("invalid memory scale");
-          result.scale = *scale;
+          if (!(scale).has_value ()) return scale.error ();
+          if ((scale).value () < 0 || (scale).value () > 255)
+            return invalid ("invalid memory scale");
+          result.scale = (scale).value ();
         }
       }
       auto close = cursor.expect (Token::Kind::Right, "expected ')' after address");
-      if (!close) return diagnose (close.error ());
+      if (!(close).has_value ()) return diagnose (close.error ());
     } else if (!displacement && !symbol)
       return invalid ("empty memory address");
     if (type.is_block ()) {
@@ -698,63 +709,65 @@ class Parser {
     if (cursor.take (Token::Kind::Colon)) {
       if (!cursor.peek () || cursor.peek ()->kind != Token::Kind::Colon) {
         auto alias = cursor.name ();
-        if (!alias) return diagnose (alias.error ());
-        result.alias = *alias;
+        if (!(alias).has_value ()) return diagnose (alias.error ());
+        result.alias = (alias).value ();
       }
       if (cursor.take (Token::Kind::Colon)) {
         auto alias = cursor.name ();
-        if (!alias) return diagnose (alias.error ());
-        result.nonalias = *alias;
+        if (!(alias).has_value ()) return diagnose (alias.error ());
+        result.nonalias = (alias).value ();
       }
     }
     if (symbol) {
-      auto reg = function.create_register (Type::pointer ());
-      if (!reg) return diagnose (reg.error ());
-      const Operand move[]{Operand (**reg), Operand (*symbol)};
+      auto reg = ir::detail::access (function).create_register (Type::pointer ());
+      if (!(reg).has_value ()) return diagnose (reg.error ());
+      const Operand move[]{Operand ((reg).value ()), Operand (*symbol)};
       auto moved = emit (builder, Opcode::Mov, move);
-      if (!moved) return moved.error ();
-      if (result.base) {
-        const Operand add[]{Operand (**reg), Operand (**reg), Operand (*result.base)};
+      if (!(moved).has_value ()) return moved.error ();
+      if (ir::detail::NodeAccess::base (result)) {
+        const Operand add[]{Operand ((reg).value ()), Operand ((reg).value ()),
+                            Operand (*ir::detail::NodeAccess::base (result))};
         auto added = emit (builder, Opcode::Add, add);
-        if (!added) return added.error ();
+        if (!(added).has_value ()) return added.error ();
       }
-      result.base = *reg;
+      ir::detail::NodeAccess::base (result) = &(reg).value ();
     }
     return Operand (std::move (result));
   }
   Result<Operand> operand (Cursor &cursor, Opcode opcode, std::size_t index, Body &body,
-                           IRBuilder &builder) {
+                           InstructionBuilder &builder) {
     if (cursor.peek () && cursor.peek ()->kind == Token::Kind::Literal) return cursor.literal ();
     auto name = cursor.name ();
-    if (!name) return diagnose (name.error ());
+    if (!(name).has_value ()) return diagnose (name.error ());
     if (cursor.take (Token::Kind::Colon)) {
-      auto type = named_type (*name);
+      auto type = named_type ((name).value ());
       if (!type) return invalid ("unknown memory type");
       return memory (cursor, *type, *body.function, builder);
     }
-    auto descriptor = instruction_descriptor (opcode);
+    auto descriptor = instruction_descriptor (opcode).get ();
     bool label = (index < descriptor->roles.size () && descriptor->roles[index] == 'l')
                  || (opcode == Opcode::Switch && index != 0);
     if (label) {
-      auto found = labels_.find (*name);
-      if (found == labels_.end ()) return invalid ("undefined label: " + std::string (*name));
+      auto found = labels_.find ((name).value ());
+      if (found == labels_.end ())
+        return invalid ("undefined label: " + std::string ((name).value ()));
       return Operand (*found->second);
     }
-    if (auto reg = body.function->find_register (*name)) return Operand (*reg);
-    if (auto symbol = module_->find_symbol (*name)) return Operand (*symbol);
-    if (*name == "inf" || *name == "nan" || *name == "inff" || *name == "nanf" || *name == "infL"
-        || *name == "nanL") {
-      bool nan = name->starts_with ("nan");
-      if (*name == "inff" || *name == "nanf")
+    if (auto reg = body.function->find_register ((name).value ()).get ()) return Operand (*reg);
+    if (auto symbol = module_->find_symbol ((name).value ()).get ()) return Operand (*symbol);
+    if ((name).value () == "inf" || (name).value () == "nan" || (name).value () == "inff"
+        || (name).value () == "nanf" || (name).value () == "infL" || (name).value () == "nanL") {
+      bool nan = name.value ().starts_with ("nan");
+      if ((name).value () == "inff" || (name).value () == "nanf")
         return Operand (nan ? std::numeric_limits<float>::quiet_NaN ()
                             : std::numeric_limits<float>::infinity ());
-      if (name->back () == 'L')
+      if (name.value ().back () == 'L')
         return Operand (nan ? std::numeric_limits<long double>::quiet_NaN ()
                             : std::numeric_limits<long double>::infinity ());
       return Operand (nan ? std::numeric_limits<double>::quiet_NaN ()
                           : std::numeric_limits<double>::infinity ());
     }
-    return invalid ("undeclared operand: " + std::string (*name));
+    return invalid ("undeclared operand: " + std::string ((name).value ()));
   }
   Result<void> instructions (Body &body) {
     for (auto n = body.first; n < body.last; ++n)
@@ -763,35 +776,36 @@ class Parser {
         current_ = &s;
         auto opcode = opcodes ().at (s.name);
         if (opcode == Opcode::Label) continue;
-        IRBuilder builder (*block);
+        InstructionBuilder builder (*block);
         Cursor cursor (s.arguments, literals_);
         std::vector<Operand> operands;
         while (!cursor.empty ()) {
           auto value = operand (cursor, opcode, operands.size (), body, builder);
-          if (!value) return value.error ();
-          operands.push_back (std::move (*value));
+          if (!(value).has_value ()) return value.error ();
+          operands.push_back (std::move ((value).value ()));
           if (cursor.empty ()) break;
           auto comma = cursor.expect (Token::Kind::Comma, "expected operand comma");
-          if (!comma) return diagnose (comma.error ());
+          if (!(comma).has_value ()) return diagnose (comma.error ());
           if (cursor.empty ()) return invalid ("trailing operand comma");
         }
         auto added = emit (builder, opcode, operands);
-        if (!added) return added;
+        if (!(added).has_value ()) return added;
       }
     auto &last = *std::prev (body.function->blocks ().end ());
-    if (!last.terminator ()
-        || instruction_descriptor (last.terminator ()->opcode ())->flow == ControlFlow::Branch) {
+    if (!last.terminator ().get ()
+        || instruction_descriptor (last.terminator ().get ()->opcode ()).get ()->flow
+             == ControlFlow::Branch) {
       if (!body.function->signature ().results.empty ())
         return invalid ("non-void function falls through");
       BasicBlock *exit = &last;
-      if (last.terminator ()) {
-        auto created = body.function->create_block ();
-        if (!created) return diagnose (created.error ());
-        exit = *created;
+      if (last.terminator ().get ()) {
+        auto created = ir::detail::access (*(body.function)).create_block ();
+        if (!(created).has_value ()) return diagnose (created.error ());
+        exit = &(created).value ();
       }
-      IRBuilder builder (*exit);
+      InstructionBuilder builder (*exit);
       auto added = emit (builder, Opcode::Ret, {});
-      if (!added) return added;
+      if (!(added).has_value ()) return added;
     }
     return {};
   }
@@ -800,14 +814,14 @@ class Parser {
     auto kind = statement.name;
     if (kind == "bss") {
       auto size = cursor.integer ();
-      if (!size) return diagnose (size.error ());
-      if (*size < 0 || !cursor.empty ()) return invalid ("invalid bss size");
-      return DataInitializer (ZeroData{static_cast<std::size_t> (*size)});
+      if (!(size).has_value ()) return diagnose (size.error ());
+      if ((size).value () < 0 || !cursor.empty ()) return invalid ("invalid bss size");
+      return DataInitializer (ZeroData{static_cast<std::size_t> ((size).value ())});
     }
     if (kind == "string") {
       auto literal = cursor.literal ();
-      if (!literal) return diagnose (literal.error ());
-      auto bytes = literal->get<std::string> ();
+      if (!(literal).has_value ()) return diagnose (literal.error ());
+      auto bytes = ir::detail::operand_access (((literal)).value ()).get<std::string> ();
       if (!bytes || !cursor.empty ()) return invalid ("string data requires one string");
       InitializedData data{Type (Type::Kind::U8), {}};
       for (unsigned char byte : *bytes) data.values.emplace_back (std::uint64_t (byte));
@@ -815,47 +829,49 @@ class Parser {
     }
     if (kind == "ref" || kind == "expr") {
       auto name = cursor.name ();
-      if (!name) return diagnose (name.error ());
-      auto symbol = module_->find_symbol (*name);
+      if (!(name).has_value ()) return diagnose (name.error ());
+      auto symbol = module_->find_symbol ((name).value ()).get ();
       if (!symbol) return invalid ("undefined data reference");
       if (kind == "expr") {
-        if (!cursor.empty () || !symbol->function ())
+        if (!cursor.empty () || !symbol->function ().get ())
           return invalid ("invalid expression initializer");
-        return DataInitializer (ExpressionData{symbol->function ()});
+        return DataInitializer (
+          ir::detail::NodeAccess::make_ExpressionData (symbol->function ().get ()));
       }
       auto comma = cursor.expect (Token::Kind::Comma, "expected reference displacement");
-      if (!comma) return diagnose (comma.error ());
+      if (!(comma).has_value ()) return diagnose (comma.error ());
       auto displacement = cursor.integer ();
-      if (!displacement) return diagnose (displacement.error ());
+      if (!(displacement).has_value ()) return diagnose (displacement.error ());
       if (!cursor.empty ()) return invalid ("extra reference operand");
-      return DataInitializer (SymbolReference{symbol, *displacement});
+      return DataInitializer (
+        ir::detail::NodeAccess::make_SymbolReference (symbol, (displacement).value ()));
     }
     if (kind == "lref") {
       auto name = cursor.name ();
-      if (!name) return diagnose (name.error ());
-      auto label = labels_.find (*name);
+      if (!(name).has_value ()) return diagnose (name.error ());
+      auto label = labels_.find ((name).value ());
       if (label == labels_.end ()) return invalid ("undefined label data reference");
-      LabelReference value{label->second};
+      LabelReference value = ir::detail::NodeAccess::make_LabelReference (label->second);
       if (!cursor.empty ()) {
         auto comma = cursor.expect (Token::Kind::Comma, "expected label reference comma");
-        if (!comma) return diagnose (comma.error ());
+        if (!(comma).has_value ()) return diagnose (comma.error ());
         if (cursor.peek () && cursor.peek ()->kind == Token::Kind::Name) {
           auto base_name = cursor.name ();
-          if (!base_name) return diagnose (base_name.error ());
-          auto base = labels_.find (*base_name);
+          if (!(base_name).has_value ()) return diagnose (base_name.error ());
+          auto base = labels_.find ((base_name).value ());
           if (base == labels_.end ()) return invalid ("undefined base label");
-          value.base = base->second;
+          ir::detail::NodeAccess::base (value) = base->second;
           if (!cursor.empty ()) {
             comma = cursor.expect (Token::Kind::Comma, "expected label displacement comma");
-            if (!comma) return diagnose (comma.error ());
+            if (!(comma).has_value ()) return diagnose (comma.error ());
             auto displacement = cursor.integer ();
-            if (!displacement) return diagnose (displacement.error ());
-            value.displacement = *displacement;
+            if (!(displacement).has_value ()) return diagnose (displacement.error ());
+            value.displacement = (displacement).value ();
           }
         } else {
           auto displacement = cursor.integer ();
-          if (!displacement) return diagnose (displacement.error ());
-          value.displacement = *displacement;
+          if (!(displacement).has_value ()) return diagnose (displacement.error ());
+          value.displacement = (displacement).value ();
         }
       }
       if (!cursor.empty ()) return invalid ("extra label reference operand");
@@ -866,11 +882,11 @@ class Parser {
     InitializedData value{*type, {}};
     while (!cursor.empty ()) {
       auto element = cursor.literal ();
-      if (!element) return diagnose (element.error ());
-      value.values.push_back (std::move (*element));
+      if (!(element).has_value ()) return diagnose (element.error ());
+      value.values.push_back (std::move ((element).value ()));
       if (cursor.empty ()) break;
       auto comma = cursor.expect (Token::Kind::Comma, "expected data comma");
-      if (!comma) return diagnose (comma.error ());
+      if (!(comma).has_value ()) return diagnose (comma.error ());
       if (cursor.empty ()) return invalid ("trailing data comma");
     }
     return DataInitializer (std::move (value));
@@ -878,13 +894,13 @@ class Parser {
 };
 class Formatter {
  public:
-  Result<std::string> run (const Context &context) {
+  Result<std::string> run (const Program &context) {
     auto valid = context.verify ();
-    if (!valid) return valid.error ();
+    if (!(valid).has_value ()) return valid.error ();
     out_.imbue (std::locale::classic ());
     for (auto &module : context.modules ()) {
       auto written = write_module (module);
-      if (!written) return written.error ();
+      if (!(written).has_value ()) return written.error ();
     }
     return out_.str ();
   }
@@ -926,7 +942,9 @@ class Formatter {
       auto type = signature.parameters[n];
       out_ << type_name (type) << ':';
       if (type.is_block ()) out_ << type.block_size () << '(';
-      out_ << (function ? registers_.at (function->arguments ()[n]) : ".arg" + std::to_string (n));
+      out_ << (function
+                 ? registers_.at (ir::detail::ReferenceAccess::pointers (function->arguments ())[n])
+                 : ".arg" + std::to_string (n));
       if (type.is_block ()) out_ << ')';
       comma = true;
     }
@@ -988,7 +1006,7 @@ class Formatter {
           out_ << labels_.at (value);
         else if constexpr (std::is_same_v<T, SymbolReference>) {
           if (value.displacement) return invalid ("symbol displacement was not materialized");
-          out_ << value.symbol->name ();
+          out_ << ir::detail::NodeAccess::symbol (value)->name ();
         } else if constexpr (std::is_same_v<T, std::string>)
           quoted (value);
         else if constexpr (std::is_floating_point_v<T>)
@@ -1001,16 +1019,19 @@ class Formatter {
           auto displacement = value.type.is_block ()
                                 ? static_cast<std::int64_t> (value.type.block_size ())
                                 : value.displacement;
-          if (displacement || (override_base.empty () && !value.base && !value.index))
+          if (displacement
+              || (override_base.empty () && !ir::detail::NodeAccess::base (value)
+                  && !ir::detail::NodeAccess::index (value)))
             out_ << displacement;
-          if (!override_base.empty () || value.base || value.index) {
+          if (!override_base.empty () || ir::detail::NodeAccess::base (value)
+              || ir::detail::NodeAccess::index (value)) {
             out_ << '(';
             if (!override_base.empty ())
               out_ << override_base;
-            else if (value.base)
-              out_ << registers_.at (value.base);
-            if (override_base.empty () && value.index) {
-              out_ << ", " << registers_.at (value.index);
+            else if (ir::detail::NodeAccess::base (value))
+              out_ << registers_.at (ir::detail::NodeAccess::base (value));
+            if (override_base.empty () && ir::detail::NodeAccess::index (value)) {
+              out_ << ", " << registers_.at (ir::detail::NodeAccess::index (value));
               if (value.scale != 1) out_ << ", " << value.scale;
             }
             out_ << ')';
@@ -1025,7 +1046,7 @@ class Formatter {
           out_ << value;
         return {};
       },
-      operand.storage ());
+      ir::detail::operand_access (operand).storage ());
   }
   Result<void> write_instruction (const Instruction &instruction) {
     auto found = address_temporaries_.find (&instruction);
@@ -1033,39 +1054,43 @@ class Formatter {
                          ? std::span<const AddressTemporary>{}
                          : std::span<const AddressTemporary> (found->second);
     for (auto &[n, name] : temporaries) {
-      if (auto ref = instruction.operands ()[n].get<SymbolReference> ()) {
-        out_ << "\tmov " << name << ", " << ref->symbol->name () << "\n\tadd " << name << ", "
-             << name << ", " << ref->displacement << '\n';
+      if (auto ref
+          = ir::detail::operand_access (instruction.operands ()[n]).get<SymbolReference> ()) {
+        out_ << "\tmov " << name << ", " << ir::detail::NodeAccess::symbol (*(ref))->name ()
+             << "\n\tadd " << name << ", " << name << ", " << ref->displacement << '\n';
       } else {
-        auto &memory = *instruction.operands ()[n].get<Memory> ();
+        auto &memory = *ir::detail::operand_access (instruction.operands ()[n]).get<Memory> ();
         out_ << "\tmov " << name << ", ";
-        if (memory.index)
-          out_ << registers_.at (memory.index);
+        if (ir::detail::NodeAccess::index (memory))
+          out_ << registers_.at (ir::detail::NodeAccess::index (memory));
         else
           out_ << '0';
         out_ << '\n';
-        if (memory.index && memory.scale != 1)
+        if (ir::detail::NodeAccess::index (memory) && memory.scale != 1)
           out_ << "\tmul " << name << ", " << name << ", " << memory.scale << '\n';
-        if (memory.base)
-          out_ << "\tadd " << name << ", " << name << ", " << registers_.at (memory.base) << '\n';
+        if (ir::detail::NodeAccess::base (memory))
+          out_ << "\tadd " << name << ", " << name << ", "
+               << registers_.at (ir::detail::NodeAccess::base (memory)) << '\n';
         out_ << "\tadd " << name << ", " << name << ", " << memory.displacement << '\n';
       }
     }
-    out_ << '\t' << instruction_descriptor (instruction.opcode ())->name;
+    out_ << '\t' << instruction_descriptor (instruction.opcode ()).get ()->name;
     for (std::size_t n = 0; n < instruction.operands ().size (); ++n) {
       out_ << (n ? ", " : " ");
       if (!temporaries.empty () && temporaries.front ().first == n) {
-        if (instruction.operands ()[n].get<Memory> ()) {
+        if (ir::detail::operand_access (instruction.operands ()[n]).get<Memory> ()) {
           auto written = operand (instruction.operands ()[n], temporaries.front ().second);
-          if (!written) return written;
+          if (!(written).has_value ()) return written;
         } else
           out_ << temporaries.front ().second;
         temporaries = temporaries.subspan (1);
-      } else if (!n && instruction_descriptor (instruction.opcode ())->count == OperandCount::Call)
+      } else if (!n
+                 && instruction_descriptor (instruction.opcode ()).get ()->count
+                      == OperandCount::Call)
         out_ << call_signatures_.at (&instruction);
       else {
         auto written = operand (instruction.operands ()[n]);
-        if (!written) return written;
+        if (!(written).has_value ()) return written;
       }
     }
     out_ << '\n';
@@ -1094,10 +1119,11 @@ class Formatter {
           for (auto &[n, name] : found->second) out_ << "\tlocal i64:" << name << '\n';
       }
     for (auto &block : function.blocks ()) {
-      for (auto label : block.labels ()) out_ << labels_.at (label) << ":\n";
+      for (auto label : ir::detail::ReferenceAccess::pointers (block.labels ()))
+        out_ << labels_.at (label) << ":\n";
       for (auto &instruction : block.instructions ()) {
         auto written = write_instruction (instruction);
-        if (!written) return written;
+        if (!(written).has_value ()) return written;
       }
     }
     out_ << "\tendfunc\n";
@@ -1119,18 +1145,20 @@ class Formatter {
           for (std::size_t n = 0; n < value.values.size (); ++n) {
             out_ << (n ? ", " : " ");
             auto written = operand (value.values[n]);
-            if (!written) return written;
+            if (!written.has_value ()) return written;
           }
         } else if constexpr (std::is_same_v<T, ZeroData>)
           out_ << "bss " << value.size;
         else if constexpr (std::is_same_v<T, SymbolReference>)
-          out_ << "ref " << value.symbol->name () << ", " << value.displacement;
+          out_ << "ref " << ir::detail::NodeAccess::symbol (value)->name () << ", "
+               << value.displacement;
         else if constexpr (std::is_same_v<T, LabelReference>) {
-          out_ << "lref " << labels_.at (value.label);
-          if (value.base) out_ << ", " << labels_.at (value.base);
+          out_ << "lref " << labels_.at (ir::detail::NodeAccess::label (value));
+          if (ir::detail::NodeAccess::base (value))
+            out_ << ", " << labels_.at (ir::detail::NodeAccess::base (value));
           out_ << ", " << value.displacement;
         } else
-          out_ << "expr " << value.function->symbol ().name ();
+          out_ << "expr " << ir::detail::NodeAccess::function (value)->symbol ().name ();
         out_ << '\n';
         return {};
       },
@@ -1158,13 +1186,13 @@ class Formatter {
     std::unordered_set<const Function *> expression_functions;
     for (auto &data : module.data ())
       if (auto expression = std::get_if<ExpressionData> (&data.initializer ()))
-        expression_functions.insert (expression->function);
+        expression_functions.insert (ir::detail::NodeAccess::function (*(expression)));
     std::vector<const Function *> function_order;
-    for (auto &item : module.items ())
+    for (auto &item : ir::detail::NodeAccess::items (module))
       if (auto function = std::get_if<const Function *> (&item);
           function && expression_functions.contains (*function))
         function_order.push_back (*function);
-    for (auto &item : module.items ())
+    for (auto &item : ir::detail::NodeAccess::items (module))
       if (auto function = std::get_if<const Function *> (&item);
           function && !expression_functions.contains (*function))
         function_order.push_back (*function);
@@ -1174,10 +1202,10 @@ class Formatter {
       std::size_t next_register = 0;
       for (auto &reg : function.registers ()) {
         auto name = std::string (reg.name ());
-        if (!identifier (name) || module.find_symbol (name) || local_names.contains (name)) {
+        if (!identifier (name) || module.find_symbol (name).get () || local_names.contains (name)) {
           do {
             name = ".r" + std::to_string (next_register++);
-          } while (module.find_symbol (name) || local_names.contains (name));
+          } while (module.find_symbol (name).get () || local_names.contains (name));
         }
         local_names.insert (name);
         names_.insert (name);
@@ -1192,10 +1220,11 @@ class Formatter {
             if (!names_.contains (name)) return name;
           }
         };
-        for (auto label : block.labels ()) labels_.emplace (label, label_name ());
+        for (auto label : ir::detail::ReferenceAccess::pointers (block.labels ()))
+          labels_.emplace (label, label_name ());
       }
     std::unordered_set<const Symbol *> visible_prototypes;
-    for (auto &item : module.items ()) {
+    for (auto &item : ir::detail::NodeAccess::items (module)) {
       if (auto symbol = std::get_if<const Symbol *> (&item);
           symbol && (*symbol)->kind () == Symbol::Kind::Prototype)
         visible_prototypes.insert (*symbol);
@@ -1204,18 +1233,21 @@ class Formatter {
           for (auto &instruction : block.instructions ()) {
             for (std::size_t n = 0; n < instruction.operands ().size (); ++n) {
               auto &value = instruction.operands ()[n];
-              if ((value.get<SymbolReference> () && value.get<SymbolReference> ()->displacement)
-                  || (value.get<Memory> () && value.get<Memory> ()->type.is_block ()
-                      && value.get<Memory> ()->displacement))
+              if ((ir::detail::operand_access (value).get<SymbolReference> ()
+                   && ir::detail::operand_access (value).get<SymbolReference> ()->displacement)
+                  || (ir::detail::operand_access (value).get<Memory> ()
+                      && ir::detail::operand_access (value).get<Memory> ()->type.is_block ()
+                      && ir::detail::operand_access (value).get<Memory> ()->displacement))
                 address_temporaries_[&instruction].emplace_back (n, fresh (".addr"));
             }
-            if (instruction_descriptor (instruction.opcode ())->count != OperandCount::Call)
+            if (instruction_descriptor (instruction.opcode ()).get ()->count != OperandCount::Call)
               continue;
-            auto symbol = instruction.operands ()[0].get<SymbolReference> ()->symbol;
+            auto symbol = ir::detail::NodeAccess::symbol (
+              *(ir::detail::operand_access (instruction.operands ()[0]).get<SymbolReference> ()));
             if (visible_prototypes.contains (symbol))
               call_signatures_.emplace (&instruction, std::string (symbol->name ()));
             else {
-              auto signature = symbol->signature ();
+              auto signature = symbol->signature ().get ();
               auto found = generated_signatures_.find (signature);
               if (found == generated_signatures_.end ()) {
                 found = generated_signatures_.emplace (signature, fresh (".sig")).first;
@@ -1241,10 +1273,10 @@ class Formatter {
     for (auto function : function_order)
       if (expression_functions.contains (function)) {
         auto written = write_function (*function);
-        if (!written) return written;
+        if (!(written).has_value ()) return written;
       }
     bool last_data = false, skipped_separator = false;
-    for (auto &item : module.items ()) {
+    for (auto &item : ir::detail::NodeAccess::items (module)) {
       if (std::holds_alternative<ForwardDeclaration> (item)
           || (std::holds_alternative<const Symbol *> (item)
               && std::get<const Symbol *> (item)->kind () == Symbol::Kind::Import)
@@ -1269,36 +1301,36 @@ class Formatter {
             return write_data (*value);
           else if constexpr (std::is_same_v<T, const Symbol *>) {
             out_ << value->name () << ": proto ";
-            write_signature (*value->signature ());
+            write_signature (value->signature ().value ());
           } else if constexpr (std::is_same_v<T, ExportDeclaration>)
-            out_ << "\texport " << value.symbol->name () << '\n';
+            out_ << "\texport " << ir::detail::NodeAccess::symbol (value)->name () << '\n';
           else
             return invalid ("unmaterialized module declaration");
           return {};
         },
         item);
-      if (!written) return written;
+      if (!(written).has_value ()) return written;
     }
     out_ << "\tendmodule\n";
     return {};
   }
 };
 }  // namespace
-Result<std::unique_ptr<ir::Context>> parse_text (std::string_view input, ParseOptions options) {
+Result<ir::Program> parse_text (std::string_view input, ParseOptions options) {
   auto tokens = Lexer (input, options).scan ();
-  if (!tokens) return tokens.error ();
-  return Parser (*tokens, options).run ();
+  if (!(tokens).has_value ()) return tokens.error ();
+  return Parser ((tokens).value (), options).run ();
 }
-Result<std::string> write_text (const ir::Context &context) {
+Result<std::string> write_text (const ir::Program &context) {
   for (auto &module : context.modules ())
     for (auto &function : module.functions ()) {
       auto phase = function.require_register_ir ();
-      if (!phase) return phase.error ();
+      if (!(phase).has_value ()) return phase.error ();
     }
   if (ir::needs_materialization (context)) {
     auto lowered = ir::materialize (context);
-    if (!lowered) return lowered.error ();
-    return Formatter ().run (**lowered);
+    if (!(lowered).has_value ()) return lowered.error ();
+    return Formatter ().run ((lowered).value ());
   }
   return Formatter ().run (context);
 }

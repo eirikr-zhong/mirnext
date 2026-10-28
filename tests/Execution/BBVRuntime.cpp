@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Owning BBV compilation and publication. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/CodeGen/Access.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/Execution/detail/BBVRuntime.hpp"
@@ -19,44 +21,48 @@ using Runtime = execution::detail::BBVRuntime;
 using Options = execution::detail::BBVRuntimeOptions;
 auto host () {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  return *target;
+  REQUIRE ((target).has_value ());
+  return (target).value ();
 }
 // Unexpected failure while executing a success-only test must not RET from an
 // arbitrary frame. Actual failure-path tests below use direct checked compile.
 [[noreturn]] void unexpected_failure () { std::abort (); }
 BBVProgram prepare (std::string_view text, unsigned level = 0) {
   auto source = serialization::parse_text (text);
-  INFO ((source ? "" : source.error ().message));
-  REQUIRE (source);
+  INFO (((source).has_value () ? "" : source.error ().message));
+  REQUIRE ((source).has_value ());
   auto optimized
-    = transforms::optimize (**source,
+    = transforms::optimize ((source).value (),
                             {.level = static_cast<transforms::OptimizationLevel> (level)});
-  REQUIRE (optimized);
-  auto preparation
-    = BBVPreparation::prepare (*optimized->context ().modules ().begin ()->functions ().begin (),
-                               host (), {.optimization_level = level});
-  INFO ((preparation ? "" : preparation.error ().message));
-  REQUIRE (preparation);
-  auto program = BBVProgram::create (std::move (*preparation));
-  REQUIRE (program);
-  return std::move (*program);
+  REQUIRE ((optimized).has_value ());
+  auto preparation = BBVPreparation::prepare (*optimized.value ()
+                                                 .program ()
+                                                 .modules ()
+                                                 .begin ()
+                                                 ->functions ()
+                                                 .begin (),
+                                              host (), {.optimization_level = level});
+  INFO (((preparation).has_value () ? "" : preparation.error ().message));
+  REQUIRE ((preparation).has_value ());
+  auto program = BBVProgram::create (std::move ((preparation).value ()));
+  REQUIRE ((program).has_value ());
+  return std::move ((program).value ());
 }
 std::unique_ptr<Runtime> runtime (std::string_view text, unsigned level = 0, Options options = {}) {
   if (!options.code_capacity) options.code_capacity = 1024 * 1024;
   if (!options.failure_continuation)
     options.failure_continuation = reinterpret_cast<std::uintptr_t> (&unexpected_failure);
   auto result = Runtime::create (prepare (text, level), std::move (options));
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 std::int64_t call (Runtime &r, std::int64_t argument) {
   ExecutionInvocation invocation;
   auto value = reinterpret_cast<std::int64_t (*) (std::int64_t)> (r.entry_address ()) (argument);
   auto status = invocation.status ();
-  INFO ((status ? "" : status.error ().message));
-  REQUIRE (status);
+  INFO (((status).has_value () ? "" : status.error ().message));
+  REQUIRE ((status).has_value ());
   return value;
 }
 const MachineLabel &label (Runtime &r, std::string_view name) {
@@ -70,17 +76,19 @@ const BBVVersion &symbol_version (Runtime &r, std::string_view name) {
   // Some ABIs put argument moves in a separate entry block. Compile those
   // predecessors before testing a failure in the symbol-bearing body block.
   for (std::size_t n = 0; n < r.statistics ().blocks; ++n) {
-    for (auto instruction : version->block ().instructions ())
+    for (auto instruction :
+         mirnext::ir::detail::ReferenceAccess::pointers (version->block ().instructions ()))
       for (auto &operand : instruction->operands ())
-        if (auto symbol = operand.get<MachineSymbolReference> ();
-            symbol && symbol->symbol->name == name)
+        if (auto symbol
+            = mirnext::codegen::detail::operand_access (operand).get<MachineSymbolReference> ();
+            symbol && mirnext::codegen::detail::NodeAccess::symbol (*(symbol))->name == name)
           return *version;
-    REQUIRE (r.compile (version->id ()));
-    REQUIRE (version->specialization ());
-    auto successors = version->specialization ()->successors ();
+    REQUIRE ((r.compile (version->id ())).has_value ());
+    REQUIRE ((version->specialization ()).has_value ());
+    auto successors = version->specialization ().get ()->successors ();
     REQUIRE (successors.size () == 1);
     REQUIRE (successors.front ().kind == BBVSuccessor::Kind::Fallthrough);
-    version = successors.front ().version;
+    version = mirnext::codegen::detail::NodeAccess::version (successors.front ());
   }
   FAIL ("missing straight-line fixture symbol");
   return r.entry_version ();
@@ -116,7 +124,7 @@ struct Provider final : CodeMemoryProvider {
     if (++flushes == fail_flush)
       return Error{ErrorCode::InvalidArgument, "injected BBV flush failure"};
     auto result = native->flush (m);
-    if (result) published.push_back (m);
+    if ((result).has_value ()) published.push_back (m);
     return result;
   }
 };
@@ -138,7 +146,7 @@ TEST_CASE (
                       {.memory_provider = provider,
                        .observe = [&] (auto &v, auto &artifact) -> Result<void> {
                          CHECK (observed.insert (v.id ().index ()).second);
-                         CHECK (artifact.verify ());
+                         CHECK (artifact.verify ().has_value ());
                          return {};
                        }});
     auto entry = r->entry_address ();
@@ -171,7 +179,7 @@ TEST_CASE (
     CHECK (r->entry_address () == entry);
     CHECK (r->artifact (r->entry_version ().id ()) == artifact);
     CHECK (std::equal (gate.begin (), gate.end (), reinterpret_cast<const std::uint8_t *> (entry)));
-    REQUIRE (r->compile (r->entry_version ().id ()));
+    REQUIRE ((r->compile (r->entry_version ().id ())).has_value ());
     CHECK (r->statistics ().compilation_attempts == compiled);
     auto saved = std::move (r);
     CHECK (call (*saved, 3) == 44);
@@ -199,18 +207,18 @@ TEST_CASE (
     CHECK (call (*s, 2) == 11);
     auto p = runtime (indirect, level);
     auto root = p->label_address (label (*p, "target"));
-    REQUIRE (root);
+    REQUIRE ((root).has_value ());
     CHECK (p->statistics ().compiled_blocks == 0);
     for (auto n : {0, 1, 42, -1}) {
       CHECK (call (*p, n) == n);
-      CHECK (*p->label_address (label (*p, "target")) == *root);
+      CHECK ((p->label_address (label (*p, "target"))).value () == (root).value ());
     }
     auto id = p->entry_version ().id ();
     auto foreign = r->address (id);
-    REQUIRE_FALSE (foreign);
-    CHECK_FALSE (r->compile (id));
+    REQUIRE_FALSE ((foreign).has_value ());
+    CHECK_FALSE ((r->compile (id)).has_value ());
     CHECK_FALSE (r->artifact (id));
-    CHECK_FALSE (r->label_address (label (*p, "target")));
+    CHECK_FALSE ((r->label_address (label (*p, "target"))).has_value ());
   }
 }
 TEST_CASE (
@@ -233,10 +241,10 @@ TEST_CASE (
       CHECK (r->statistics ().compiled_blocks < r->statistics ().blocks);
       auto data_root = runtime (text, level);
       auto root = data_root->label_address (label (*data_root, "join"));
-      REQUIRE (root);
+      REQUIRE ((root).has_value ());
       CHECK (call (*data_root, 0) == 29);
       CHECK (call (*data_root, 1) == 29);
-      CHECK (*data_root->label_address (label (*data_root, "join")) == *root);
+      CHECK ((data_root->label_address (label (*data_root, "join"))).value () == (root).value ());
     }
 }
 TEST_CASE (
@@ -249,7 +257,7 @@ TEST_CASE (
                     {.observe = [&] (auto &v, auto &) -> Result<void> {
                       ++observations;
                       auto nested = active->compile (v.id ());
-                      CHECK_FALSE (nested);
+                      CHECK_FALSE (nested.has_value ());
                       CHECK (nested.error ().message.find ("recursive") != std::string::npos);
                       if (fail) return Error{ErrorCode::InvalidArgument, "observer rejected block"};
                       return {};
@@ -258,7 +266,7 @@ TEST_CASE (
   auto id = r->entry_version ().id ();
   auto entry = r->entry_address (), remaining = r->remaining_code_bytes ();
   auto first = r->compile (id);
-  REQUIRE_FALSE (first);
+  REQUIRE_FALSE ((first).has_value ());
   CHECK (first.error ().message.find ("/bbv-observe #") != std::string::npos);
   CHECK (first.error ().message.find ("observer rejected") != std::string::npos);
   CHECK (r->entry_address () == entry);
@@ -266,7 +274,7 @@ TEST_CASE (
   CHECK_FALSE (r->artifact (id));
   CHECK (r->statistics ().compiled_blocks == 0);
   fail = false;
-  REQUIRE (r->compile (id));
+  REQUIRE ((r->compile (id)).has_value ());
   CHECK (observations == 2);
   CHECK (r->statistics ().compiled_blocks == 1);
   CHECK (r->statistics ().compilation_attempts == 2);
@@ -281,30 +289,30 @@ TEST_CASE (
   auto symbols = runtime (
     "m:module\nf:func i64,i64:x\nlocal i64:r\nmov r,data\nret r\nendfunc\ndata:bss 8\nendmodule\n",
     0, {.resolve = [&] (auto &request) -> Result<std::uint64_t> {
-      REQUIRE (request.symbol);
-      CHECK (request.symbol->name == "data");
+      REQUIRE (request.symbol ().has_value ());
+      CHECK (request.symbol ().value ().name == "data");
       if (!known) return Error{ErrorCode::UnknownName, "unresolved test symbol"};
       return value;
     }});
   auto symbol_id = symbol_version (*symbols, "data").id ();
   auto gate = symbols->address (symbol_id);
-  REQUIRE (gate);
+  REQUIRE ((gate).has_value ());
   auto compiled = symbols->statistics ().compiled_blocks,
        attempts = symbols->statistics ().compilation_attempts;
   auto failed = symbols->compile (symbol_id);
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().code == ErrorCode::UnknownName);
   CHECK (failed.error ().message.find ("unresolved test symbol") != std::string::npos);
   CHECK_FALSE (symbols->artifact (symbol_id));
   CHECK (symbols->statistics ().compiled_blocks == compiled);
   CHECK (symbols->statistics ().compilation_attempts == attempts + 1);
-  CHECK (*symbols->address (symbol_id) == *gate);
+  CHECK ((symbols->address (symbol_id)).value () == (gate).value ());
   known = true;
   CHECK (call (*symbols, 0) == 1234);
   CHECK (symbols->artifact (symbol_id));
   CHECK (symbols->statistics ().compiled_blocks == compiled + 1);
   CHECK (symbols->statistics ().compilation_attempts == attempts + 2);
-  CHECK (*symbols->address (symbol_id) == *gate);
+  CHECK ((symbols->address (symbol_id)).value () == (gate).value ());
   CHECK (symbols->statistics ().compiled_blocks == symbols->statistics ().blocks);
   CHECK (symbols->statistics ().compilation_attempts == symbols->statistics ().blocks + 1);
   CHECK (call (*symbols, 0) == 1234);
@@ -324,12 +332,12 @@ TEST_CASE (
     else
       provider->fail_flush = provider->flushes + 1;
     auto first = r->compile (r->entry_version ().id ());
-    REQUIRE_FALSE (first);
+    REQUIRE_FALSE ((first).has_value ());
     CHECK (first.error ().message.find ("/bbv-publish #") != std::string::npos);
     auto after = r->remaining_code_bytes ();
     CHECK (before - after == provider->page_size ());
     CHECK_FALSE (r->artifact (r->entry_version ().id ()));
-    REQUIRE (r->compile (r->entry_version ().id ()));
+    REQUIRE ((r->compile (r->entry_version ().id ())).has_value ());
     CHECK (r->remaining_code_bytes () == after);
     CHECK (provider->allocations == 1);
     CHECK (provider->written[1].data == provider->written[2].data);
@@ -351,22 +359,22 @@ TEST_CASE (
                   .memory_provider = provider};
   auto r = Runtime::create (prepare ("m:module\nf:func i64,i64:x\nret x\nendfunc\nendmodule\n"),
                             options);
-  REQUIRE (r);
-  auto failed = (*r)->compile ((*r)->entry_version ().id ());
-  REQUIRE_FALSE (failed);
+  REQUIRE ((r).has_value ());
+  auto failed = ((r).value ())->compile (((r).value ())->entry_version ().id ());
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("capacity exhausted") != std::string::npos);
-  CHECK ((*r)->statistics ().compiled_blocks == 0);
-  CHECK ((*r)->statistics ().code_batches == 1);
-  CHECK ((*r)->remaining_code_bytes () == 0);
-  failed = (*r)->compile ((*r)->entry_version ().id ());
-  REQUIRE_FALSE (failed);
+  CHECK (((r).value ())->statistics ().compiled_blocks == 0);
+  CHECK (((r).value ())->statistics ().code_batches == 1);
+  CHECK (((r).value ())->remaining_code_bytes () == 0);
+  failed = ((r).value ())->compile (((r).value ())->entry_version ().id ());
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (provider->allocations == 1);
   options.failure_continuation = 0;
-  CHECK_FALSE (Runtime::create (prepare (loop), options));
+  CHECK_FALSE ((Runtime::create (prepare (loop), options)).has_value ());
   CHECK (provider->allocations == 1);
   options.failure_continuation = reinterpret_cast<std::uintptr_t> (&unexpected_failure);
   options.code_capacity = 0;
-  CHECK_FALSE (Runtime::create (prepare (loop), options));
+  CHECK_FALSE ((Runtime::create (prepare (loop), options)).has_value ());
   CHECK (provider->allocations == 1);
 }
 TEST_CASE (
@@ -381,21 +389,21 @@ TEST_CASE (
       auto optimized
         = transforms::optimize (*source,
                                 {.level = static_cast<transforms::OptimizationLevel> (level)});
-      REQUIRE (optimized);
-      auto p = BBVPreparation::prepare (*optimized->find_function ("calls", "sum"), host (),
-                                        {.optimization_level = level});
+      REQUIRE ((optimized).has_value ());
+      auto p = BBVPreparation::prepare (*optimized.value ().find_function ("calls", "sum").get (),
+                                        host (), {.optimization_level = level});
       if (host ().abi () == target::ABI::X86Windows && kind == test::CallExample::MultipleResults) {
-        REQUIRE_FALSE (p);
+        REQUIRE_FALSE ((p).has_value ());
         CHECK (p.error ().message.find ("Windows does not support multiple return values")
                != std::string::npos);
         continue;
       }
-      REQUIRE (p);
-      auto program = BBVProgram::create (std::move (*p));
-      REQUIRE (program);
+      REQUIRE ((p).has_value ());
+      auto program = BBVProgram::create (std::move ((p).value ()));
+      REQUIRE ((program).has_value ());
       source.reset ();
       optimized = Error{ErrorCode::InvalidArgument, "source owner deliberately destroyed"};
-      auto r = Runtime::create (std::move (*program),
+      auto r = Runtime::create (std::move ((program).value ()),
                                 {.code_capacity = 1024 * 1024,
                                  .failure_continuation
                                  = reinterpret_cast<std::uintptr_t> (&unexpected_failure),
@@ -404,12 +412,12 @@ TEST_CASE (
                                      return Error{ErrorCode::UnknownName,
                                                   "unexpected symbol in BBV ABI fixture"};
                                    auto address = builtin_address (*request.builtin);
-                                   if (!address) return address.error ();
-                                   return *address;
+                                   if (!address.has_value ()) return address.error ();
+                                   return address.value ();
                                  }});
-      REQUIRE (r);
+      REQUIRE ((r).has_value ());
       execution::detail::NativeCalls adapter ({});
-      auto &signature = (*r)->program ().preparation ().function ().signature ();
+      auto &signature = ((r).value ())->program ().preparation ().function ().signature ();
       std::array<std::int64_t, 2> bytes{20, 22};
       std::vector<ExecutionArgument> args;
       if (kind == test::CallExample::Block)
@@ -426,22 +434,23 @@ TEST_CASE (
         args.emplace_back (22);
       }
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
-        auto values = adapter.call ((*r)->entry_address (), signature, args);
-        INFO ((values ? "" : values.error ().message));
-        REQUIRE (values);
+        auto values = adapter.call (((r).value ())->entry_address (), signature, args);
+        INFO (((values).has_value () ? "" : values.error ().message));
+        REQUIRE ((values).has_value ());
         if (kind == test::CallExample::ReturnBlock) {
-          CHECK (values->empty ());
+          CHECK (values.value ().empty ());
           CHECK (bytes[0] == 42);
         } else if (kind == test::CallExample::MultipleResults) {
-          REQUIRE (values->size () == 2);
-          CHECK (*(*values)[0].as_i64 () == 20);
-          CHECK (*(*values)[1].as_i64 () == 22);
+          REQUIRE (values.value ().size () == 2);
+          CHECK ((((values).value ())[0].as_i64 ()).value () == 20);
+          CHECK ((((values).value ())[1].as_i64 ()).value () == 22);
         } else {
-          REQUIRE (values->size () == 1);
-          CHECK (*(*values)[0].as_i64 () == 42);
+          REQUIRE (values.value ().size () == 1);
+          CHECK ((((values).value ())[0].as_i64 ()).value () == 42);
         }
       }
-      CHECK ((*r)->statistics ().compiled_blocks == (*r)->statistics ().compilation_attempts);
+      CHECK (((r).value ())->statistics ().compiled_blocks
+             == ((r).value ())->statistics ().compilation_attempts);
       CHECK (adapter.size () == 1);
     }
 }

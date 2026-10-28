@@ -1,3 +1,4 @@
+#include "mirnext/CodeGen/Access.hpp"
 /* Rules derived from MIR, Copyright (C) 2020-2024 Vladimir Makarov.
    Licensed under the MIT License. No runtime addresses are folded here. */
 #include "mirnext/CodeGen/Lowering.hpp"
@@ -276,11 +277,13 @@ consteval EncodingTable compile_encoding () {
 constexpr auto encoding = compile_encoding ();
 static_assert (encoding.valid, "unsupported AArch64 encoding recipe");
 bool is_register (const MachineOperand &o) {
-  return o.get<const MachineVirtualRegister *> () || o.get<target::PhysicalRegister> ();
+  return detail::operand_access (o).get<const MachineVirtualRegister *> ()
+         || detail::operand_access (o).get<target::PhysicalRegister> ();
 }
 std::optional<std::uint64_t> integer (const MachineOperand &o) {
-  if (auto v = o.get<std::uint64_t> ()) return *v;
-  if (auto v = o.get<std::int64_t> ()) return static_cast<std::uint64_t> (*v);
+  if (auto v = detail::operand_access (o).get<std::uint64_t> ()) return *v;
+  if (auto v = detail::operand_access (o).get<std::int64_t> ())
+    return static_cast<std::uint64_t> (*v);
   return {};
 }
 bool add_immediate (std::uint64_t v) { return v < 4096 || (!(v & 4095) && (v >> 12) < 4096); }
@@ -290,12 +293,12 @@ bool token_match (Constraint token, const MachineOperand &o) {
   case C::Any: return true;
   case C::Register: return is_register (o);
   case C::Physical: {
-    auto p = o.get<target::PhysicalRegister> ();
+    auto p = detail::operand_access (o).get<target::PhysicalRegister> ();
     return p && p->encoding () == token.parameter;
   }
   case C::IndexedMemory:
   case C::DisplacedMemory: {
-    auto memory = o.get<MachineMemory> ();
+    auto memory = detail::operand_access (o).get<MachineMemory> ();
     if (!memory) return false;
     if (!(token.type_mask & type_bit (memory->type.kind ()))) return false;
     auto scale = token.parameter;
@@ -306,11 +309,11 @@ bool token_match (Constraint token, const MachineOperand &o) {
            && memory->displacement / scale < 4096;
   }
   case C::FloatZero: {
-    auto v = o.get<float> ();
+    auto v = detail::operand_access (o).get<float> ();
     return v && *v == 0.0f;
   }
   case C::DoubleZero: {
-    auto v = o.get<double> ();
+    auto v = detail::operand_access (o).get<double> ();
     return v && *v == 0.0;
   }
   case C::WideImmediate:
@@ -319,7 +322,8 @@ bool token_match (Constraint token, const MachineOperand &o) {
     // An unresolved relocation must reserve the complete four-chunk move.
     if (!v)
       return token.kind == C::WideImmediate && token.parameter == 4
-             && (o.get<MachineSymbolReference> () || o.get<BuiltinReference> ());
+             && (detail::operand_access (o).get<MachineSymbolReference> ()
+                 || detail::operand_access (o).get<BuiltinReference> ());
     auto bits = token.kind == C::InvertedImmediate ? ~*v : *v;
     unsigned chunks = 0;
     for (unsigned n = 0; n < 4; ++n) chunks += ((bits >> (16 * n)) & 65535) != 0;
@@ -334,10 +338,11 @@ bool token_match (Constraint token, const MachineOperand &o) {
     auto v = integer (o);
     return v && *v < token.parameter;
   }
-  case C::Label: return o.get<const MachineLabel *> ();
+  case C::Label: return detail::operand_access (o).get<const MachineLabel *> ();
   case C::LabelOrSymbol:
-    return o.get<const MachineLabel *> () || o.get<MachineSymbolReference> ()
-           || o.get<BuiltinReference> ();
+    return detail::operand_access (o).get<const MachineLabel *> ()
+           || detail::operand_access (o).get<MachineSymbolReference> ()
+           || detail::operand_access (o).get<BuiltinReference> ();
   case C::Invalid: break;
   }
   return false;

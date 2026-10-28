@@ -1,3 +1,6 @@
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* Target rules derived from MIR, Copyright (C) 2020-2024 Vladimir Makarov.
    Licensed under the MIT License. Direct lowering of block-owned machine IR. */
 #include "mirnext/CodeGen/Lowering.hpp"
@@ -13,11 +16,13 @@ using Kind = Type::Kind;
 using Operand = MachineOperand;
 using Instruction = MachineInstruction;
 bool is_register (const Operand &o) {
-  return o.get<const MachineVirtualRegister *> () || o.get<target::PhysicalRegister> ();
+  return detail::operand_access (o).get<const MachineVirtualRegister *> ()
+         || detail::operand_access (o).get<target::PhysicalRegister> ();
 }
 std::optional<MachineRegister> register_value (const Operand &o) {
-  if (auto v = o.get<const MachineVirtualRegister *> ()) return *v;
-  if (auto p = o.get<target::PhysicalRegister> ()) return *p;
+  if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+    return detail::NodeAccess::make_MachineRegister (*v);
+  if (auto p = detail::operand_access (o).get<target::PhysicalRegister> ()) return *p;
   return {};
 }
 Opcode move (Type t) {
@@ -118,37 +123,41 @@ class AArch64Lowering {
                       + std::string (f.target ().name ()) + ", machinize]: " + std::move (reason)};
   }
   void checked (Result<void> result) {
-    if (!result && !error) fail (result.error ().message);
+    if (!(result).has_value () && !error) fail (result.error ().message);
   }
-  Operand physical (unsigned n) { return Operand (f.target ().registers ()[n].reg); }
+  Operand physical (unsigned n) {
+    return detail::NodeAccess::make_MachineOperand (f.target ().registers ()[n].reg);
+  }
   MachineRegister physical_register (unsigned n) { return f.target ().registers ()[n].reg; }
-  Operand integer (std::size_t n) { return Operand (static_cast<std::int64_t> (n)); }
+  Operand integer (std::size_t n) {
+    return detail::NodeAccess::make_MachineOperand (static_cast<std::int64_t> (n));
+  }
   Operand temporary (Type t = Type::i64 ()) {
-    if (error) return Operand (std::int64_t (0));
-    auto reg = f.create_register (t);
-    if (!reg) {
+    if (error) return detail::NodeAccess::make_MachineOperand (std::int64_t (0));
+    auto reg = detail::access (f).create_register (t);
+    if (!(reg).has_value ()) {
       fail (reg.error ().message);
-      return Operand (std::int64_t (0));
+      return detail::NodeAccess::make_MachineOperand (std::int64_t (0));
     }
-    return Operand (**reg);
+    return detail::NodeAccess::make_MachineOperand ((reg).value ());
   }
   Instruction *before (Instruction &at, Opcode code, std::vector<Operand> operands) {
     if (error) return &at;
     auto result = rw.insert_before (at, code, std::move (operands));
-    if (!result) {
+    if (!(result).has_value ()) {
       fail (result.error ().message);
       return &at;
     }
-    return *result;
+    return &(result).value ();
   }
   Instruction *after (Instruction &at, Opcode code, std::vector<Operand> operands) {
     if (error) return &at;
     auto result = rw.insert_after (at, code, std::move (operands));
-    if (!result) {
+    if (!(result).has_value ()) {
       fail (result.error ().message);
       return &at;
     }
-    return *result;
+    return &(result).value ();
   }
   void replace (Instruction &at, Opcode code, std::vector<Operand> operands) {
     if (!error) checked (rw.replace (at, code, std::move (operands)));
@@ -158,13 +167,14 @@ class AArch64Lowering {
   }
   Operand memory (Type t, std::int64_t offset, MachineRegister base,
                   std::optional<MachineRegister> index = {}) {
-    return Operand (MachineMemory{t, base, index, offset, 1, {}, {}});
+    return detail::NodeAccess::make_MachineOperand (
+      detail::NodeAccess::make_MachineMemory (t, base, index, offset, 1, {}, {}));
   }
   Operand memory (Type t, std::int64_t offset, const Operand &base) {
     auto reg = register_value (base);
     if (!reg) {
       fail ("memory base must be a register");
-      return Operand (std::int64_t (0));
+      return detail::NodeAccess::make_MachineOperand (std::int64_t (0));
     }
     return memory (t, offset, *reg);
   }
@@ -193,8 +203,10 @@ Operand AArch64Lowering::address_memory (Instruction &at, Type t, std::int64_t o
   if (offset >= 0 && offset % scale == 0 && static_cast<std::uint64_t> (offset) / scale < 4096)
     return memory (t, offset, base);
   auto temp = hard ? physical (10) : temporary ();
-  before (at, Opcode::Mov, {temp, Operand (offset)});
-  auto operand = std::visit ([] (auto value) { return Operand (value); }, base);
+  before (at, Opcode::Mov, {temp, detail::NodeAccess::make_MachineOperand (offset)});
+  auto operand
+    = std::visit ([] (auto value) { return detail::NodeAccess::make_MachineOperand (value); },
+                  detail::NodeAccess::storage (base));
   before (at, Opcode::Add, {temp, temp, operand});
   return memory (t, 0, temp);
 }
@@ -209,18 +221,18 @@ std::optional<unsigned> AArch64Lowering::argument_register (Type type, std::size
 }
 const MachineSymbol *AArch64Lowering::prototype (const BuiltinDescription &b) {
   // Builtins inhabit an owned namespace separate from user module identities.
-  auto p = f.intern_symbol ({"$builtin",
-                             std::string (b.name) + ".p",
-                             MachineSymbol::Kind::BuiltinPrototype,
-                             b.signature,
-                             false,
-                             {},
-                             b.id});
-  if (!p) {
+  auto p = detail::access (f).intern_symbol ({"$builtin",
+                                              std::string (b.name) + ".p",
+                                              MachineSymbol::Kind::BuiltinPrototype,
+                                              b.signature,
+                                              false,
+                                              {},
+                                              b.id});
+  if (!(p).has_value ()) {
     fail (p.error ().message);
     return nullptr;
   }
-  return *p;
+  return &(p).value ();
 }
 void AArch64Lowering::copy_block (Instruction &at, std::size_t to, unsigned to_base,
                                   std::size_t from, MachineRegister from_base, std::size_t words,
@@ -245,15 +257,19 @@ void AArch64Lowering::copy_block (Instruction &at, std::size_t to, unsigned to_b
   auto proto = prototype (b);
   if (!proto) return;
   auto callee = temporary ();
-  before (at, Opcode::Mov, {callee, Operand (BuiltinReference{b.id})});
+  before (at, Opcode::Mov,
+          {callee, detail::NodeAccess::make_MachineOperand (BuiltinReference{b.id})});
   before (at, Opcode::Add, {physical (0), physical (to_base), integer (to)});
   before (at, Opcode::Add,
-          {physical (1), std::visit ([] (auto value) { return Operand (value); }, from_base),
+          {physical (1),
+           std::visit ([] (auto value) { return detail::NodeAccess::make_MachineOperand (value); },
+                       detail::NodeAccess::storage (from_base)),
            integer (from)});
   before (at, Opcode::Mov, {physical (2), integer (words)});
   auto call = before (at, Opcode::Call,
-                      {Operand (MachineSymbolReference{proto}), callee, physical (0), physical (1),
-                       physical (2)});
+                      {detail::NodeAccess::make_MachineOperand (
+                         detail::NodeAccess::make_MachineSymbolReference (proto)),
+                       callee, physical (0), physical (1), physical (2)});
   if (!error)
     checked (
       rw.lower_call (*call, Opcode::Call,
@@ -266,9 +282,11 @@ void AArch64Lowering::parameters (Instruction &at) {
   auto &area = std::get<MachineFunctionState::AArch64> (state.target).aggregate_save_bytes;
   area = 0;
   state.has_block_arguments = false;
-  for (std::size_t i = 0; i < f.arguments ().size () && !error; ++i) {
+  for (std::size_t i = 0;
+       i < ir::detail::ReferenceAccess::pointers (f.arguments ()).size () && !error; ++i) {
     auto type = f.signature ().parameters[i];
-    auto arg = Operand (*f.arguments ()[i]);
+    auto arg = detail::NodeAccess::make_MachineOperand (
+      *ir::detail::ReferenceAccess::pointers (f.arguments ())[i]);
     if (type.kind () == Kind::ReturnBlock && !i) {
       before (at, Opcode::Mov, {arg, physical (8)});
       continue;
@@ -314,11 +332,12 @@ void AArch64Lowering::parameters (Instruction &at) {
 Type AArch64Lowering::argument_type (const ir::Signature &s, std::size_t position,
                                      const Operand &o) {
   if (position < s.parameters.size ()) return s.parameters[position];
-  if (auto mem = o.get<MachineMemory> ()) return mem->type;
-  if (auto v = o.get<const MachineVirtualRegister *> ()) return (*v)->type ();
-  if (o.get<double> ()) return Type (Kind::F64);
-  if (o.get<long double> ()) return Type (Kind::LongDouble);
-  if (o.get<float> ()) return Type (Kind::F32);
+  if (auto mem = detail::operand_access (o).get<MachineMemory> ()) return mem->type;
+  if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+    return (*v)->type ();
+  if (detail::operand_access (o).get<double> ()) return Type (Kind::F64);
+  if (detail::operand_access (o).get<long double> ()) return Type (Kind::LongDouble);
+  if (detail::operand_access (o).get<float> ()) return Type (Kind::F32);
   return Type::i64 ();
 }
 void AArch64Lowering::check_call_area (const ir::Signature &s, std::span<const Operand> args) {
@@ -384,17 +403,19 @@ void AArch64Lowering::check_call_area (const ir::Signature &s, std::span<const O
 }
 void AArch64Lowering::lower_call (Instruction &at) {
   auto ops = std::vector<Operand> (at.operands ().begin (), at.operands ().end ());
-  const auto signature = *ops[0].get<MachineSymbolReference> ()->symbol->signature;
+  const auto signature = *detail::NodeAccess::symbol (
+                            *(detail::operand_access (ops[0]).get<MachineSymbolReference> ()))
+                            ->signature;
   const auto start = 2 + signature.results.size ();
   auto code = std::get<Opcode> (at.opcode ());
   if (code == Opcode::Inline) code = Opcode::Call;
   // Capture the original predecessor before inserting callee/argument moves.
   auto predecessor = rw.previous (at);
-  if (!predecessor) {
+  if (!(predecessor).has_value ()) {
     fail (predecessor.error ().message);
     return;
   }
-  Instruction *previous = *predecessor;
+  Instruction *previous = predecessor.value ().get ();
   Instruction *prefix = previous;
   auto prefix_insert = [&] (Opcode op, std::vector<Operand> values) {
     if (prefix)
@@ -438,10 +459,12 @@ void AArch64Lowering::lower_call (Instruction &at) {
       arg = temporary ();
       ops[i] = arg;
     }
-    auto mem = arg.get<MachineMemory> ();
+    auto mem = detail::operand_access (arg).get<MachineMemory> ();
     if (type.kind () == Kind::ReturnBlock && i == start) {
       before (at, Opcode::Mov,
-              {physical (8), std::visit ([] (auto r) { return Operand (r); }, *mem->base)});
+              {physical (8),
+               std::visit ([] (auto r) { return detail::NodeAccess::make_MachineOperand (r); },
+                           detail::NodeAccess::storage (*mem->base))});
       ops[i] = physical (8);
       continue;
     }
@@ -452,8 +475,9 @@ void AArch64Lowering::lower_call (Instruction &at) {
         if (ints + words <= 8) {
           ops[i]
             = memory (Type (Kind::Undef), 0, physical_register (ints),
-                      words < 2 ? std::nullopt
-                                : std::optional<MachineRegister> (physical_register (ints + 1)));
+                      words < 2
+                        ? std::nullopt
+                        : detail::NodeAccess::optional_register (physical_register (ints + 1)));
           if (words) before (at, Opcode::Mov, {physical (ints++), memory (Type::i64 (), 0, base)});
           if (words == 2)
             before (at, Opcode::Mov, {physical (ints++), memory (Type::i64 (), 8, base)});
@@ -472,11 +496,11 @@ void AArch64Lowering::lower_call (Instruction &at) {
       // instruction after this address computation, ahead of argument moves.
       auto added = prefix_insert (Opcode::Add, {arg, physical (31), integer (block)});
       auto next = rw.next (*added);
-      if (!next) {
+      if (!(next).has_value ()) {
         fail (next.error ().message);
         return;
       }
-      if (*next) prefix = *next;
+      if (next.value ().has_value ()) prefix = next.value ().get ();
       block += words * 8;
     }
     auto reg = argument_register (type, ints, floats);
@@ -484,7 +508,8 @@ void AArch64Lowering::lower_call (Instruction &at) {
       if (original) before (at, *ext, {arg, *original});
       auto source = arg;
       if (type.kind () == Kind::ReturnBlock)
-        source = std::visit ([] (auto r) { return Operand (r); }, *mem->base);
+        source = std::visit ([] (auto r) { return detail::NodeAccess::make_MachineOperand (r); },
+                             detail::NodeAccess::storage (*mem->base));
       before (at, move (type), {physical (*reg), source});
       ops[i] = type.kind () == Kind::ReturnBlock
                  ? memory (type, type.block_size (), physical_register (*reg))
@@ -502,9 +527,11 @@ void AArch64Lowering::lower_call (Instruction &at) {
         destination = memory (mem_type, 0, physical_register (10));
       }
       if (original) prefix_insert (*ext, {arg, *original});
-      auto source = type.kind () == Kind::ReturnBlock
-                      ? std::visit ([] (auto r) { return Operand (r); }, *mem->base)
-                      : arg;
+      auto source
+        = type.kind () == Kind::ReturnBlock
+            ? std::visit ([] (auto r) { return detail::NodeAccess::make_MachineOperand (r); },
+                          detail::NodeAccess::storage (*mem->base))
+            : arg;
       prefix_insert (move (type), {destination, source});
       ops[i] = destination;
       stack += type.kind () == Kind::LongDouble ? 16 : 8;
@@ -539,13 +566,17 @@ void AArch64Lowering::lower_builtin (Instruction &at, Opcode code, const Builtin
   if (!p) return;
   auto operands = std::vector<Operand> (at.operands ().begin (), at.operands ().end ());
   auto callee = temporary ();
-  before (at, Opcode::Mov, {callee, Operand (BuiltinReference{b.id})});
-  std::vector<Operand> call{Operand (MachineSymbolReference{p}), callee};
+  before (at, Opcode::Mov,
+          {callee, detail::NodeAccess::make_MachineOperand (BuiltinReference{b.id})});
+  std::vector<Operand> call{detail::NodeAccess::make_MachineOperand (
+                              detail::NodeAccess::make_MachineSymbolReference (p)),
+                            callee};
   if (code == Opcode::VaArg || code == Opcode::VaBlockArg) {
     auto type = temporary ();  // Keep temporary allocation order, including the block case.
     if (code == Opcode::VaArg) {
       before (at, Opcode::Mov,
-              {type, Operand (variadic_tag (operands[2].get<MachineMemory> ()->type))});
+              {type, detail::NodeAccess::make_MachineOperand (variadic_tag (
+                       detail::operand_access (operands[2]).get<MachineMemory> ()->type))});
       call.insert (call.end (), {operands[0], operands[1], type});
     } else
       call.insert (call.end (), operands.begin (), operands.end ());
@@ -564,14 +595,16 @@ void AArch64Lowering::lower_variadic_start (Instruction &at) {
   auto previous_sp = temporary ();
   if (!mac) {
     before (at, Opcode::Mov,
-            {*temp, Operand (integer_parameters >= 8
-                               ? std::int64_t (0)
-                               : static_cast<std::int64_t> (8 * integer_parameters) - 64)});
+            {*temp,
+             detail::NodeAccess::make_MachineOperand (
+               integer_parameters >= 8 ? std::int64_t (0)
+                                       : static_cast<std::int64_t> (8 * integer_parameters) - 64)});
     before (at, Opcode::Mov, {memory (Type (Kind::U32), 24, va), *temp});
     before (at, Opcode::Mov,
-            {*temp, Operand (floating_parameters >= 8
-                               ? std::int64_t (0)
-                               : static_cast<std::int64_t> (16 * floating_parameters) - 128)});
+            {*temp, detail::NodeAccess::make_MachineOperand (
+                      floating_parameters >= 8
+                        ? std::int64_t (0)
+                        : static_cast<std::int64_t> (16 * floating_parameters) - 128)});
     before (at, Opcode::Mov, {memory (Type (Kind::U32), 28, va), *temp});
   }
   before (at, Opcode::Mov, {previous_sp, memory (Type::i64 (), 16, physical_register (29))});
@@ -599,7 +632,7 @@ void AArch64Lowering::lower_return (Instruction &at) {
 }
 Result<void> AArch64Lowering::preflight () {
   auto valid = f.verify ();
-  if (!valid) {
+  if (!(valid).has_value ()) {
     fail (valid.error ().message);
     return *error;
   }
@@ -620,20 +653,22 @@ Result<void> AArch64Lowering::preflight () {
       auto code = insn.opcode ();
       auto op = std::get_if<Opcode> (&code);
       if (!op) continue;
-      auto desc = ir::instruction_descriptor (*op);
+      auto desc = ir::instruction_descriptor (*op).get ();
       if (desc->count == ir::OperandCount::Call) {
         if (insn.has_lowered_call ()) {
           fail ("call is already lowered");
           continue;
         }
-        auto &s = *insn.operands ()[0].get<MachineSymbolReference> ()->symbol->signature;
+        auto &s = *detail::NodeAccess::symbol (
+                     *(detail::operand_access (insn.operands ()[0]).get<MachineSymbolReference> ()))
+                     ->signature;
         if (!returns_valid (s)) fail ("aarch64 cannot handle this combination of call results");
         auto start = 2 + s.results.size ();
         for (std::size_t p = start; p < insn.operands ().size (); ++p) {
           auto &o = insn.operands ()[p];
           auto t = argument_type (s, p - start, o);
           if (t.is_block ()) {
-            auto m = o.get<MachineMemory> ();
+            auto m = detail::operand_access (o).get<MachineMemory> ();
             if (!m || !m->base || m->index || m->displacement != 0)
               fail ("block arguments require a base register without an offset or index");
           } else if (!is_register (o))
@@ -653,21 +688,21 @@ Result<void> AArch64Lowering::preflight () {
 }
 Result<void> AArch64Lowering::run () {
   auto valid = preflight ();
-  if (!valid) return valid;
+  if (!(valid).has_value ()) return valid;
   // Preparation keeps an entry block separate from any user label at entry.
   // A temporary USE supplies a checked insertion anchor even for an empty block.
   auto &entry = *f.blocks ().begin ();
   auto anchor = rw.append (entry, MachinePseudoOpcode::Use, {});
-  if (!anchor) return anchor.error ();
-  auto setup = rw.set_entry_setup (**anchor);
-  if (!setup) return setup;
+  if (!(anchor).has_value ()) return anchor.error ();
+  auto setup = rw.set_entry_setup ((anchor).value ());
+  if (!(setup).has_value ()) return setup;
   if (entry.instructions ().begin () != --entry.instructions ().end ()) {
     auto first = &*entry.instructions ().begin ();
-    auto moved = rw.move_before (**anchor, *first);
-    if (!moved) return moved;
+    auto moved = rw.move_before ((anchor).value (), *first);
+    if (!(moved).has_value ()) return moved;
   }
-  parameters (**anchor);
-  erase (**anchor);
+  parameters ((anchor).value ());
+  erase ((anchor).value ());
   if (error) return *error;
   state.uses_alloca = false;
   state.is_leaf = true;

@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. One symbol image across per-definition engines. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "NativeTarget.hpp"
@@ -17,27 +19,27 @@ constexpr std::array engines{ExecutionEngine::Interpreter, ExecutionEngine::Eage
                              ExecutionEngine::LazyJIT, ExecutionEngine::BlockVersioning};
 auto parse (std::string_view text) {
   auto context = serialization::parse_text (test::native_hardware_text (text));
-  INFO ((context ? "" : context.error ().message));
-  REQUIRE (context);
-  return std::move (*context);
+  INFO (((context).has_value () ? "" : context.error ().message));
+  REQUIRE ((context).has_value ());
+  return std::make_unique<Program> (std::move ((context).value ()));
 }
-ExecutionSession make (const Context &c, ExecutionOptions options) {
+ExecutionSession make (const Program &c, ExecutionOptions options) {
   auto result = ExecutionSession::create (c, std::move (options));
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 FunctionHandle find (const ExecutionSession &s, std::string_view name,
                      std::string_view module = "m") {
   auto result = s.find_function (module, name);
-  REQUIRE (result);
-  return std::move (*result);
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 std::int64_t value (const FunctionHandle &f, std::span<const std::int64_t> args = {}) {
   auto result = f.call_i64 (args);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return *result;
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return (result).value ();
 }
 }  // namespace
 TEST_CASE (
@@ -64,15 +66,15 @@ TEST_CASE (
                                : native;
                     }};
           if (kind == unsigned (test::CallExample::MultipleResults)
-              && target::TargetMachine::native ()->abi () == target::ABI::X86Windows) {
-            REQUIRE (c->verify ());
+              && target::TargetMachine::native ().value ().abi () == target::ABI::X86Windows) {
+            REQUIRE ((c->verify ()).has_value ());
             auto session = ExecutionSession::create (*c, std::move (options));
-            if (session) {
+            if ((session).has_value ()) {
               // A lazy callee reports its ABI error when the first call compiles
               // it; eager and block preparation can diagnose it at creation.
               REQUIRE (native == ExecutionEngine::LazyJIT);
-              auto failed = find (*session, "entry", "calls").call_i64 ();
-              REQUIRE_FALSE (failed);
+              auto failed = find ((session).value (), "entry", "calls").call_i64 ();
+              REQUIRE_FALSE ((failed).has_value ());
               CHECK (
                 failed.error ().message.find ("Windows does not support multiple return values")
                 != std::string::npos);
@@ -85,10 +87,18 @@ TEST_CASE (
           auto s = make (*c, std::move (options));
           CHECK (s.mode () == ExecutionMode::Mixed);
           bool boundary = false;
-          auto function = s.context ().find_module ("calls")->find_symbol ("entry")->function ();
+          auto function = s.program ()
+                            .find_module ("calls")
+                            .get ()
+                            ->find_symbol ("entry")
+                            .get ()
+                            ->function ()
+                            .get ();
           for (auto &block : function->blocks ())
             for (auto &i : block.instructions ())
-              boundary |= i.opcode () == Opcode::Call && i.operands ()[1].get<const Register *> ();
+              boundary |= i.opcode () == Opcode::Call
+                          && mirnext::ir::detail::operand_access (i.operands ()[1])
+                               .get<const Register *> ();
           REQUIRE (boundary);
           CHECK (value (find (s, "entry", "calls")) == 42);
         }
@@ -109,7 +119,8 @@ TEST_CASE (
             "i64\nglobal i64:h:r19,d:v:v20\nlocal i64:r,i64:a\nmov h,20\ndmov v,1.5\nmov "
             "a,target\nmov a,i64:0(a)\ncall p,a,r\nmov r,g\nmov r,i64:0(r)\nret "
             "r\nendfunc\nendmodule\n";
-        if (target::TargetMachine::native ()->architecture () == target::Architecture::X86_64)
+        if (target::TargetMachine::native ().value ().architecture ()
+            == target::Architecture::X86_64)
           for (auto at = text.find (":v20"); at != std::string::npos; at = text.find (":v20"))
             text.replace (at, 4, ":xmm3");
         auto c = parse (text);
@@ -126,9 +137,9 @@ TEST_CASE (
                    }});
         CHECK (value (find (s, "caller")) == 42);
         auto data = s.find_data ("m", "f");
-        REQUIRE (data);
+        REQUIRE ((data).has_value ());
         double number;
-        std::memcpy (&number, data->bytes ().data (), 8);
+        std::memcpy (&number, data.value ().bytes ().data (), 8);
         CHECK (number == 22.0);
         CHECK (value (find (s, "caller")) == 42);
       }
@@ -155,24 +166,24 @@ TEST_CASE (
       std::array<std::int64_t, 1> args{12};
       auto result = f.call_i64 (args);
       if (!budget) {
-        REQUIRE (result);
-        CHECK (*result == 42);
+        REQUIRE ((result).has_value ());
+        CHECK ((result).value () == 42);
       } else {
-        REQUIRE_FALSE (result);
+        REQUIRE_FALSE ((result).has_value ());
         CHECK (result.error ().message.find (budget == 1 ? "instruction limit" : "depth limit")
                != std::string::npos);
       }
       args[0] = 0;
       CHECK (value (f, args) == 42);
       auto entry = f.native_entry ();
-      REQUIRE (entry);
+      REQUIRE ((entry).has_value ());
       ExecutionInvocation invocation;
-      auto raw = reinterpret_cast<std::int64_t (*) (std::int64_t)> (entry->address ()) (12);
+      auto raw = reinterpret_cast<std::int64_t (*) (std::int64_t)> (entry.value ().address ()) (12);
       if (!budget) {
         CHECK (raw == 42);
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
       } else
-        CHECK_FALSE (invocation.status ());
+        CHECK_FALSE ((invocation.status ()).has_value ());
     }
 }
 TEST_CASE (
@@ -198,24 +209,24 @@ TEST_CASE (
         }};
         auto s = ExecutionSession::create (*c, std::move (options));
         if (!indirect) {
-          REQUIRE_FALSE (s);
+          REQUIRE_FALSE ((s).has_value ());
           CHECK (s.error ().message.find ("JCALL/JRET cannot cross") != std::string::npos);
           continue;
         }
-        INFO ((s ? "" : s.error ().message));
-        REQUIRE (s);
-        auto f = find (*s, "caller");
+        INFO (((s).has_value () ? "" : s.error ().message));
+        REQUIRE ((s).has_value ());
+        auto f = find ((s).value (), "caller");
         auto failed = f.call_i64 ();
-        REQUIRE_FALSE (failed);
+        REQUIRE_FALSE ((failed).has_value ());
         CHECK (failed.error ().message.find ("JCALL/JRET cannot cross") != std::string::npos);
         auto raw = f.native_entry ();
-        REQUIRE (raw);
+        REQUIRE ((raw).has_value ());
         // Raw MIR entries deliberately expose bound-register effects. Protect
         // the C++/ASan host frame before entering a function that binds r19/r12.
         auto recovery = execution::detail::NativeRecovery::create ();
-        REQUIRE (recovery);
-        auto rejected = recovery->invoke<std::int64_t> (raw->address ());
-        REQUIRE_FALSE (rejected);
+        REQUIRE ((recovery).has_value ());
+        auto rejected = recovery.value ().invoke<std::int64_t> (raw.value ().address ());
+        REQUIRE_FALSE ((rejected).has_value ());
         CHECK (rejected.error ().message.find ("JCALL/JRET cannot cross") != std::string::npos);
       }
 }
@@ -241,8 +252,13 @@ TEST_CASE (
                                                        level)},
                    .select_engine = [&] (const Function &f) -> Result<ExecutionEngine> {
                      ++selections;
-                     CHECK (
-                       &f != c->find_module ("m")->find_symbol (f.symbol ().name ())->function ());
+                     CHECK (&f
+                            != c->find_module ("m")
+                                 .get ()
+                                 ->find_symbol (f.symbol ().name ())
+                                 .get ()
+                                 ->function ()
+                                 .get ());
                      return f.symbol ().name () == "caller" ? caller : callee;
                    }});
         CHECK (selections == 2);
@@ -257,8 +273,8 @@ TEST_CASE (
                == (mixed                                    ? ExecutionMode::Mixed
                    : caller == ExecutionEngine::Interpreter ? ExecutionMode::Interpreter
                                                             : ExecutionMode::JIT));
-        if (s.interpreter_statistics ())
-          CHECK (s.interpreter_statistics ()->functions
+        if ((s.interpreter_statistics ()).has_value ())
+          CHECK (s.interpreter_statistics ().value ().functions
                  == unsigned (caller == ExecutionEngine::Interpreter)
                       + unsigned (callee == ExecutionEngine::Interpreter));
         CHECK (s.statistics ().functions == 2);
@@ -269,7 +285,7 @@ TEST_CASE (
           if (f.engine () == ExecutionEngine::Interpreter)
             CHECK (f.compilation_state () == FunctionCompilationState::Interpreted);
           else if (f.engine () == ExecutionEngine::EagerJIT)
-            REQUIRE (f.artifact ());
+            REQUIRE ((f.artifact ()).has_value ());
           else
             CHECK (f.compilation_state () == FunctionCompilationState::Uncompiled);
         }
@@ -284,21 +300,22 @@ TEST_CASE (
         CHECK (s.statistics ().code_bytes == count);
         if (mixed || caller != ExecutionEngine::Interpreter) {
           auto entry = a.native_entry ();
-          REQUIRE (entry);
+          REQUIRE ((entry).has_value ());
           ExecutionInvocation invocation;
-          CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (entry->address ()) (40) == 42);
-          CHECK (invocation.status ());
-          CHECK (a.native_entry ()->address () == entry->address ());
+          CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (entry.value ().address ()) (40)
+                 == 42);
+          CHECK ((invocation.status ()).has_value ());
+          CHECK (a.native_entry ().value ().address () == entry.value ().address ());
         }
         if (caller == ExecutionEngine::BlockVersioning) {
           REQUIRE (a.block_statistics ());
           CHECK (a.block_statistics ()->compiled_blocks > 0);
-          CHECK_FALSE (a.artifact ());
+          CHECK_FALSE ((a.artifact ()).has_value ());
         }
         if (callee == ExecutionEngine::BlockVersioning) {
           REQUIRE (b.block_statistics ());
           CHECK (b.block_statistics ()->compiled_blocks > 0);
-          CHECK_FALSE (b.artifact ());
+          CHECK_FALSE ((b.artifact ()).has_value ());
         }
       }
 }
@@ -317,7 +334,7 @@ TEST_CASE (
                                      if (invalid) return static_cast<ExecutionEngine> (99);
                                      return Error{ErrorCode::UnknownName, "selection failed"};
                                    }});
-    REQUIRE_FALSE (result);
+    REQUIRE_FALSE ((result).has_value ());
     CHECK (result.error ().message.find ("m/f [") != std::string::npos);
     CHECK (result.error ().message.find ("link:engine") != std::string::npos);
     CHECK (result.error ().message.find (invalid ? "invalid function execution engine"
@@ -338,7 +355,7 @@ TEST_CASE (
   CHECK (s.mode () == ExecutionMode::JIT);
   CHECK (value (find (s, "f")) == 42);
   auto invalid = ExecutionSession::create (*c, {.mode = ExecutionMode::Mixed});
-  REQUIRE_FALSE (invalid);
+  REQUIRE_FALSE ((invalid).has_value ());
 }
 TEST_CASE (
   "mixed execution preserves cross-module aliases function data globals and handle lifetime") {
@@ -348,7 +365,7 @@ TEST_CASE (
     "i64,i64:x\nlocal i64:r,i64:a\nmov a,fp\nmov a,i64:0(a)\ncall p,a,r,x\nmov a,g\nmov "
     "i64:0(a),r\nret r\nendfunc\nexport caller\nendmodule\n");
   std::optional<FunctionHandle> retained, alias;
-  std::optional<LinkedData> global;
+  std::optional<mirnext::execution::DataHandle> global;
   {
     auto s = make (*c, {.select_engine = [] (auto &f) -> Result<ExecutionEngine> {
       return f.module ().name () == "defs" ? ExecutionEngine::Interpreter
@@ -359,12 +376,12 @@ TEST_CASE (
     auto definition = find (s, "f", "defs");
     CHECK (alias->engine () == definition.engine ());
     auto a = alias->native_entry (), b = definition.native_entry ();
-    REQUIRE (a);
-    REQUIRE (b);
-    CHECK (a->address () == b->address ());
+    REQUIRE ((a).has_value ());
+    REQUIRE ((b).has_value ());
+    CHECK (a.value ().address () == b.value ().address ());
     auto g = s.find_data ("m", "g");
-    REQUIRE (g);
-    global = *g;
+    REQUIRE ((g).has_value ());
+    global = (g).value ();
   }
   c.reset ();
   std::array<std::int64_t, 1> args{40};
@@ -377,7 +394,7 @@ TEST_CASE (
 TEST_CASE (
   "mixed expression initializers execute their selected definition once without host body copies") {
   for (auto engine : engines) {
-    auto c = test::variable_example (test::VariableExample::Expression);
+    auto c = test::variable_example (test::VariableExample::ExpressionInitializer);
     unsigned bodies = 0;
     auto s
       = make (*c, {.link = {.compilation_observer = [&] (auto &event) -> Result<void> {
@@ -393,9 +410,10 @@ TEST_CASE (
                    }});
     CHECK (s.statistics ().expressions == 1);
     CHECK (value (find (s, "entry", "consumer")) == 42);
-    CHECK (
-      s.statistics ().functions
-      == (engine == ExecutionEngine::Interpreter ? s.interpreter_statistics ()->functions : 2));
+    CHECK (s.statistics ().functions
+           == (engine == ExecutionEngine::Interpreter
+                 ? s.interpreter_statistics ().value ().functions
+                 : 2));
     CHECK (bodies == (engine == ExecutionEngine::Interpreter ? 0 : 1));
   }
 }
@@ -437,9 +455,9 @@ endmodule
                          } guard{exited};
                          ++calls;
                          if (fail) return Error{ErrorCode::InvalidArgument, "callback rejected"};
-                         auto x = args[0].scalar ()->as_i64 ();
-                         if (!x) return x.error ();
-                         return std::vector<ScalarValue>{ScalarValue (*x + 2)};
+                         auto x = args[0].scalar ().get ()->as_i64 ();
+                         if (!(x).has_value ()) return x.error ();
+                         return std::vector<ScalarValue>{ScalarValue ((x).value () + 2)};
                        };
                        return symbol;
                      }},
@@ -457,7 +475,7 @@ endmodule
       if (!address) {
         fail = true;
         auto failed = n.call_i64 (args);
-        REQUIRE_FALSE (failed);
+        REQUIRE_FALSE ((failed).has_value ());
         CHECK (failed.error ().message.find ("callback rejected") != std::string::npos);
         CHECK (calls == exited);
         fail = false;
@@ -479,7 +497,7 @@ TEST_CASE ("an all-interpreted selection dispatches import handles without nativ
                      if (typed)
                        symbol.interpret = [] (auto args) -> Result<std::vector<ScalarValue>> {
                          return std::vector<ScalarValue>{
-                           ScalarValue (*args[0].scalar ()->as_i64 () + 2)};
+                           ScalarValue (args[0].scalar ().value ().as_i64 ().value () + 2)};
                        };
                      return symbol;
                    }},
@@ -495,7 +513,7 @@ TEST_CASE ("an all-interpreted selection dispatches import handles without nativ
         CHECK (value (f, args) == 42);
       else {
         auto failed = f.call_i64 (args);
-        REQUIRE_FALSE (failed);
+        REQUIRE_FALSE ((failed).has_value ());
         CHECK (failed.error ().message.find ("native foreign calls are disabled")
                != std::string::npos);
       }
@@ -537,9 +555,9 @@ TEST_CASE ("same-domain jump calls retain continuations and label relocations in
           CHECK (value (find (s, "caller")) == 42);
           auto read = [&] (std::string_view name) {
             auto data = s.find_data ("m", name);
-            REQUIRE (data);
+            REQUIRE ((data).has_value ());
             std::uint64_t bits;
-            std::memcpy (&bits, data->bytes ().data (), 8);
+            std::memcpy (&bits, data.value ().bytes ().data (), 8);
             return bits;
           };
           auto address = read ("address"), base = read ("base");
@@ -551,43 +569,62 @@ TEST_CASE ("same-domain jump calls retain continuations and label relocations in
 }
 TEST_CASE ("mixed ABI entries preserve all five by-value block classes") {
   for (unsigned category = 0; category < 5; ++category) {
-    Context c;
-    auto m = c.create_module ("m");
-    REQUIRE (m);
+    Program c;
+    auto m = mirnext::ir::detail::access (c).create_module ("m");
+    REQUIRE ((m).has_value ());
     auto abi = static_cast<Type::BlockClass> (category);
-    auto callee = (*m)->create_function ("callee", {{Type::i64 ()}, {Type::block (16, abi)}});
-    REQUIRE (callee);
-    auto body = (*callee)->create_block ();
-    REQUIRE (body);
-    IRBuilder b (**body);
-    auto loaded = b.load (Memory{Type::i64 (), (*callee)->arguments ()[0]});
-    REQUIRE (loaded);
-    REQUIRE (b.store (Memory{Type::i64 (), (*callee)->arguments ()[0]}, 99));
-    REQUIRE (b.ret (Operand (**loaded)));
+    auto callee = mirnext::ir::detail::access (((m)).value ())
+                    .create_function ("callee", {{Type::i64 ()}, {Type::block (16, abi)}});
+    REQUIRE ((callee).has_value ());
+    auto body = mirnext::ir::detail::access (((callee)).value ()).create_block ();
+    REQUIRE ((body).has_value ());
+    InstructionBuilder b ((body).value ());
+    auto loaded = b.load (
+      mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 (),
+                                                    mirnext::ir::detail::ReferenceAccess::pointers (
+                                                      callee.value ().arguments ())[0]));
+    REQUIRE ((loaded).has_value ());
+    REQUIRE ((b.store (mirnext::ir::detail::NodeAccess::
+                         make_Memory (Type::i64 (), mirnext::ir::detail::ReferenceAccess::pointers (
+                                                      callee.value ().arguments ())[0]),
+                       99))
+               .has_value ());
+    REQUIRE ((b.ret (Operand ((loaded).value ()))).has_value ());
     auto pointer
-      = (*m)->create_variable ("pointer", Type::pointer (), Operand ((*callee)->symbol ()));
-    REQUIRE (pointer);
-    auto caller = (*m)->create_function ("caller", {{Type::i64 ()}, {}});
-    REQUIRE (caller);
-    auto entry = (*caller)->create_block ();
-    REQUIRE (entry);
-    IRBuilder a (**entry);
+      = mirnext::ir::detail::access (((m)).value ())
+          .create_variable ("pointer", Type::pointer (), Operand (callee.value ().symbol ()));
+    REQUIRE ((pointer).has_value ());
+    auto caller = mirnext::ir::detail::access (((m)).value ())
+                    .create_function ("caller", {{Type::i64 ()}, {}});
+    REQUIRE ((caller).has_value ());
+    auto entry = mirnext::ir::detail::access (((caller)).value ()).create_block ();
+    REQUIRE ((entry).has_value ());
+    InstructionBuilder a ((entry).value ());
     auto storage = a.allocate_stack (std::uint64_t{16});
-    REQUIRE (storage);
-    REQUIRE (a.store (Memory{Type::i64 (), *storage}, 42));
-    REQUIRE (a.store (Memory{Type::i64 (), *storage, nullptr, 8}, 7));
-    auto target = a.load (**pointer);
-    REQUIRE (target);
-    auto called = a.call_indirect ((*callee)->symbol (), Operand (**target),
-                                   {BlockArgument (**storage, 16, abi)});
-    REQUIRE (called);
-    auto original = a.load (Memory{Type::i64 (), *storage});
-    REQUIRE (original);
-    auto result = called->value ();
-    REQUIRE (result);
-    auto total = a.binary (Opcode::Add, Operand (**original), Operand (**result));
-    REQUIRE (total);
-    REQUIRE (a.ret (Operand (**total)));
+    REQUIRE ((storage).has_value ());
+    REQUIRE (
+      (a.store (mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 (), &(storage).value ()),
+                42))
+        .has_value ());
+    REQUIRE (
+      (a.store (mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 (), &(storage).value (),
+                                                              nullptr, 8),
+                7))
+        .has_value ());
+    auto target = a.load ((pointer).value ());
+    REQUIRE ((target).has_value ());
+    auto called
+      = a.call_indirect (callee.value ().symbol (), Operand ((target).value ()),
+                         {mirnext::ir::detail::BlockArgumentState ((storage).value (), 16, abi)});
+    REQUIRE ((called).has_value ());
+    auto original
+      = a.load (mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 (), &(storage).value ()));
+    REQUIRE ((original).has_value ());
+    auto result = called.value ().value ();
+    REQUIRE ((result).has_value ());
+    auto total = a.binary (Opcode::Add, Operand ((original).value ()), Operand ((result).value ()));
+    REQUIRE ((total).has_value ());
+    REQUIRE ((a.ret (Operand ((total).value ()))).has_value ());
     for (auto native :
          {ExecutionEngine::EagerJIT, ExecutionEngine::LazyJIT, ExecutionEngine::BlockVersioning})
       for (bool interpreted_caller : {false, true})
@@ -661,14 +698,14 @@ endmodule
                    }});
         auto f = find (s, "caller");
         auto expected = baseline.find_data ("m", "saved"), actual = s.find_data ("m", "saved");
-        REQUIRE (expected);
-        REQUIRE (actual);
+        REQUIRE ((expected).has_value ());
+        REQUIRE ((actual).has_value ());
         std::uint32_t seed = 0x193ab42;
         for (unsigned trial = 0; trial < 24; ++trial) {
           seed = seed * 1664525 + 1013904223;
           std::array<std::int64_t, 1> args{std::int64_t (seed % 10000)};
           CHECK (value (f, args) == value (original, args));
-          CHECK (std::ranges::equal (expected->bytes (), actual->bytes ()));
+          CHECK (std::ranges::equal (expected.value ().bytes (), actual.value ().bytes ()));
         }
       }
 }
@@ -717,18 +754,19 @@ endmodule
     return ExecutionEngine::EagerJIT;
   };
   auto program = transforms::optimize (*c);
-  REQUIRE (program);
-  auto loaded = ExecutionSession::create (std::move (*program), {.select_engine = select});
-  REQUIRE (loaded);
-  CHECK_FALSE (program->verify ());
+  REQUIRE ((program).has_value ());
+  auto loaded
+    = ExecutionSession::create (std::move ((program).value ()), {.select_engine = select});
+  REQUIRE ((loaded).has_value ());
+  CHECK_FALSE ((program.value ().verify ()).has_value ());
   auto second = make (*c, {.select_engine = select});
   c.reset ();
-  for (auto *s : {&*loaded, &second}) {
+  for (auto *s : {&(loaded).value (), &second}) {
     CHECK (s->mode () == ExecutionMode::Mixed);
     CHECK (s->statistics ().functions == 4);
     CHECK (s->statistics ().compiled_functions == 1);
-    REQUIRE (s->interpreter_statistics ());
-    CHECK (s->interpreter_statistics ()->functions == 1);
+    REQUIRE ((s->interpreter_statistics ()).has_value ());
+    CHECK (s->interpreter_statistics ().value ().functions == 1);
     auto lazy = find (*s, "lazy"), blocks = find (*s, "block");
     CHECK (lazy.compilation_state () == FunctionCompilationState::Uncompiled);
     REQUIRE (blocks.block_statistics ());
@@ -737,13 +775,13 @@ endmodule
     std::array<std::int64_t, 1> args{38};
     CHECK (value (f, args) == 42);
     CHECK (s->statistics ().compiled_functions == 3);
-    REQUIRE (lazy.artifact ());
+    REQUIRE ((lazy.artifact ()).has_value ());
     CHECK (blocks.block_statistics ()->compiled_blocks > 0);
     args[0] = 40;
     CHECK (value (f, args) == 44);
     CHECK (s->statistics ().compiled_functions == 3);
   }
-  CHECK_FALSE (loaded->owns (find (second, "eager")));
+  CHECK_FALSE (loaded.value ().owns (find (second, "eager")));
 }
 TEST_CASE ("mixed programs reject callback-only jump imports before publishing virtual addresses") {
   auto c = parse (
@@ -765,7 +803,7 @@ TEST_CASE ("mixed programs reject callback-only jump imports before publishing v
                                                   ? ExecutionEngine::Interpreter
                                                   : native;
                                        }});
-    REQUIRE_FALSE (s);
+    REQUIRE_FALSE ((s).has_value ());
     CHECK (
       s.error ().message.find ("callback-only jump-return import needs a native ABI implementation")
       != std::string::npos);

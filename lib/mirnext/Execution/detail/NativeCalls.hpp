@@ -1,6 +1,6 @@
 /* Licensed under the MIT License. Typed native ABI adapters on the owning IR. */
 #pragma once
-#include "mirnext/Execution/Linker.hpp"
+#include "mirnext/Execution/Options.hpp"
 #include "mirnext/Execution/detail/Hardware.hpp"
 namespace mirnext::execution::detail {
 class NativeRecovery;

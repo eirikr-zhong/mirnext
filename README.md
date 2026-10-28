@@ -5,7 +5,7 @@ modern C++20. It provides typed construction, checked transformations and owning
 execution results. SSA is an internal optimization representation.
 
 Hardware-bound registers have no memory address. Copy their value to an ordinary
-local before calling `IRBuilder::address_of`; writes through that address update
+local before calling `MIRBuilder::create_address_of`; writes through that address update
 the copy.
 
 IR construction, analysis, optimization, machine code generation and execution
@@ -18,7 +18,7 @@ The library is organized under `include/mirnext` and `lib`:
 
 | Layer | Responsibilities |
 | --- | --- |
-| IR | Context/module/function ownership, stable basic blocks and instructions, typed references and data-use relationships, IRBuilder/DSL, verification and stack-scope materialization |
+| IR | Program/module/function ownership, stable basic blocks and instructions, typed references and data-use relationships, explicit MIRBuilder batches, verification and stack-scope materialization |
 | Analysis | CFG, traversal, dominance, loops, liveness and module/function caches with owner-scoped dependency invalidation |
 | Transforms | Module/function pass managers, O0–O3 optimization, internal SSA, pass observation and independently owned optimized programs |
 | Target | Native target facts, data layout, register information, addressing and ABI rules |
@@ -126,53 +126,95 @@ Use `--linkage shared` for a shared build. To audit both linkages together, omit
 
 ## Build and execute IR
 
-This example uses the owning interpreter and a checked function handle. The
-handle retains its loaded program after the source Context and session are gone.
+`Program` owns modules, functions, blocks and instructions. `MIRBuilder` selects an
+insertion point and creates instructions through explicit methods, in the style
+of LLVM's IRBuilder. Values have no arithmetic or comparison operators. Results
+use named `has_value()`, `value()` and `error()` accessors.
 
 ```cpp
 #include <mirnext/Execution/Session.hpp>
-#include <array>
 #include <iostream>
 
-mirnext::Result<mirnext::execution::FunctionHandle> build() {
+int main() {
   using namespace mirnext;
   using namespace mirnext::ir;
 
-  Context context;
-  auto module = context.create_module("example");
-  if (!module) return module.error();
-  auto function = (*module)->create_function("add_one", {{Type::i64()}, {Type::i64()}});
-  if (!function) return function.error();
-  auto block = (*function)->create_block();
-  if (!block) return block.error();
+  Program program;
+  MIRBuilder builder(program);
+  auto* module = builder.create_module("example");
+  builder.create_function<std::int64_t(std::int64_t)>(module, "add_one");
+  auto sum = builder.create_add(builder.argument(0), builder.constant_i64(1));
+  builder.create_return(sum);
 
-  IRBuilder body(**block);
-  auto returned = body.ret(body.expression(*(*function)->arguments()[0]) + 1);
-  if (!returned) return returned.error();
-
-  auto session = execution::ExecutionSession::create(
-      context, {.mode = execution::ExecutionMode::Interpreter});
-  if (!session) return session.error();
-  return session->find_function("example", "add_one");
-}
-
-int main() {
-  auto function = build();
-  if (!function) { std::cerr << function.error().message << '\n'; return 1; }
-  std::array<std::int64_t, 1> arguments{41};
-  auto value = function->call_i64(arguments);
-  if (!value) { std::cerr << value.error().message << '\n'; return 1; }
-  std::cout << *value << '\n';
+  auto built = builder.finish();
+  if (!built.has_value()) {
+    std::cerr << built.error().message << '\n';
+    return 1;
+  }
+  auto session = execution::ExecutionSession::create(std::move(program));
+  if (!session.has_value()) {
+    std::cerr << session.error().message << '\n';
+    return 1;
+  }
+  auto result = session.value().call_i64("example", "add_one", {41});
+  if (!result.has_value()) {
+    std::cerr << result.error().message << '\n';
+    return 1;
+  }
+  std::cout << result.value() << '\n';
 }
 ```
 
-For longer Result-returning functions, `MIRNEXT_RESULT_RET(expression)` propagates
-the first error and `MIRNEXT_TRY_VALUE(name, expression)` declares an extracted
-value. Both evaluate the expression once; extraction moves owning results such
-as Context pointers and sessions. Use extraction inside a braced function/block.
-The [lazy session example](examples/native-session.cpp) demonstrates these helpers.
+`create_function<Return(Arguments...)>(module, name)` maps C++ scalar types to MIR
+types and selects an entry block automatically. Explicit `Signature` values cover
+block arguments, multiple results, variadic and special calling conventions.
+`create_block()` creates a layout block; `set_insert_point(block)` selects it.
+Creating another function changes the selected function; `set_function(function)`
+selects an existing function for editing.
 
-On a supported JIT host, select `ExecutionMode::JIT` (the session default).
+| Operation | Explicit construction API |
+| --- | --- |
+| Parameters, constants and locals | `argument(index)`, `constant_i64(value)`, `create_register(type)` |
+| Arithmetic, comparison and conversion | `create_add(a, b)`, `create_lt(a, b)`, `create_convert(value, type)` |
+| Direct and indirect calls | `create_call(callee, {args...})`, `create_indirect_call(signature, address, {args...})` |
+| Call results | `call.value()` requires exactly one result; `call.result(index)` selects a result |
+| Variables and memory | `create_load(variable)`, `create_store(variable, value)`, `memory(type, address, offset)` |
+| Control flow | `create_block(name)`, `set_insert_point(block)`, `create_cond_branch(condition, target)`, `create_jump(target)` |
+| Block ABI arguments | `block_argument(address, Type::block(size, classification))`, `return_buffer(address, size)` |
+| Precise instructions | `create_instruction(opcode, {operands...})` uses the same validator |
+
+Methods above are members of `MIRBuilder`. Creation returns ordinary borrowed node
+pointers or typed `Value` objects. Required owner relationships return references;
+collections yield objects directly. There is one canonical instruction body.
+Moving a `Program` preserves node identity. Nodes and values must not outlive
+their program; deleting a node invalidates references to it. A builder can move
+without invalidating its insertion state or values. Replacing a call invalidates
+its `CallResult` view.
+
+The builder records the first error and stops subsequent changes. `finish()` checks
+the batch and closes it before analysis, optimization, serialization or execution.
+Successful changes before a failure remain applied; unfinished or failed batches
+prevent later stages. An invalid result is safely propagated by subsequent builder
+calls. Inspect `status()` or `error()` for an early diagnostic.
+
+`create_import`, `declare_function` and `create_prototype` create symbols without
+a body; `define_function` defines a declaration with the same symbol identity.
+`export_symbol` connects modules. Module data accepts typed `DataInitializer`
+values: `InitializedData`, `ZeroData`, `SymbolReference`, `LabelReference` and
+`ExpressionData`. `create_anonymous_data` preserves contiguous layout; declarations
+and later definitions share symbol identity. See [block calls](examples/native-calls.cpp),
+[cross-module calls](examples/native-cross-module.cpp) and
+[shared variables](examples/native-variables.cpp).
+
+Parsing, cloning and materialization return owning `Result<Program>` values.
+Fallible borrowed results use `Result<T&>`; optional queries use `OptionalRef<T>`.
+Both use `has_value()` and `value()` and never extend the referent's lifetime.
+`OptionalRef::get()` exposes a nullable borrowed pointer when needed. Neither
+wrapper provides dereference, arrow or implicit Boolean conversion operators.
+Structural edits invalidate collection views; obtain a fresh view after editing.
+
+On a supported JIT host, `ExecutionMode::JIT` is the session default.
+Select `ExecutionMode::Interpreter` to interpret instead.
 Use `LinkOptions::compilation = JITCompilation::Lazy` for first-call compilation.
 `FunctionHandle::compile()` prepares a lazy body explicitly.
 Select `JITCompilation::BlockVersioning` for demand-driven block compilation;
@@ -194,7 +236,60 @@ See [the mixed execution example](examples/mixed-engines.cpp).
 Construction and execution report diagnostics through `Result`, including in
 no-exceptions builds. Optimization returns an independent `OptimizedProgram`;
 source IR is retained unchanged. Runtime data and compilation caches belong to
-the loaded program rather than the source Context.
+the loaded program rather than the source Program.
+
+
+## Editing, analyses and compilation stages
+
+Read-only traversal yields objects directly:
+
+```cpp
+for (const auto &module : program.modules())
+  for (const auto &function : module.functions())
+    for (const auto &block : function.blocks())
+      for (const auto &instruction : block.instructions()) {
+        // Inspect instruction.opcode() and instruction.operands().
+      }
+```
+
+Required owner relationships, such as `instruction.block()`, return references.
+Optional relationships and tagged operand queries return `OptionalRef`, for example
+`operand.get<Register>()`. A missing optional value is distinct from a failed
+`Result`. Both wrappers borrow the object and require a presence check before
+access through `has_value()` and `value()`.
+
+An `MIRBuilder` can borrow an existing `Program`, `Function` or `BasicBlock` to
+edit it using the same explicit creation methods. `replace_instruction`,
+`replace_operand`, `erase_instruction`, `split_before` and `merge_fallthrough`
+maintain the existing validation and invalidation rules. `ssa()` supplies a checked
+`SSARewriter` for internal SSA extensions. `MachineEditor` provides the machine
+mutation batch. Checked SSA/machine handles detect deletion while their editing
+state remains alive; they do not extend its lifetime. Analysis references become
+invalid when the cache is invalidated, and SSA references on SSA destruction.
+
+`FunctionAnalysisManager` and `ModuleAnalysisManager` are value objects sharing
+their cache state when copied. `get<Analysis>()` returns
+`Result<const Analysis::Result&>`; `get_cached<Analysis>()` returns `OptionalRef`.
+Custom function passes receive an `MIRBuilder`; module passes receive the module
+and a context containing the builder. Pass managers check
+each batch before advancing, apply `PreservedAnalyses`, and propagate observer
+failures. The optimization pipeline and its O0–O3 decisions are unchanged.
+
+`MachineCompilation::create(function, target, options)` returns an owning value
+for both incremental and complete compilation. `step()` and `run_until(stage)`
+advance that same state, `graph()` and other analysis queries expose optional
+read-only views, and `finish()` returns an owning `CompiledFunction`. Use `edit()`
+before lowering to obtain a machine editing batch. The compiler retains no source
+IR; a prepared or compiled result can outlive the source program. The
+[stage example](examples/native-machine-ir.cpp) demonstrates this lifetime and
+[the compilation example](examples/native-compile.cpp) demonstrates observation
+and code publication. Stage observers borrow views only for the callback duration.
+
+`ExecutionSession` is the loading and execution entry point. Moving a `Program`
+or an `OptimizedProgram` into it transfers ownership; passing a borrowed program
+preserves it. Function and data handles retain the loaded program independently
+of the session. Native entries, executable memory and host callbacks keep explicit
+ABI address types. All other object access follows the same reference rules.
 
 ## Examples
 
@@ -203,6 +298,7 @@ the loaded program rather than the source Context.
 - [Per-function interpretation and JIT in one program](examples/mixed-engines.cpp)
 - [Block arguments and calls](examples/native-calls.cpp)
 - [Module variables](examples/native-variables.cpp)
+- [Cross-module function calls](examples/native-cross-module.cpp)
 - [Stack scopes](examples/native-stack-scope.cpp)
 - [Block and multiple-result execution](examples/execution-values.cpp)
 - [Interpreted native callbacks](examples/interpreted-callback.cpp)
@@ -217,7 +313,7 @@ The target-specific examples explicitly report unsupported hosts.
 ## Formats and diagnostics
 
 `serialization::parse_text` and `read_binary` return independently owned
-Contexts. `write_text` and `write_binary` traverse the unified IR and preserve
+Programs. `write_text` and `write_binary` traverse the unified IR and preserve
 the existing MIR file protocols. Stack scopes are materialized on a copy when
 needed; ordinary read-only traversal does not rewrite the source.
 

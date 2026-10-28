@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Target facts and native owning x86 frames. */
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/CodeGen/Detail/X86Frame.hpp"
@@ -23,9 +27,9 @@ using xframe::X86FramePlan;
 unsigned number (R r) { return static_cast<unsigned> (r); }
 X86FramePlan plan (const X86FrameInput &input) {
   auto r = xframe::plan_x86_frame (input);
-  INFO ((r ? "" : r.error ().message));
-  REQUIRE (r);
-  return std::move (*r);
+  INFO (((r).has_value () ? "" : r.error ().message));
+  REQUIRE ((r).has_value ());
+  return std::move ((r).value ());
 }
 std::vector<R> saved (ABI abi) {
   std::vector<R> out;
@@ -85,34 +89,36 @@ struct FrameState {
 };
 MachinePostResult post (MachineFunction &f, unsigned level = 2) {
   auto graph = MachineGraphAnalysis::build (f);
-  REQUIRE (graph);
-  auto live = MachineLiveness::analyze (f, *graph, {.optimization_level = level});
-  REQUIRE (live);
-  auto ranges = MachineLiveRanges::build (f, *graph, *live);
-  REQUIRE (ranges);
-  auto allocation = MachineAllocation::assign (f, *graph, *live, *ranges);
-  REQUIRE (allocation);
-  auto rewritten = rewrite_allocated (f, *graph, *live, *ranges, std::move (*allocation));
-  REQUIRE (rewritten);
-  auto spilled = split_allocated_spills (f, std::move (*rewritten));
-  REQUIRE (spilled);
-  auto result = optimize_allocated_machine (f, std::move (*spilled));
-  REQUIRE (result);
-  return std::move (*result);
+  REQUIRE ((graph).has_value ());
+  auto live = MachineLiveness::analyze (f, (graph).value (), {.optimization_level = level});
+  REQUIRE ((live).has_value ());
+  auto ranges = MachineLiveRanges::build (f, (graph).value (), (live).value ());
+  REQUIRE ((ranges).has_value ());
+  auto allocation
+    = MachineAllocation::assign (f, (graph).value (), (live).value (), (ranges).value ());
+  REQUIRE ((allocation).has_value ());
+  auto rewritten = rewrite_allocated (f, (graph).value (), (live).value (), (ranges).value (),
+                                      std::move ((allocation).value ()));
+  REQUIRE ((rewritten).has_value ());
+  auto spilled = split_allocated_spills (f, std::move ((rewritten).value ()));
+  REQUIRE ((spilled).has_value ());
+  auto result = optimize_allocated_machine (f, std::move ((spilled).value ()));
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 MachineFrameResult frame (MachineFunction &f, unsigned level = 2,
                           MachineFrameOptions options = {}) {
   auto input = post (f, level);
   auto result = form_frame (f, std::move (input), options);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
   auto revision = f.revision ();
-  CHECK_FALSE (form_frame (f, std::move (input), options));
+  CHECK_FALSE ((form_frame (f, std::move (input), options)).has_value ());
   CHECK (f.revision () == revision);
-  REQUIRE (result->current (f));
-  REQUIRE (result->cfg ().verify (f));
-  REQUIRE (f.verify ());
-  return std::move (*result);
+  REQUIRE (result.value ().current (f));
+  REQUIRE ((result.value ().cfg ().verify (f)).has_value ());
+  REQUIRE ((f.verify ()).has_value ());
+  return std::move ((result).value ());
 }
 }  // namespace
 TEST_CASE ("x86 frames restore registers stack and variadic homes for both ABIs") {
@@ -231,30 +237,30 @@ TEST_CASE ("x86 frames retain omission saved-register order and no-return bounda
   }
 }
 TEST_CASE ("x86 frames diagnose invalid facts without allocating overflowing areas") {
-  CHECK_FALSE (xframe::plan_x86_frame ({ABI::AArch64Linux}));
+  CHECK_FALSE ((xframe::plan_x86_frame ({ABI::AArch64Linux})).has_value ());
   for (auto abi : {ABI::X86SysV, ABI::X86Windows}) {
     X86FrameInput input{abi};
     input.variadic = true;
-    CHECK_FALSE (xframe::plan_x86_frame (input));
+    CHECK_FALSE ((xframe::plan_x86_frame (input)).has_value ());
     input.variadic = false;
     input.uses_alloca = true;
-    CHECK_FALSE (xframe::plan_x86_frame (input));
+    CHECK_FALSE ((xframe::plan_x86_frame (input)).has_value ());
     input.uses_alloca = false;
     input.block_arguments = true;
-    CHECK_FALSE (xframe::plan_x86_frame (input));
+    CHECK_FALSE ((xframe::plan_x86_frame (input)).has_value ());
     input.block_arguments = false;
     for (auto size : {std::size_t{1}, std::size_t (INT32_MAX), SIZE_MAX}) {
       input.spill_bytes = size;
-      CHECK_FALSE (xframe::plan_x86_frame (input));
+      CHECK_FALSE ((xframe::plan_x86_frame (input)).has_value ());
     }
     input.spill_bytes = 0;
     for (auto bad : {R::AX, R::BP, R::SP, R::ST0, static_cast<R> (999)}) {
       input.saved_registers = std::span (&bad, 1);
-      CHECK_FALSE (xframe::plan_x86_frame (input));
+      CHECK_FALSE ((xframe::plan_x86_frame (input)).has_value ());
     }
     const R duplicates[]{R::BX, R::BX};
     input.saved_registers = duplicates;
-    CHECK_FALSE (xframe::plan_x86_frame (input));
+    CHECK_FALSE ((xframe::plan_x86_frame (input)).has_value ());
   }
 }
 TEST_CASE ("x86 frame layout retains exact scalar vector and variadic save displacements") {
@@ -336,8 +342,8 @@ TEST_CASE ("x86 no-red-zone frames initialize BP and allocate JRET saves") {
 }
 TEST_CASE ("native x86 frame insertion preserves labels identities and last return") {
   auto target = TargetMachine::native ();
-  REQUIRE (target);
-  if (target->architecture () != Architecture::X86_64) return;
+  REQUIRE ((target).has_value ());
+  if (target.value ().architecture () != Architecture::X86_64) return;
   for (bool fp : {false, true})
     for (bool returns : {false, true})
       for (bool jump : {false, true})
@@ -345,35 +351,42 @@ TEST_CASE ("native x86 frame insertion preserves labels identities and last retu
           for (unsigned level = 0; level < 4; ++level) {
             MachineFunction f ("m", "f",
                                {jump ? std::vector<Type>{} : std::vector{Type::i64 ()}, {}},
-                               *target);
+                               (target).value ());
             MachineRewriter rw (f);
-            auto &entry = f.create_block ();
-            auto label = f.create_label (entry, "entry");
-            REQUIRE (label);
-            auto reg = [&] (R r) { return MachineOperand (target->registers ()[number (r)].reg); };
-            REQUIRE (rw.append (entry, MachinePseudoOpcode::Use, {reg (R::BX)}));
+            auto &entry = mirnext::codegen::detail::access (f).create_block ();
+            auto label = mirnext::codegen::detail::access (f).create_label (entry, "entry");
+            REQUIRE ((label).has_value ());
+            auto reg = [&] (R r) {
+              return mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+                target.value ().registers ()[number (r)].reg);
+            };
+            REQUIRE ((rw.append (entry, MachinePseudoOpcode::Use, {reg (R::BX)})).has_value ());
             MachineInstruction *last = nullptr;
             if (returns) {
               auto r = rw.append (entry, jump ? Opcode::JRet : Opcode::Ret, {reg (R::AX)});
-              REQUIRE (r);
-              last = *r;
+              REQUIRE ((r).has_value ());
+              last = &(r).value ();
             } else
-              REQUIRE (rw.append (entry, Opcode::Jmp, {MachineOperand (**label)}));
+              REQUIRE ((rw.append (entry, Opcode::Jmp,
+                                   {mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+                                     (label).value ())}))
+                         .has_value ());
             auto state = f.state ();
             state.machinized = state.operands_legalized = true;
             state.is_leaf = false;
             state.requires_frame_pointer = fp;
-            REQUIRE (rw.set_state (state));
+            REQUIRE ((rw.set_state (state)).has_value ());
             auto result = frame (f, level, {.no_red_zone = no_red_zone});
             CHECK (&*f.blocks ().begin () != &entry);
-            CHECK (&(*label)->block () == &entry);
+            CHECK (&label.value ().block () == &entry);
             CHECK (result.layout ().saves_frame_pointer == fp);
             CHECK (result.layout ().frame_bytes
                    == (jump && returns ? (no_red_zone && fp ? 32 : 16) : 24));
             REQUIRE (result.layout ().callee_saves.size () == 1);
             CHECK (result.layout ().callee_saves[0].offset == (fp ? -16 : 0));
             unsigned epilogue = 0;
-            for (auto i : result.inserted_instructions ()) {
+            for (auto i :
+                 mirnext::ir::detail::ReferenceAccess::pointers (result.inserted_instructions ())) {
               CHECK ((&i->block () == &entry || &i->block () == &*f.blocks ().begin ()));
               epilogue += &i->block () == &entry;
             }
@@ -383,21 +396,21 @@ TEST_CASE ("native x86 frame insertion preserves labels identities and last retu
 }
 TEST_CASE ("native x86 frames cover the public instruction and ABI fixture pipelines") {
   auto target = TargetMachine::native ();
-  REQUIRE (target);
-  if (target->architecture () != Architecture::X86_64) return;
+  REQUIRE ((target).has_value ());
+  if (target.value ().architecture () != Architecture::X86_64) return;
   for (unsigned level = 0; level < 4; ++level) {
-    auto run = [&] (const Context &source) {
+    auto run = [&] (const Program &source) {
       transforms::OptimizationOptions options;
       options.level = static_cast<transforms::OptimizationLevel> (level);
       auto p = transforms::optimize (source, options);
-      REQUIRE (p);
-      for (auto &module : p->context ().modules ())
+      REQUIRE ((p).has_value ());
+      for (auto &module : p.value ().program ().modules ())
         for (auto &f : module.functions ()) {
-          auto m = prepare_machine_ir (f, *target);
-          REQUIRE (m);
-          REQUIRE (machinize (**m));
-          REQUIRE (legalize_operands (**m));
-          auto r = frame (**m, level, {.preserve_host_registers = true});
+          auto m = prepare_machine_ir (f, (target).value ());
+          REQUIRE ((m).has_value ());
+          REQUIRE ((machinize ((m).value ())).has_value ());
+          REQUIRE ((legalize_operands ((m).value ())).has_value ());
+          auto r = frame ((m).value (), level, {.preserve_host_registers = true});
           CHECK (r.layout ().frame_bytes % 16 <= 8);
         }
     };
@@ -406,44 +419,49 @@ TEST_CASE ("native x86 frames cover the public instruction and ABI fixture pipel
       auto source = test::public_instruction_example (d);
       run (*source);
     }
-    for (auto &text : test::x86_lowering_fixtures (target->abi () == ABI::X86Windows)) {
+    for (auto &text : test::x86_lowering_fixtures (target.value ().abi () == ABI::X86Windows)) {
       CAPTURE (text);
       auto source = serialization::parse_text (text);
-      REQUIRE (source);
-      run (**source);
+      REQUIRE ((source).has_value ());
+      run ((source).value ());
     }
   }
 }
 TEST_CASE ("native x86 frame errors leave stable nodes and revisions untouched") {
   auto target = TargetMachine::native ();
-  REQUIRE (target);
-  if (target->architecture () != Architecture::X86_64) return;
+  REQUIRE ((target).has_value ());
+  if (target.value ().architecture () != Architecture::X86_64) return;
   for (unsigned bad = 0; bad < 4; ++bad) {
     auto make = [&] (bool variadic) {
       auto f = std::make_unique<MachineFunction> ("m", "f", Signature{{Type::i64 ()}, {}, variadic},
-                                                  *target);
-      auto &b = f->create_block ();
+                                                  (target).value ());
+      auto &b = mirnext::codegen::detail::access (*(f)).create_block ();
       MachineRewriter rw (*f);
-      REQUIRE (rw.append (b, Opcode::Ret, {MachineOperand (target->registers ()[0].reg)}));
+      REQUIRE ((rw.append (b, Opcode::Ret,
+                           {mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+                             target.value ().registers ()[0].reg)}))
+                 .has_value ());
       auto state = f->state ();
       state.machinized = state.operands_legalized = true;
-      REQUIRE (rw.set_state (state));
+      REQUIRE ((rw.set_state (state)).has_value ());
       return f;
     };
     auto f = make (bad == 3), other = make (false);
     auto input = post (*f);
     MachineRewriter rw (*f);
-    if (bad == 0) REQUIRE (f->create_label (*f->blocks ().begin ()));
+    if (bad == 0)
+      REQUIRE ((mirnext::codegen::detail::access (*(f)).create_label (*f->blocks ().begin ()))
+                 .has_value ());
     if (bad == 1) {
       auto state = f->state ();
       state.frame_formed = true;
-      REQUIRE (rw.set_state (state));
+      REQUIRE ((rw.set_state (state)).has_value ());
     }
     auto &selected = bad == 2 ? *other : *f;
     auto before = selected.dump ();
     auto revision = selected.revision ();
     auto result = form_frame (selected, std::move (input));
-    REQUIRE_FALSE (result);
+    REQUIRE_FALSE ((result).has_value ());
     CHECK (selected.dump () == before);
     CHECK (selected.revision () == revision);
     CHECK (result.error ().message.find ("frame") != std::string::npos);
