@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Preserve MIR's simplify traversal and rewrite precedence. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #include "mirnext/Transforms/Simplify.hpp"
 #include <algorithm>
 #include <bit>
@@ -24,11 +26,11 @@ bool move_like (Opcode op) {
 }
 bool branch (Opcode op) {
   return op == Opcode::Jmp
-         || (instruction_descriptor (op)->flow == ControlFlow::Branch && op != Opcode::PrBeq
+         || (instruction_descriptor (op).get ()->flow == ControlFlow::Branch && op != Opcode::PrBeq
              && op != Opcode::PrBne);
 }
 bool integer_branch (Opcode op) {
-  auto d = instruction_descriptor (op);
+  auto d = instruction_descriptor (op).get ();
   return branch (op) && op != Opcode::Jmp
          && d->roles.find_first_of ("fde") == std::string_view::npos;
 }
@@ -80,7 +82,7 @@ std::optional<Opcode> reverse (Opcode op) {
 }
 bool identity (Opcode op, std::span<const Operand> operands) {
   if (operands.size () != 3) return false;
-  auto rhs = operands[2].get<std::int64_t> ();
+  auto rhs = ir::detail::operand_access (operands[2]).get<std::int64_t> ();
   if (!rhs) return false;
   switch (op) {
   case Opcode::Mul:
@@ -107,10 +109,15 @@ bool identity (Opcode op, std::span<const Operand> operands) {
   }
 }
 Operand key_operand (const Operand &op) {
-  if (auto address = op.get<Memory> ()) {
+  if (auto address = ir::detail::operand_access (op).get<Memory> ()) {
     // Alias annotations do not distinguish MIR simplify's scratch registers.
-    Memory memory{address->type, address->base, address->index, address->displacement,
-                  address->index ? address->scale : 1};
+    Memory memory = ir::detail::NodeAccess::make_Memory (address->type,
+                                                         ir::detail::NodeAccess::base (*(address)),
+                                                         ir::detail::NodeAccess::index (*(address)),
+                                                         address->displacement,
+                                                         ir::detail::NodeAccess::index (*(address))
+                                                           ? address->scale
+                                                           : 1);
     return Operand (std::move (memory));
   }
   return op;
@@ -119,7 +126,7 @@ void hash_combine (std::size_t &hash, std::size_t value) {
   hash ^= value + 0x9e3779b9U + (hash << 6) + (hash >> 2);
 }
 std::size_t operand_hash (const Operand &op) {
-  std::size_t hash = op.storage ().index ();
+  std::size_t hash = ir::detail::operand_access (op).storage ().index ();
   std::visit (
     [&] (const auto &value) {
       using T = std::decay_t<decltype (value)>;
@@ -127,17 +134,17 @@ std::size_t operand_hash (const Operand &op) {
         hash_combine (hash, static_cast<unsigned> (value.type.kind ()));
         hash_combine (hash, value.type.block_size ());
         hash_combine (hash, static_cast<unsigned> (value.type.block_class ()));
-        hash_combine (hash, std::hash<const Register *>{}(value.base));
-        hash_combine (hash, std::hash<const Register *>{}(value.index));
+        hash_combine (hash, std::hash<const Register *>{}(ir::detail::NodeAccess::base (value)));
+        hash_combine (hash, std::hash<const Register *>{}(ir::detail::NodeAccess::index (value)));
         hash_combine (hash, std::hash<std::int64_t>{}(value.displacement));
         hash_combine (hash, value.scale);
       } else if constexpr (std::is_same_v<T, SymbolReference>) {
-        hash_combine (hash, std::hash<const Symbol *>{}(value.symbol));
+        hash_combine (hash, std::hash<const Symbol *>{}(ir::detail::NodeAccess::symbol (value)));
         hash_combine (hash, std::hash<std::int64_t>{}(value.displacement));
       } else
         hash_combine (hash, std::hash<T>{}(value));
     },
-    op.storage ());
+    ir::detail::operand_access (op).storage ());
   return hash;
 }
 struct ValueKey {
@@ -165,29 +172,31 @@ class Simplifier {
   explicit Simplifier (Function &function)
     : function_ (function),
       rewriter_ (function),
-      expression_ (!function.expression_data_uses ().empty ()) {}
+      expression_ (
+        !ir::detail::ReferenceAccess::pointers (function.expression_data_uses ()).empty ()) {}
   Result<std::size_t> run () {
-    if (function_.module ().error ()) return *function_.module ().error ();
+    if ((function_.module ().error ()).has_value ()) return (function_.module ().error ()).value ();
     auto valid = function_.verify ();
-    if (!valid) return valid.error ();
+    if (!(valid).has_value ()) return valid.error ();
     auto materialized = materialize_stack_scopes (function_);
-    if (!materialized) return materialized.error ();
-    changes_ += materialized->saves + materialized->restores;
+    if (!(materialized).has_value ()) return materialized.error ();
+    changes_ += materialized.value ().saves + materialized.value ().restores;
     auto &entry = *function_.blocks ().begin ();
     BasicBlock *prologue = &entry;
-    for (auto argument : function_.arguments ())
+    for (auto argument : ir::detail::ReferenceAccess::pointers (function_.arguments ()))
       if (auto op = extension (argument->type ())) {
-        if (prologue == &entry && !entry.labels ().empty ()) {
-          auto block = function_.create_block_before (entry);
-          if (!block) return block.error ();
-          prologue = *block;
+        if (prologue == &entry
+            && !ir::detail::ReferenceAccess::pointers (entry.labels ()).empty ()) {
+          auto block = ir::detail::access (function_).create_block_before (entry);
+          if (!(block).has_value ()) return block.error ();
+          prologue = &(block).value ();
         }
         auto first = prologue->size ()
                        ? const_cast<Instruction *> (&*prologue->instructions ().begin ())
                        : nullptr;
         auto emitted
           = rewriter_.insert (*prologue, first, *op, {Operand (*argument), Operand (*argument)});
-        if (!emitted) return emitted.error ();
+        if (!(emitted).has_value ()) return emitted.error ();
         ++changes_;
       }
     Cursor cursor{&*function_.blocks ().begin (), nullptr};
@@ -199,115 +208,124 @@ class Simplifier {
       }
       auto &instruction = *cursor.instruction;
       auto opcode = instruction.opcode ();
-      if (move_like (opcode) && instruction.operands ()[0].get<Memory> ()
-          && instruction.operands ()[1].get<Memory> ()) {
-        auto memory = instruction.operands ()[0].get<Memory> ();
-        auto temp = function_.create_register (scalar (memory->type));
-        if (!temp) return temp.error ();
-        auto store = rewriter_.insert_after (instruction, move (memory->type),
-                                             {instruction.operands ()[0], Operand (**temp)});
-        if (!store) return store.error ();
-        auto replaced = rewriter_.replace_operand (instruction, 0, Operand (**temp));
-        if (!replaced) return replaced.error ();
+      if (move_like (opcode)
+          && ir::detail::operand_access (instruction.operands ()[0]).get<Memory> ()
+          && ir::detail::operand_access (instruction.operands ()[1]).get<Memory> ()) {
+        auto memory = ir::detail::operand_access (instruction.operands ()[0]).get<Memory> ();
+        auto temp = ir::detail::access (function_).create_register (scalar (memory->type));
+        if (!(temp).has_value ()) return temp.error ();
+        auto store
+          = rewriter_.insert_after (instruction, move (memory->type),
+                                    {instruction.operands ()[0], Operand ((temp).value ())});
+        if (!(store).has_value ()) return store.error ();
+        auto replaced = rewriter_.replace_operand (instruction, 0, Operand ((temp).value ()));
+        if (!(replaced).has_value ()) return replaced.error ();
         ++changes_;
       }
       if (opcode == Opcode::Ret) returns_.push_back (&instruction);
       auto next = next_cursor (instruction);
       if (opcode == Opcode::Alloca) {
         auto consolidated = allocas (instruction, next);
-        if (!consolidated) return consolidated.error ();
+        if (!(consolidated).has_value ()) return consolidated.error ();
       }
       auto operands = instruction.operands ();
       if ((integer_branch (opcode) || opcode == Opcode::Jmp)
-          && adjacent (next, **operands[0].get<const Label *> ())) {
+          && adjacent (next, **ir::detail::operand_access (operands[0]).get<const Label *> ())) {
         auto erased = rewriter_.erase (instruction);
-        if (!erased) return erased.error ();
+        if (!(erased).has_value ()) return erased.error ();
         ++changes_;
       } else if (identity (opcode, operands) && !live_overflow (instruction)) {
         if (key_operand (operands[0]) == key_operand (operands[1])) {
           auto erased = rewriter_.erase (instruction);
-          if (!erased) return erased.error ();
+          if (!(erased).has_value ()) return erased.error ();
         } else {
           const Operand replacement[]{operands[0], operands[1]};
           auto edited = rewriter_.replace (instruction, Opcode::Mov, replacement);
-          if (!edited) return edited.error ();
+          if (!(edited).has_value ()) return edited.error ();
           next = cursor;
         }
         ++changes_;
       } else if (integer_branch (opcode) && next.instruction
                  && next.instruction->opcode () == Opcode::Jmp
-                 && aliases (**operands[0].get<const Label *> (),
-                             **next.instruction->operands ()[0].get<const Label *> ())) {
+                 && aliases (**ir::detail::operand_access (operands[0]).get<const Label *> (),
+                             **ir::detail::operand_access (next.instruction->operands ()[0])
+                                 .get<const Label *> ())) {
         auto erased = rewriter_.erase (instruction);
-        if (!erased) return erased.error ();
+        if (!(erased).has_value ()) return erased.error ();
         ++changes_;
       } else if ((opcode == Opcode::Bt || opcode == Opcode::Bts || opcode == Opcode::Bf
                   || opcode == Opcode::Bfs)
-                 && operands[1].get<std::int64_t> ()
-                 && (*operands[1].get<std::int64_t> () == 0
-                     || *operands[1].get<std::int64_t> () == 1)) {
+                 && ir::detail::operand_access (operands[1]).get<std::int64_t> ()
+                 && (*ir::detail::operand_access (operands[1]).get<std::int64_t> () == 0
+                     || *ir::detail::operand_access (operands[1]).get<std::int64_t> () == 1)) {
         if ((opcode == Opcode::Bt || opcode == Opcode::Bts)
-            == (*operands[1].get<std::int64_t> () == 1)) {
+            == (*ir::detail::operand_access (operands[1]).get<std::int64_t> () == 1)) {
           const Operand replacement[]{operands[0]};
           auto edited = rewriter_.replace (instruction, Opcode::Jmp, replacement);
-          if (!edited) return edited.error ();
+          if (!(edited).has_value ()) return edited.error ();
           next = cursor;
         } else {
           auto erased = rewriter_.erase (instruction);
-          if (!erased) return erased.error ();
+          if (!(erased).has_value ()) return erased.error ();
         }
         ++changes_;
       } else if (auto reversed = reverse (opcode);
                  reversed && next.instruction && next.instruction->opcode () == Opcode::Jmp
                  && adjacent (next_cursor (*next.instruction),
-                              **operands[0].get<const Label *> ())) {
+                              **ir::detail::operand_access (operands[0]).get<const Label *> ())) {
         std::vector<Operand> replacement (operands.begin (), operands.end ());
         replacement[0] = next.instruction->operands ()[0];
         auto erased = rewriter_.erase (*next.instruction);
-        if (!erased) return erased.error ();
+        if (!(erased).has_value ()) return erased.error ();
         auto edited = rewriter_.replace (instruction, *reversed, replacement);
-        if (!edited) return edited.error ();
+        if (!(edited).has_value ()) return edited.error ();
         next = cursor;
         ++changes_;
-      } else if (branch (opcode) && target_instruction (**operands[0].get<const Label *> ())
-                 && target_instruction (**operands[0].get<const Label *> ())->opcode ()
+      } else if (branch (opcode)
+                 && target_instruction (
+                   **ir::detail::operand_access (operands[0]).get<const Label *> ())
+                 && target_instruction (
+                      **ir::detail::operand_access (operands[0]).get<const Label *> ())
+                        ->opcode ()
                       == Opcode::Jmp
                  && ++chain < 32) {
-        auto jump = target_instruction (**operands[0].get<const Label *> ());
+        auto jump
+          = target_instruction (**ir::detail::operand_access (operands[0]).get<const Label *> ());
         auto edited = rewriter_.replace_operand (instruction, 0, jump->operands ()[0]);
-        if (!edited) return edited.error ();
+        if (!(edited).has_value ()) return edited.error ();
         ++changes_;
         continue;
       } else {
         auto simplified = simplify_operands (instruction);
-        if (!simplified) return simplified.error ();
+        if (!(simplified).has_value ()) return simplified.error ();
       }
       chain = 0;
       cursor = next;
     }
     auto unified = unify_returns ();
-    if (!unified) return unified.error ();
+    if (!(unified).has_value ()) return unified.error ();
     auto labels = rewriter_.erase_unused_labels ();
-    if (!labels) return labels.error ();
-    changes_ += *labels;
+    if (!(labels).has_value ()) return labels.error ();
+    changes_ += (labels).value ();
     for (auto block = &*function_.blocks ().begin (); block;) {
       auto next = rewriter_.next_block (*block);
-      if (next && !block->terminator () && next->labels ().empty ()
-          && block->stack_scope () == next->stack_scope ()) {
+      if (next && !block->terminator ().get ()
+          && ir::detail::ReferenceAccess::pointers (next->labels ()).empty ()
+          && block->stack_scope ().get () == next->stack_scope ().get ()) {
         auto merged = rewriter_.merge_fallthrough (*block);
-        if (!merged) return merged.error ();
+        if (!(merged).has_value ()) return merged.error ();
         ++changes_;
       } else
         block = next;
     }
     valid = function_.verify ();
-    if (!valid) return valid.error ();
+    if (!(valid).has_value ()) return valid.error ();
     return changes_;
   }
 
  private:
   Function &function_;
-  IRRewriter rewriter_;
+  InstructionRewriter rewriter_;
   std::size_t changes_ = 0;
   bool expression_ = false;
   std::unordered_map<ValueKey, const Register *, ValueHash> values_;
@@ -316,9 +334,11 @@ class Simplifier {
     auto block = const_cast<BasicBlock *> (&instruction.block ());
     if (auto next = rewriter_.next_instruction (instruction)) return {block, next};
     block = rewriter_.next_block (*block);
-    while (block && block->labels ().empty () && !block->size ())
+    while (block && ir::detail::ReferenceAccess::pointers (block->labels ()).empty ()
+           && !block->size ())
       block = rewriter_.next_block (*block);
-    if (!block || !block->labels ().empty ()) return {block, nullptr};
+    if (!block || !ir::detail::ReferenceAccess::pointers (block->labels ()).empty ())
+      return {block, nullptr};
     return {block, &*block->instructions ().begin ()};
   }
   Cursor first_after_labels (BasicBlock *block) {
@@ -342,7 +362,8 @@ class Simplifier {
     const Label *last = &label;
     auto block = const_cast<BasicBlock *> (&label.block ());
     while (block) {
-      if (!block->labels ().empty ()) last = block->labels ().back ();
+      if (!ir::detail::ReferenceAccess::pointers (block->labels ()).empty ())
+        last = ir::detail::ReferenceAccess::pointers (block->labels ()).back ();
       if (block->size ()) break;
       block = rewriter_.next_block (*block);
     }
@@ -369,169 +390,179 @@ class Simplifier {
       if (opcode == Opcode::Bo || opcode == Opcode::Bno || opcode == Opcode::UBo
           || opcode == Opcode::UBno)
         return true;
-      if (opcode != Opcode::Mov || !cursor.instruction->operands ()[1].get<const Register *> ())
+      if (opcode != Opcode::Mov
+          || !ir::detail::operand_access (cursor.instruction->operands ()[1])
+                .get<const Register *> ())
         break;
     }
     return false;
   }
-  Result<const Register *> value_register (Type type, const Operand &lhs,
+  Result<const Register &> value_register (Type type, const Operand &lhs,
                                            std::optional<Opcode> opcode = {},
                                            const Operand *rhs = nullptr) {
     ValueKey key{scalar (type), opcode, key_operand (lhs),
                  rhs ? std::optional (key_operand (*rhs)) : std::nullopt};
-    if (auto found = values_.find (key); found != values_.end ()) return found->second;
-    auto created = function_.create_register (scalar (type));
-    if (!created) return created.error ();
-    values_.emplace (std::move (key), *created);
-    return *created;
+    if (auto found = values_.find (key); found != values_.end ()) return *(found->second);
+    auto created = ir::detail::access (function_).create_register (scalar (type));
+    if (!(created).has_value ()) return created.error ();
+    values_.emplace (std::move (key), &(created).value ());
+    return (created).value ();
   }
   Result<void> emit (Instruction &anchor, Opcode opcode, std::initializer_list<Operand> operands,
                      bool after, Instruction *&after_anchor) {
     auto emitted = after ? rewriter_.insert_after (*after_anchor, opcode, operands)
                          : rewriter_.insert_before (anchor, opcode, operands);
-    if (!emitted) return emitted.error ();
-    if (after) after_anchor = *emitted;
+    if (!(emitted).has_value ()) return emitted.error ();
+    if (after) after_anchor = &(emitted).value ();
     ++changes_;
     return {};
   }
   Result<void> simplify_operands (Instruction &instruction) {
     auto opcode = instruction.opcode ();
     const bool moving = move_like (opcode),
-               call = instruction_descriptor (opcode)->count == OperandCount::Call;
+               call = instruction_descriptor (opcode).get ()->count == OperandCount::Call;
     for (std::size_t n = 0; n < instruction.operands ().size (); ++n) {
       auto operand = instruction.operands ()[n];
       const bool output = output_operand (function_, instruction, n);
       auto after_anchor = &instruction;
-      if ((call && n == 0) || (call && n == 1 && operand.get<SymbolReference> ())
+      if ((call && n == 0)
+          || (call && n == 1 && ir::detail::operand_access (operand).get<SymbolReference> ())
           || (opcode == Opcode::VaArg && n == 2)
           || ((opcode == Opcode::PrBeq || opcode == Opcode::PrBne) && n == 2)
           || (opcode == Opcode::PrSet && n == 1))
         continue;
-      if (auto label = operand.get<const Label *> ())
+      if (auto label = ir::detail::operand_access (operand).get<const Label *> ())
         operand = Operand (last_label (**label));
-      else if (operand.get<float> () || operand.get<double> () || operand.get<long double> ()
-               || operand.get<std::string> ()) {
-        const bool string = operand.get<std::string> ();
-        auto data = function_.module ().create_literal (operand);
-        if (!data) return data.error ();
-        operand = Operand ((*data)->symbol ());
+      else if (ir::detail::operand_access (operand).get<float> ()
+               || ir::detail::operand_access (operand).get<double> ()
+               || ir::detail::operand_access (operand).get<long double> ()
+               || ir::detail::operand_access (operand).get<std::string> ()) {
+        const bool string = ir::detail::operand_access (operand).get<std::string> ();
+        auto data = ir::detail::access (function_.module ()).create_literal (operand);
+        if (!(data).has_value ()) return data.error ();
+        operand = Operand (data.value ().symbol ());
         if (!string) {
           auto address = value_register (Type::i64 (), operand);
-          if (!address) return address.error ();
-          auto emitted
-            = emit (instruction, Opcode::Mov, {Operand (**address), operand}, false, after_anchor);
-          if (!emitted) return emitted;
-          auto type = std::get<InitializedData> ((*data)->initializer ()).type;
-          Memory memory{type, *address};
+          if (!(address).has_value ()) return address.error ();
+          auto emitted = emit (instruction, Opcode::Mov, {Operand ((address).value ()), operand},
+                               false, after_anchor);
+          if (!(emitted).has_value ()) return emitted;
+          auto type = std::get<InitializedData> (data.value ().initializer ()).type;
+          Memory memory = ir::detail::NodeAccess::make_Memory (type, &(address).value ());
           if (expression_) {
-            auto tagged = rewriter_.literal_memory (**data, **address);
-            if (!tagged) return tagged.error ();
-            memory = std::move (*tagged);
+            auto tagged = rewriter_.literal_memory ((data).value (), (address).value ());
+            if (!(tagged).has_value ()) return tagged.error ();
+            memory = std::move ((tagged).value ());
           }
           operand = Operand (std::move (memory));
         }
         if (!moving) {
-          auto type = string ? Type::i64 () : operand.get<Memory> ()->type;
+          auto type
+            = string ? Type::i64 () : ir::detail::operand_access (operand).get<Memory> ()->type;
           auto reg = value_register (type, operand);
-          if (!reg) return reg.error ();
-          auto emitted
-            = emit (instruction, move (type), {Operand (**reg), operand}, false, after_anchor);
-          if (!emitted) return emitted;
-          operand = Operand (**reg);
+          if (!(reg).has_value ()) return reg.error ();
+          auto emitted = emit (instruction, move (type), {Operand ((reg).value ()), operand}, false,
+                               after_anchor);
+          if (!(emitted).has_value ()) return emitted;
+          operand = Operand ((reg).value ());
         }
-      } else if (auto reg = operand.get<const Register *> ()) {
+      } else if (auto reg = ir::detail::operand_access (operand).get<const Register *> ()) {
         if ((*reg)->hardware_binding ().empty ()) continue;
         if (moving) {
-          auto other = instruction.operands ()[1 - n].get<const Register *> ();
+          auto other
+            = ir::detail::operand_access (instruction.operands ()[1 - n]).get<const Register *> ();
           if (other && (*other)->hardware_binding ().empty ()) continue;
         }
         auto temp = value_register ((*reg)->type (), operand);
-        if (!temp) return temp.error ();
-        auto emitted = emit (instruction, move ((*reg)->type ()),
-                             output ? std::initializer_list<Operand>{operand, Operand (**temp)}
-                                    : std::initializer_list<Operand>{Operand (**temp), operand},
-                             output, after_anchor);
-        if (!emitted) return emitted;
-        operand = Operand (**temp);
-      } else if (auto original = operand.get<Memory> ()) {
+        if (!(temp).has_value ()) return temp.error ();
+        auto emitted
+          = emit (instruction, move ((*reg)->type ()),
+                  output ? std::initializer_list<Operand>{operand, Operand ((temp).value ())}
+                         : std::initializer_list<Operand>{Operand ((temp).value ()), operand},
+                  output, after_anchor);
+        if (!(emitted).has_value ()) return emitted;
+        operand = Operand ((temp).value ());
+      } else if (auto original = ir::detail::operand_access (operand).get<Memory> ()) {
         auto memory = *original;
-        auto base = memory.base, index = memory.index;
+        auto base = ir::detail::NodeAccess::base (memory),
+             index = ir::detail::NodeAccess::index (memory);
         for (auto address : {&base, &index})
           if (*address && !(*address)->hardware_binding ().empty ()) {
             Operand reg (**address);
             auto temp = value_register (Type::i64 (), reg);
-            if (!temp) return temp.error ();
-            auto emitted
-              = emit (instruction, Opcode::Mov, {Operand (**temp), reg}, false, after_anchor);
-            if (!emitted) return emitted;
-            *address = *temp;
+            if (!(temp).has_value ()) return temp.error ();
+            auto emitted = emit (instruction, Opcode::Mov, {Operand ((temp).value ()), reg}, false,
+                                 after_anchor);
+            if (!(emitted).has_value ()) return emitted;
+            *address = &(temp).value ();
           }
-        memory.base = base;
-        memory.index = index;
+        ir::detail::NodeAccess::base (memory) = base;
+        ir::detail::NodeAccess::index (memory) = index;
         const auto block_argument = memory.type.is_block () && call;
         const bool after = !moving && output && !live_overflow (instruction);
-        auto literal = [&] (std::int64_t number) -> Result<const Register *> {
+        auto literal = [&] (std::int64_t number) -> Result<const Register &> {
           Operand op (number);
           auto reg = value_register (Type::i64 (), op);
-          if (!reg) return reg.error ();
+          if (!(reg).has_value ()) return reg.error ();
           auto emitted
-            = emit (instruction, Opcode::Mov, {Operand (**reg), op}, after, after_anchor);
-          if (!emitted) return emitted.error ();
-          return *reg;
+            = emit (instruction, Opcode::Mov, {Operand ((reg).value ()), op}, after, after_anchor);
+          if (!(emitted).has_value ()) return emitted.error ();
+          return (reg).value ();
         };
         auto binary
-          = [&] (Opcode op, const Register *lhs, const Register *rhs) -> Result<const Register *> {
+          = [&] (Opcode op, const Register *lhs, const Register *rhs) -> Result<const Register &> {
           Operand l (*lhs), r (*rhs);
           auto reg = value_register (Type::i64 (), l, op, &r);
-          if (!reg) return reg.error ();
-          auto emitted = emit (instruction, op, {Operand (**reg), l, r}, after, after_anchor);
-          if (!emitted) return emitted.error ();
-          return *reg;
+          if (!(reg).has_value ()) return reg.error ();
+          auto emitted
+            = emit (instruction, op, {Operand ((reg).value ()), l, r}, after, after_anchor);
+          if (!(emitted).has_value ()) return emitted.error ();
+          return (reg).value ();
         };
         auto compute_address = [&] (const Register *base, const Register *index, unsigned scale,
-                                    std::int64_t displacement_value) -> Result<const Register *> {
-          if (base && !displacement_value && (!index || !scale)) return base;
-          if (!base && index && scale == 1 && !displacement_value) return index;
+                                    std::int64_t displacement_value) -> Result<const Register &> {
+          if (base && !displacement_value && (!index || !scale)) return *(base);
+          if (!base && index && scale == 1 && !displacement_value) return *(index);
           const Register *displacement = nullptr, *scaled = index;
           if (displacement_value) {
             auto reg = literal (displacement_value);
-            if (!reg) return reg.error ();
-            displacement = *reg;
+            if (!(reg).has_value ()) return reg.error ();
+            displacement = &(reg).value ();
           }
           if (index && scale > 1) {
             auto factor = literal (scale);
-            if (!factor) return factor.error ();
-            auto reg = binary (Opcode::Mul, index, *factor);
-            if (!reg) return reg.error ();
-            scaled = *reg;
+            if (!(factor).has_value ()) return factor.error ();
+            auto reg = binary (Opcode::Mul, index, &(factor).value ());
+            if (!(reg).has_value ()) return reg.error ();
+            scaled = &(reg).value ();
           }
           auto sum = base ? base : scaled;
           if (base && scaled) {
             auto reg = binary (Opcode::Add, base, scaled);
-            if (!reg) return reg.error ();
-            sum = *reg;
+            if (!(reg).has_value ()) return reg.error ();
+            sum = &(reg).value ();
           }
           const Register *address = sum ? sum : displacement;
           if (sum && displacement) {
             auto reg = binary (Opcode::Add, sum, displacement);
-            if (!reg) return reg.error ();
-            address = *reg;
+            if (!(reg).has_value ()) return reg.error ();
+            address = &(reg).value ();
           }
           if (!address) {
             auto reg = literal (0);
-            if (!reg) return reg.error ();
-            address = *reg;
+            if (!(reg).has_value ()) return reg.error ();
+            address = &(reg).value ();
           }
-          return address;
+          return *(address);
         };
-        // A typed BlockArgument may carry a real payload offset (not the
+        // A typed ir::detail::BlockArgumentState may carry a real payload offset (not the
         // serialized block-size field). Canonicalize that offset to a plain
         // base before the ABI lowering checks the call operand.
-        if (block_argument && (memory.displacement || memory.index)) {
+        if (block_argument && (memory.displacement || ir::detail::NodeAccess::index (memory))) {
           auto actual = compute_address (base, index, memory.scale, memory.displacement);
-          if (!actual) return actual.error ();
-          memory.base = base = *actual;
-          memory.index = index = nullptr;
+          if (!(actual).has_value ()) return actual.error ();
+          ir::detail::NodeAccess::base (memory) = base = &(actual).value ();
+          ir::detail::NodeAccess::index (memory) = index = nullptr;
           memory.displacement = 0;
           memory.scale = 0;
         }
@@ -539,52 +570,58 @@ class Simplifier {
                                           ? static_cast<std::int64_t> (memory.type.block_size ())
                                           : memory.displacement;
         auto computed = compute_address (base, index, memory.scale, displacement_value);
-        if (!computed) return computed.error ();
-        const Register *address = *computed;
+        if (!(computed).has_value ()) return computed.error ();
+        const Register *address = &(computed).value ();
         if (block_argument)
           operand = Operand (memory);
         else {
-          memory.base = address;
-          memory.index = nullptr;
+          ir::detail::NodeAccess::base (memory) = address;
+          ir::detail::NodeAccess::index (memory) = nullptr;
           memory.displacement = 0;
           memory.scale = 0;
           operand = Operand (memory);
         }
-        if (moving && (n == 1 || instruction.operands ()[1].get<const Register *> ())) {
+        if (moving
+            && (n == 1
+                || ir::detail::operand_access (instruction.operands ()[1])
+                     .get<const Register *> ())) {
         } else if (memory.type.kind () == Type::Kind::Undef)
           operand = Operand (*address);
         else if (!memory.type.is_block () || !call) {
           auto type = scalar (memory.type);
           auto temp = value_register (type, operand);
-          if (!temp) return temp.error ();
-          auto emitted = emit (instruction, move (type),
-                               output ? std::initializer_list<Operand>{operand, Operand (**temp)}
-                                      : std::initializer_list<Operand>{Operand (**temp), operand},
-                               output, after_anchor);
-          if (!emitted) return emitted;
-          operand = Operand (**temp);
+          if (!(temp).has_value ()) return temp.error ();
+          auto emitted
+            = emit (instruction, move (type),
+                    output ? std::initializer_list<Operand>{operand, Operand ((temp).value ())}
+                           : std::initializer_list<Operand>{Operand ((temp).value ()), operand},
+                    output, after_anchor);
+          if (!(emitted).has_value ()) return emitted;
+          operand = Operand ((temp).value ());
         }
       } else if (!moving
-                 && (operand.get<std::int64_t> () || operand.get<std::uint64_t> ()
-                     || operand.get<SymbolReference> ())) {
+                 && (ir::detail::operand_access (operand).get<std::int64_t> ()
+                     || ir::detail::operand_access (operand).get<std::uint64_t> ()
+                     || ir::detail::operand_access (operand).get<SymbolReference> ())) {
         auto reg = value_register (Type::i64 (), operand);
-        if (!reg) return reg.error ();
-        auto emitted
-          = emit (instruction, Opcode::Mov, {Operand (**reg), operand}, false, after_anchor);
-        if (!emitted) return emitted;
-        operand = Operand (**reg);
+        if (!(reg).has_value ()) return reg.error ();
+        auto emitted = emit (instruction, Opcode::Mov, {Operand ((reg).value ()), operand}, false,
+                             after_anchor);
+        if (!(emitted).has_value ()) return emitted;
+        operand = Operand ((reg).value ());
       }
       if (operand != instruction.operands ()[n]) {
         auto edited = rewriter_.replace_operand (instruction, n, std::move (operand));
-        if (!edited) return edited;
+        if (!(edited).has_value ()) return edited;
       }
     }
     return {};
   }
   Result<void> allocas (Instruction &instruction, Cursor &next) {
     auto size_value = [] (const Operand &op) -> std::optional<std::int64_t> {
-      if (auto v = op.get<std::int64_t> ()) return *v;
-      if (auto v = op.get<std::uint64_t> ()) return std::bit_cast<std::int64_t> (*v);
+      if (auto v = ir::detail::operand_access (op).get<std::int64_t> ()) return *v;
+      if (auto v = ir::detail::operand_access (op).get<std::uint64_t> ())
+        return std::bit_cast<std::int64_t> (*v);
       return {};
     };
     auto size = size_value (instruction.operands ()[1]);
@@ -598,38 +635,38 @@ class Simplifier {
     };
     std::int64_t align;
     auto overall = rounded (*size, align);
-    if (!overall) return overall.error ();
+    if (!(overall).has_value ()) return overall.error ();
     while (next.instruction && next.instruction->opcode () == Opcode::Alloca
            && size_value (next.instruction->operands ()[1])
            && key_operand (instruction.operands ()[0])
                 != key_operand (next.instruction->operands ()[0])) {
       std::int64_t next_align;
       auto amount = rounded (*size_value (next.instruction->operands ()[1]), next_align);
-      if (!amount) return amount.error ();
+      if (!(amount).has_value ()) return amount.error ();
       if (next_align > align) {
-        if (*overall > INT64_MAX - next_align + 1)
+        if ((overall).value () > INT64_MAX - next_align + 1)
           return Error{ErrorCode::InvalidOperand, "alloca alignment overflows signed size"};
-        *overall = (*overall + (next_align - 1)) / next_align * next_align;
+        (overall).value () = ((overall).value () + (next_align - 1)) / next_align * next_align;
         align = next_align;
       }
-      if (*overall > INT64_MAX - *amount)
+      if ((overall).value () > INT64_MAX - (amount).value ())
         return Error{ErrorCode::InvalidOperand, "combined alloca size overflows signed size"};
       auto following = next_cursor (*next.instruction);
       const Operand operands[]{next.instruction->operands ()[0], instruction.operands ()[0],
-                               Operand (*overall)};
+                               Operand ((overall).value ())};
       auto edited = rewriter_.replace (*next.instruction,
                                        sizeof (void *) == 4 ? Opcode::Adds : Opcode::Add, operands);
-      if (!edited) return edited;
-      *overall += *amount;
+      if (!(edited).has_value ()) return edited;
+      (overall).value () += (amount).value ();
       next = following;
       ++changes_;
     }
-    auto normalized = instruction.operands ()[1].get<std::uint64_t> ()
-                        ? Operand (static_cast<std::uint64_t> (*overall))
-                        : Operand (*overall);
+    auto normalized = ir::detail::operand_access (instruction.operands ()[1]).get<std::uint64_t> ()
+                        ? Operand (static_cast<std::uint64_t> ((overall).value ()))
+                        : Operand ((overall).value ());
     if (normalized != instruction.operands ()[1]) {
       auto edited = rewriter_.replace_operand (instruction, 1, std::move (normalized));
-      if (!edited) return edited;
+      if (!(edited).has_value ()) return edited;
       ++changes_;
     }
     next = next_cursor (instruction);
@@ -642,19 +679,19 @@ class Simplifier {
     const Label *label = nullptr;
     if (returns_.size () > 1) {
       auto block = rewriter_.split_before (last);
-      if (!block) return block.error ();
-      auto created = function_.create_label (**block);
-      if (!created) return created.error ();
-      label = *created;
+      if (!(block).has_value ()) return block.error ();
+      auto created = ir::detail::access (function_).create_label ((block).value ());
+      if (!(created).has_value ()) return created.error ();
+      label = &(created).value ();
     }
     for (std::size_t n = 0; n < original.size (); ++n)
       if (auto op = extension (function_.signature ().results[n])) {
-        auto reg = function_.create_register (Type::i64 ());
-        if (!reg) return reg.error ();
-        auto emitted = rewriter_.insert_before (last, *op, {Operand (**reg), original[n]});
-        if (!emitted) return emitted.error ();
-        auto edited = rewriter_.replace_operand (last, n, Operand (**reg));
-        if (!edited) return edited;
+        auto reg = ir::detail::access (function_).create_register (Type::i64 ());
+        if (!(reg).has_value ()) return reg.error ();
+        auto emitted = rewriter_.insert_before (last, *op, {Operand ((reg).value ()), original[n]});
+        if (!(emitted).has_value ()) return emitted.error ();
+        auto edited = rewriter_.replace_operand (last, n, Operand ((reg).value ()));
+        if (!(edited).has_value ()) return edited;
         ++changes_;
       }
     for (auto instruction : returns_)
@@ -663,23 +700,28 @@ class Simplifier {
           auto emitted
             = rewriter_.insert_before (*instruction, move (function_.signature ().results[n]),
                                        {original[n], instruction->operands ()[n]});
-          if (!emitted) return emitted.error ();
+          if (!(emitted).has_value ()) return emitted.error ();
         }
         const Operand replacement[]{Operand (*label)};
         auto edited = rewriter_.replace (*instruction, Opcode::Jmp, replacement);
-        if (!edited) return edited;
+        if (!(edited).has_value ()) return edited;
         ++changes_;
       }
     return {};
   }
 };
 }  // namespace
-Result<PassResult> SimplifyPass::run (ir::Function &function, analysis::FunctionAnalysisManager &) {
+Result<PassResult> SimplifyPass::run (ir::MIRBuilder &edit, analysis::FunctionAnalysisManager &) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   auto phase = function.require_register_ir ();
-  if (!phase) return phase.error ();
+  if (!(phase).has_value ()) return phase.error ();
   auto result = Simplifier (function).run ();
-  if (!result) return result.error ();
-  return PassResult{*result, *result ? analysis::PreservedAnalyses::none ()
-                                     : analysis::PreservedAnalyses::all ()};
+  if (!(result).has_value ()) return result.error ();
+  return PassResult{(result).value (), (result).value () ? analysis::PreservedAnalyses::none ()
+                                                         : analysis::PreservedAnalyses::all ()};
 }
 }  // namespace mirnext::transforms

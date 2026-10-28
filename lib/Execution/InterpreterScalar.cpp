@@ -66,8 +66,8 @@ Result<ScalarValue> to_integer (const ScalarValue &v) {
 Result<std::optional<ScalarValue>> evaluate_scalar (O op, std::span<const ScalarValue> v,
                                                     OverflowFlags &flags) {
   auto result = [] (Result<ScalarValue> r) -> Result<std::optional<ScalarValue>> {
-    if (!r) return r.error ();
-    return std::optional<ScalarValue> (std::move (*r));
+    if (!(r).has_value ()) return r.error ();
+    return std::optional<ScalarValue> (std::move ((r).value ()));
   };
   auto value = [] (ScalarValue r) -> Result<std::optional<ScalarValue>> {
     return std::optional<ScalarValue> (std::move (r));

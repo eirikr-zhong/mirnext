@@ -11,7 +11,7 @@ int main (int argc, char **argv, char **environment) {
   std::ifstream file (argv[1], std::ios::binary);
   if (!file) return report (invalid (std::string (argv[1]) + ": cannot open binary"));
   auto input = read_stream (file, argv[1]);
-  if (!input) return report (input.error ());
-  auto result = run_program (bytes (*input), argc - 2, argv + 2, environment);
-  return result ? *result : report (result.error ());
+  if (!(input).has_value ()) return report (input.error ());
+  auto result = run_program (bytes ((input).value ()), argc - 2, argv + 2, environment);
+  return (result).has_value () ? (result).value () : report (result.error ());
 }

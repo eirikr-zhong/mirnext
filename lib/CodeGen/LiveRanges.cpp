@@ -1,3 +1,5 @@
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/IR/Access.hpp"
 /* Live-range construction derived from MIR, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. No transported instruction or CFG body. */
 #include "mirnext/CodeGen/RegisterAllocation.hpp"
@@ -17,11 +19,11 @@ Error invalid (const MachineFunction &f, std::string why) {
 }  // namespace
 Result<std::span<const MachineLiveRange>> MachineLiveRanges::ranges (MachineRegister r) const {
   if (!current (*owner_)) return invalid (*owner_, "stale live ranges");
-  if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+  if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r))) {
     auto at = virtuals_.find (*v);
     if (at != virtuals_.end ()) return std::span<const MachineLiveRange> ((*ranges_)[at->second]);
   } else {
-    auto p = std::get<target::PhysicalRegister> (r);
+    auto p = std::get<target::PhysicalRegister> (detail::NodeAccess::storage (r));
     auto at = physicals_.find (p.encoding ());
     if (at != physicals_.end () && registers_[at->second] == r)
       return std::span<const MachineLiveRange> ((*ranges_)[at->second]);
@@ -33,7 +35,7 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
                                                     const MachineLiveness &live) {
   if (!graph.current (f) || !live.current (f)) return invalid (f, "stale or foreign CFG/liveness");
   auto valid = f.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   detail::RegisterIndex index (f);
   MachineLiveRanges result;
   result.owner_ = &f;
@@ -71,7 +73,7 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
       living.erase (s);
       ranges.back ().finish = point;
     } else
-      ranges.push_back ({point, point, 1, {}});
+      ranges.push_back ({point, point, 1});
     return true;
   };
   auto born = [&] (std::size_t r, std::size_t s, bool instruction) {
@@ -79,12 +81,12 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
     if (living.contains (s)) return false;
     living.insert (s);
     auto &ranges = storage[r];
-    if (!instruction || ranges.empty () || !ranges.back ().blocks.empty ()
+    if (!instruction || ranges.empty () || !detail::NodeAccess::blocks (ranges.back ()).empty ()
         || (ranges.back ().finish != point && ranges.back ().finish != point - 1))
-      ranges.push_back ({point, -1, 1, {}});
+      ranges.push_back ({point, -1, 1});
     return true;
   };
-  auto count = graph.cfg ().blocks.size ();
+  auto count = detail::NodeAccess::blocks (graph.cfg ()).size ();
   std::vector<std::size_t> order (count - 2);
   std::iota (order.begin (), order.end (), 2);
   if (live.optimization_level () == 1)
@@ -94,9 +96,11 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
   // O0 follows physical layout. The canonical CFG stores that same layout for
   // real blocks; O2/O3 retain it as the original allocator does.
   for (auto b : order) {
-    auto block = graph.cfg ().blocks[b];
+    auto block = detail::NodeAccess::blocks (graph.cfg ())[b];
     auto body = block->instructions ();
-    if (body.begin () == body.end () && block->labels ().empty ()) continue;
+    if (body.begin () == body.end ()
+        && ir::detail::ReferenceAccess::pointers (block->labels ()).empty ())
+      continue;
     living.clear ();
     referenced.clear ();
     live.blocks ()[b].out.for_each ([&] (auto s) { born (full[s], s, false); });
@@ -127,7 +131,8 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
           born (r, *scans[r], true);
         }
         living.for_each ([&] (auto s) {
-          if (std::holds_alternative<const MachineVirtualRegister *> (index.values[full[s]]))
+          if (std::holds_alternative<const MachineVirtualRegister *> (
+                detail::NodeAccess::storage (index.values[full[s]])))
             result.crossed_.insert (full[s]);
         });
       }
@@ -151,12 +156,14 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
     live.blocks ()[b].in.for_each ([&] (auto s) {
       auto r = full[s];
       dead (r, s, false);
-      if (!compact && !referenced.contains (r)) storage[r].back ().blocks.push_back (block);
+      if (!compact && !referenced.contains (r))
+        detail::NodeAccess::blocks (storage[r].back ()).push_back (block);
     });
     if (!compact) {
       result.spill_[b] = {};
       referenced.for_each ([&] (auto r) {
-        if (std::holds_alternative<const MachineVirtualRegister *> (index.values[r]))
+        if (std::holds_alternative<const MachineVirtualRegister *> (
+              detail::NodeAccess::storage (index.values[r])))
           result.spill_[b].kill.insert (r);
       });
     }
@@ -191,12 +198,14 @@ Result<MachineLiveRanges> MachineLiveRanges::build (const MachineFunction &f,
       range.finish = result.point_map_[range.finish];
       if (merged.empty ()
           || (merged.back ().start != range.finish && merged.back ().start - 1 != range.finish)
-          || merged.back ().blocks.empty () != range.blocks.empty ())
+          || detail::NodeAccess::blocks (merged.back ()).empty ()
+               != detail::NodeAccess::blocks (range).empty ())
         merged.push_back (std::move (range));
       else {
         merged.back ().start = range.start;
-        for (auto block : range.blocks)
-          merged.back ().blocks.insert (merged.back ().blocks.begin (), block);
+        for (auto block : detail::NodeAccess::blocks (range))
+          detail::NodeAccess::blocks (merged.back ())
+            .insert (detail::NodeAccess::blocks (merged.back ()).begin (), block);
       }
     }
     ranges = std::move (merged);

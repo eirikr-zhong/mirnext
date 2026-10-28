@@ -39,9 +39,9 @@ Result<ExternalSymbol> resolve (Capture &capture, const ImportRequest &request) 
                           {},
                           false,
                           [&capture] (auto args) -> Result<std::vector<ScalarValue>> {
-                            auto c = args[0].scalar ()->as_i64 ();
-                            if (!c) return c.error ();
-                            capture.characters += static_cast<char> (*c);
+                            auto c = args[0].scalar ().value ().as_i64 ();
+                            if (!c.has_value ()) return c.error ();
+                            capture.characters += static_cast<char> (c.value ());
                             return std::vector<ScalarValue>{ScalarValue (1)};
                           }};
   if (request.name == "printf")
@@ -50,12 +50,12 @@ Result<ExternalSymbol> resolve (Capture &capture, const ImportRequest &request) 
                           {},
                           false,
                           [&capture] (auto args) -> Result<std::vector<ScalarValue>> {
-                            auto p = args[0].scalar ()->as_u64 ();
-                            if (!p) return p.error ();
-                            auto n = args[1].scalar ()->as_i64 ();
-                            if (!n) return n.error ();
-                            capture.format = reinterpret_cast<const char *> (*p);
-                            capture.primes = static_cast<std::int32_t> (*n);
+                            auto p = args[0].scalar ().value ().as_u64 ();
+                            if (!p.has_value ()) return p.error ();
+                            auto n = args[1].scalar ().value ().as_i64 ();
+                            if (!n.has_value ()) return n.error ();
+                            capture.format = reinterpret_cast<const char *> (p.value ());
+                            capture.primes = static_cast<std::int32_t> (n.value ());
                             return std::vector<ScalarValue>{};
                           }};
   auto type = request.name == "pri"   ? Type::i64 ()
@@ -72,15 +72,15 @@ Result<ExternalSymbol> resolve (Capture &capture, const ImportRequest &request) 
                         {},
                         false,
                         [&capture] (auto args) -> Result<std::vector<ScalarValue>> {
-                          capture.arguments.push_back (*args[0].scalar ());
+                          capture.arguments.push_back (args[0].scalar ().value ());
                           return std::vector<ScalarValue>{};
                         }};
 }
 auto parse (std::string_view text) {
   auto result = serialization::parse_text (text);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<Program> (std::move ((result).value ()));
 }
 ExecutionOptions options (unsigned engine, unsigned level, Capture &capture) {
   ExecutionOptions options;
@@ -96,28 +96,28 @@ ExecutionOptions options (unsigned engine, unsigned level, Capture &capture) {
   options.link.resolve = [&capture] (auto &r) { return resolve (capture, r); };
   return options;
 }
-auto session (const Context &context, ExecutionOptions options) {
+auto session (const Program &context, ExecutionOptions options) {
   auto result = ExecutionSession::create (context, std::move (options));
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 auto find (const ExecutionSession &s, std::string_view module, std::string_view name) {
   auto f = s.find_function (module, name);
-  REQUIRE (f);
-  return *f;
+  REQUIRE ((f).has_value ());
+  return (f).value ();
 }
 auto integer (const FunctionHandle &f, std::span<const std::int64_t> args = {}) {
   auto r = f.call_i64 (args);
-  INFO ((r ? "" : r.error ().message));
-  REQUIRE (r);
-  return *r;
+  INFO (((r).has_value () ? "" : r.error ().message));
+  REQUIRE ((r).has_value ());
+  return (r).value ();
 }
 auto entry (const FunctionHandle &f) {
   auto e = f.native_entry ();
-  INFO ((e ? "" : e.error ().message));
-  REQUIRE (e);
-  return *e;
+  INFO (((e).has_value () ? "" : e.error ().message));
+  REQUIRE ((e).has_value ());
+  return (e).value ();
 }
 std::int64_t primes (std::size_t limit) {
   // Compute the expected sieve count independently, excluding 2.
@@ -137,22 +137,22 @@ void check_arguments (const Capture &capture, std::span<const ExecutionArgument>
   for (unsigned n = 0; n < order.size (); ++n) {
     CAPTURE (n);
     auto &actual = capture.arguments[n];
-    auto &expected = *arguments[order[n]].scalar ();
+    auto &expected = *arguments[order[n]].scalar ().get ();
     if (n < 9)
-      CHECK (*actual.as_i64 () == *expected.as_i64 ());
+      CHECK ((actual.as_i64 ()).value () == (expected.as_i64 ()).value ());
     else if (n < 17)
-      CHECK (std::bit_cast<std::uint32_t> (*actual.as_float ())
-             == std::bit_cast<std::uint32_t> (*expected.as_float ()));
+      CHECK (std::bit_cast<std::uint32_t> ((actual.as_float ()).value ())
+             == std::bit_cast<std::uint32_t> ((expected.as_float ()).value ()));
     else
-      CHECK (std::bit_cast<std::uint64_t> (*actual.as_double ())
-             == std::bit_cast<std::uint64_t> (*expected.as_double ()));
+      CHECK (std::bit_cast<std::uint64_t> ((actual.as_double ()).value ())
+             == std::bit_cast<std::uint64_t> ((expected.as_double ()).value ()));
   }
 }
 }  // namespace
 TEST_CASE (
   "classic loop and greeting drivers use owning DSL and checked host ABI entries at O0-O3") {
   auto source = test::classic_loop ();
-  REQUIRE (source);
+  REQUIRE ((source).has_value ());
   auto greeting = parse (test::classic_hi_text);
   for (unsigned level = 0; level < 4; ++level)
     for (unsigned engine = 0; engine < 5; ++engine) {
@@ -161,7 +161,7 @@ TEST_CASE (
       CAPTURE (engine);
       Capture capture;
       Activate active (capture);
-      auto s = session (**source, options (engine, level, capture));
+      auto s = session ((source).value (), options (engine, level, capture));
       auto f = find (s, "m", "loop");
       auto e = entry (f);
       for (std::int64_t n : {-10, 0, 1, 257, 8192}) {
@@ -170,7 +170,7 @@ TEST_CASE (
         CHECK (integer (f, args) == expected);
         ExecutionInvocation invocation;
         CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (e.address ()) (n) == expected);
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
       }
       auto hi = session (*greeting, options (engine, level, capture));
       auto h = find (hi, "m_hi", "hi");
@@ -180,7 +180,7 @@ TEST_CASE (
       auto he = entry (h);
       ExecutionInvocation invocation;
       CHECK (reinterpret_cast<std::int32_t (*) ()> (he.address ()) () == 4);
-      CHECK (invocation.status ());
+      CHECK ((invocation.status ()).has_value ());
       CHECK (capture.characters == "hi!\n");
     }
 }
@@ -226,10 +226,10 @@ TEST_CASE (
                                                9.0f,
                                                10.0};
         auto result = f.call (args);
-        INFO ((result ? "" : result.error ().message));
-        REQUIRE (result);
-        REQUIRE (result->size () == 1);
-        CHECK (*(*result)[0].as_i64 () == 0);
+        INFO (((result).has_value () ? "" : result.error ().message));
+        REQUIRE ((result).has_value ());
+        REQUIRE (result.value ().size () == 1);
+        CHECK ((((result).value ())[0].as_i64 ()).value () == 0);
         check_arguments (capture, args);
         capture.arguments.clear ();
         ExecutionInvocation invocation;
@@ -241,7 +241,7 @@ TEST_CASE (
                                 negative ? 65535 : 7, static_cast<std::int32_t> (8 * sign),
                                 INT64_C (0x100000009) * sign, 3, 4, 5, 6, 7, 8, 9, 10)
                == 0);
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
         check_arguments (capture, args);
         capture.arguments.clear ();
       }
@@ -273,7 +273,7 @@ TEST_CASE (
       auto e = entry (f);
       ExecutionInvocation invocation;
       CHECK (reinterpret_cast<std::int64_t (*) ()> (e.address ()) () == expected);
-      CHECK (invocation.status ());
+      CHECK ((invocation.status ()).has_value ());
     }
 }
 TEST_CASE ("classic two module readme sieve shares globals imports and actual mixed engine calls") {
@@ -297,16 +297,16 @@ TEST_CASE ("classic two module readme sieve shares globals imports and actual mi
         auto s = session (*source, std::move (configuration));
         auto f = find (s, "m_ex100", "ex100");
         auto result = f.call ();
-        INFO ((result ? "" : result.error ().message));
-        REQUIRE (result);
-        CHECK (result->empty ());
+        INFO (((result).has_value () ? "" : result.error ().message));
+        REQUIRE ((result).has_value ());
+        CHECK (result.value ().empty ());
         CHECK (capture.primes == primes (515));
         CHECK (capture.format == "sieve of 257 200 times = %d\n");
         capture.primes = -1;
         auto e = entry (f);
         ExecutionInvocation invocation;
         reinterpret_cast<void (*) ()> (e.address ()) ();
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
         CHECK (capture.primes == primes (515));
         CHECK (dump (*source) == before);
       }

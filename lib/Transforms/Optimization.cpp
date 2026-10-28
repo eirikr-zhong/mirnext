@@ -45,13 +45,13 @@ Result<target::Architecture> configuration (const OptimizationOptions &options) 
     return Error{ErrorCode::InvalidArgument,
                  "optimize [configuration]: invalid optimization level"};
   auto native = target::AddressingRules::get ();
-  if (!native) return native.error ();
+  if (!(native).has_value ()) return native.error ();
   auto requested = target::AddressingRules::get (options.target);
-  if (!requested) return requested.error ();
-  if (requested->architecture () != native->architecture ())
+  if (!(requested).has_value ()) return requested.error ();
+  if (requested.value ().architecture () != native.value ().architecture ())
     return Error{ErrorCode::InvalidArgument,
                  "optimize [configuration]: cross-target optimization is not supported"};
-  return requested->architecture ();
+  return requested.value ().architecture ();
 }
 class BuildCFGPass final : public FunctionPass {
   bool prune_;
@@ -59,23 +59,34 @@ class BuildCFGPass final : public FunctionPass {
  public:
   explicit BuildCFGPass (bool prune) : prune_ (prune) {}
   std::string_view name () const noexcept override { return "build-cfg"; }
-  Result<PassResult> run (ir::Function &function,
+  Result<PassResult> run (ir::MIRBuilder &edit,
                           analysis::FunctionAnalysisManager &analyses) override {
-    auto prepared = PrepareCFGPass (prune_).run (function, analyses);
-    if (!prepared) return prepared.error ();
-    analyses.invalidate (prepared->preserved);
+    if (auto status = edit.status (); !status.has_value ()) return status.error ();
+    if (!edit.function ())
+      return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+    auto &function = *edit.function ();
+
+    auto prepared = PrepareCFGPass (prune_).run (edit, analyses);
+    if (!(prepared).has_value ()) return prepared.error ();
+    analyses.invalidate (prepared.value ().preserved);
     auto graph = analyses.get<analysis::FunctionGraphAnalysis> ();
-    if (!graph) return graph.error ();
-    prepared->preserved.preserve<analysis::FunctionGraphAnalysis> ();
-    return std::move (*prepared);
+    if (!(graph).has_value ()) return graph.error ();
+    prepared.value ().preserved.preserve<analysis::FunctionGraphAnalysis> ();
+    return std::move ((prepared).value ());
   }
 };
 class BuildLoopsPass final : public FunctionPass {
  public:
   std::string_view name () const noexcept override { return "build-loops"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &analyses) override {
+  Result<PassResult> run (ir::MIRBuilder &edit,
+                          analysis::FunctionAnalysisManager &analyses) override {
+    if (auto status = edit.status (); !status.has_value ()) return status.error ();
+    if (!edit.function ())
+      return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+    auto &function = *edit.function ();
+
     auto loops = analyses.get<analysis::LoopAnalysis> ();
-    if (!loops) return loops.error ();
+    if (!(loops).has_value ()) return loops.error ();
     return PassResult{0, analysis::PreservedAnalyses::all ()};
   }
 };
@@ -117,7 +128,7 @@ std::string_view pass_name (PassId pass) noexcept {
   return n < names.size () ? names[n] : "invalid-pass";
 }
 struct OptimizedProgram::Impl {
-  std::unique_ptr<ir::Context> context;
+  ir::Program context;
   OptimizationLevel level;
   target::Architecture target;
   ir::StringMap<ir::StringMap<const ir::Function *>> functions;
@@ -139,14 +150,15 @@ struct OptimizedProgram::Impl {
       view = &statistics.back ();
     }
     if (!options.observer) return {};
-    return options.observer (
-      {*view, event.phase, event.function,
-       analyses ? analyses->get_cached<analysis::FunctionGraphAnalysis> () : nullptr,
-       analyses ? analyses->get_cached<analysis::LoopAnalysis> () : nullptr});
+    return options.observer ({*view, event.phase, event.function,
+                              analyses ? analyses->get_cached<analysis::FunctionGraphAnalysis> ()
+                                       : OptionalRef<const analysis::FunctionGraph>{},
+                              analyses ? analyses->get_cached<analysis::LoopAnalysis> ()
+                                       : OptionalRef<const analysis::LoopTree>{}});
   }
   Result<void> run (const OptimizationOptions &options) {
     std::size_t count = 0;
-    for (auto &module : context->modules ())
+    for (auto &module : context.modules ())
       for (auto &function : module.functions ()) {
         functions[module.name ()].emplace (function.symbol ().name (), &function);
         ++count;
@@ -156,14 +168,14 @@ struct OptimizedProgram::Impl {
     frontend.add_function<MaterializeStackScopesPass> ();
     frontend.add_function<SimplifyPass> ();
     frontend.add_function<InlinePass> ();
-    auto checked = frontend.run (*context, {}, [&] (const PassEvent &event) {
+    auto checked = frontend.run (context, {}, [&] (const PassEvent &event) {
       return observe (event, nullptr, options);
     });
-    if (!checked) return checked;
+    if (!(checked).has_value ()) return checked;
     FunctionPassManager scalar;
     middle_end (scalar, level, target, false);
     std::optional<FunctionPassManager> addressed;
-    for (auto &module : context->modules ())
+    for (auto &module : context.modules ())
       for (auto &function : module.functions ()) {
         // Detect address-taking before removing unreachable blocks.
         bool address = level >= OptimizationLevel::O2 && addresses (function);
@@ -176,7 +188,7 @@ struct OptimizedProgram::Impl {
           = (address ? *addressed : scalar).run (function, analyses, [&] (const PassEvent &event) {
               return observe (event, &analyses, options);
             });
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
       }
     return {};
   }
@@ -185,18 +197,18 @@ OptimizedProgram::OptimizedProgram (std::unique_ptr<Impl> impl) : impl_ (std::mo
 OptimizedProgram::OptimizedProgram (OptimizedProgram &&) noexcept = default;
 OptimizedProgram &OptimizedProgram::operator= (OptimizedProgram &&) noexcept = default;
 OptimizedProgram::~OptimizedProgram () = default;
-const ir::Context &OptimizedProgram::context () const noexcept { return *impl_->context; }
+const ir::Program &OptimizedProgram::program () const noexcept { return impl_->context; }
 OptimizationLevel OptimizedProgram::level () const noexcept { return impl_->level; }
 target::Architecture OptimizedProgram::target () const noexcept { return impl_->target; }
-const ir::Function *OptimizedProgram::find_function (std::string_view module,
-                                                     std::string_view name) const noexcept {
-  if (!impl_) return nullptr;
+OptionalRef<const ir::Function> OptimizedProgram::find_function (
+  std::string_view module, std::string_view name) const noexcept {
+  if (!impl_) return {};
   if (auto found = impl_->functions.find (module); found != impl_->functions.end ())
     if (auto function = found->second.find (name); function != found->second.end ())
-      return function->second;
-  auto owner = impl_->context->find_module (module);
-  auto symbol = owner ? owner->find_symbol (name) : nullptr;
-  return symbol ? symbol->function () : nullptr;
+      return ::mirnext::detail::borrow_optional (function->second);
+  auto owner = impl_->context.find_module (module).get ();
+  auto symbol = owner ? owner->find_symbol (name).get () : nullptr;
+  return ::mirnext::detail::borrow_optional (symbol ? symbol->function ().get () : nullptr);
 }
 std::span<const PassStatistics> OptimizedProgram::statistics () const noexcept {
   return impl_ ? std::span<const PassStatistics> (impl_->statistics)
@@ -204,12 +216,12 @@ std::span<const PassStatistics> OptimizedProgram::statistics () const noexcept {
 }
 Result<void> OptimizedProgram::verify () const {
   if (!impl_) return Error{ErrorCode::InvalidArgument, "moved-from optimized program"};
-  auto checked = impl_->context->verify ();
-  if (!checked) return checked;
-  for (auto &module : impl_->context->modules ())
+  auto checked = impl_->context.verify ();
+  if (!(checked).has_value ()) return checked;
+  for (auto &module : impl_->context.modules ())
     for (auto &function : module.functions ()) {
       checked = function.require_register_ir ();
-      if (!checked) return checked;
+      if (!(checked).has_value ()) return checked;
       if (function.needs_materialization ())
         return Error{ErrorCode::InvalidArgument,
                      "optimized program contains unmaterialized stack scopes"};
@@ -217,49 +229,65 @@ Result<void> OptimizedProgram::verify () const {
   return {};
 }
 std::string OptimizedProgram::dump () const {
-  return impl_ ? ir::dump (*impl_->context) : "<moved-from optimized program>\n";
+  return impl_ ? ir::dump (impl_->context) : "<moved-from optimized program>\n";
 }
 Result<std::string> OptimizedProgram::write_text () const {
   auto checked = verify ();
-  if (!checked) return checked.error ();
-  return serialization::write_text (*impl_->context);
+  if (!(checked).has_value ()) return checked.error ();
+  return serialization::write_text (impl_->context);
 }
-Result<std::vector<std::byte>> OptimizedProgram::encode_binary (
+Result<std::vector<std::byte>> OptimizedProgram::write_binary (
   serialization::BinaryEncoding encoding) const {
   auto checked = verify ();
-  if (!checked) return checked.error ();
-  return serialization::write_binary (*impl_->context, encoding);
+  if (!(checked).has_value ()) return checked.error ();
+  return serialization::write_binary (impl_->context, encoding);
 }
-Result<OptimizedProgram> optimize (const ir::Context &source, OptimizationOptions options) {
+Result<OptimizedProgram> optimize (const ir::Program &source, OptimizationOptions options) {
   auto target = configuration (options);
-  if (!target) return target.error ();
+  if (!(target).has_value ()) return target.error ();
   auto copied = ir::clone (source);
-  if (!copied) return copied.error ();
+  if (!(copied).has_value ()) return copied.error ();
   auto impl = std::make_unique<OptimizedProgram::Impl> ();
-  impl->context = std::move (*copied);
+  impl->context = std::move ((copied).value ());
   impl->level = options.level;
-  impl->target = *target;
+  impl->target = (target).value ();
   auto checked = impl->run (options);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   OptimizedProgram result (std::move (impl));
   checked = result.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
+  return result;
+}
+Result<OptimizedProgram> optimize (ir::Program &&source, OptimizationOptions options) {
+  auto target = configuration (options);
+  if (!(target).has_value ()) return target.error ();
+  auto checked_source = source.verify ();
+  if (!(checked_source).has_value ()) return checked_source.error ();
+  auto impl = std::make_unique<OptimizedProgram::Impl> ();
+  impl->context = std::move (source);
+  impl->level = options.level;
+  impl->target = (target).value ();
+  auto checked = impl->run (options);
+  if (!(checked).has_value ()) return checked.error ();
+  OptimizedProgram result (std::move (impl));
+  checked = result.verify ();
+  if (!(checked).has_value ()) return checked.error ();
   return result;
 }
 Result<OptimizedProgram> optimize (const ir::Module &source, OptimizationOptions options) {
   auto target = configuration (options);
-  if (!target) return target.error ();
+  if (!(target).has_value ()) return target.error ();
   auto copied = ir::clone (source);
-  if (!copied) return copied.error ();
+  if (!(copied).has_value ()) return copied.error ();
   auto impl = std::make_unique<OptimizedProgram::Impl> ();
-  impl->context = std::move (*copied);
+  impl->context = std::move ((copied).value ());
   impl->level = options.level;
-  impl->target = *target;
+  impl->target = (target).value ();
   auto checked = impl->run (options);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   OptimizedProgram result (std::move (impl));
   checked = result.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   return result;
 }
 }  // namespace mirnext::transforms

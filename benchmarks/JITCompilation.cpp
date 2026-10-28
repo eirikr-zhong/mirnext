@@ -17,15 +17,15 @@ double us (Clock::time_point a, Clock::time_point b) {
 }
 struct Workload {
   std::string name;
-  std::unique_ptr<Context> context;
+  Program context;
   std::int64_t expected;
   bool argument = true;
 };
 Result<Workload> parsed (std::string name, std::string text, std::int64_t expected,
                          bool argument = true) {
   auto context = serialization::parse_text (text);
-  if (!context) return context.error ();
-  return Workload{std::move (name), std::move (*context), expected, argument};
+  if (!(context).has_value ()) return context.error ();
+  return Workload{std::move (name), std::move ((context).value ()), expected, argument};
 }
 Result<Workload> arithmetic (unsigned operations, unsigned functions = 1) {
   std::string text = "bench:module\n";
@@ -63,7 +63,7 @@ Result<void> sample (const Workload &w, unsigned level, int trial) {
   // interval. Every iteration owns a fresh optimized and linked program; there
   // is no optimized-IR or generated-code cache shared across samples.
   std::size_t functions = 0, blocks = 0, instructions = 0;
-  for (auto &m : w.context->modules ())
+  for (auto &m : w.context.modules ())
     for (auto &f : m.functions ()) {
       ++functions;
       for (auto &b : f.blocks ()) {
@@ -73,21 +73,21 @@ Result<void> sample (const Workload &w, unsigned level, int trial) {
     }
   auto begin = Clock::now ();
   auto optimized
-    = transforms::optimize (*w.context,
+    = transforms::optimize (w.context,
                             {.level = static_cast<transforms::OptimizationLevel> (level)});
   auto middle = Clock::now ();
-  if (!optimized) return optimized.error ();
-  auto program = LinkedProgram::link (std::move (*optimized));
+  if (!(optimized).has_value ()) return optimized.error ();
+  auto program = ExecutionSession::create (std::move ((optimized).value ()));
   auto end = Clock::now ();
-  if (!program) return program.error ();
-  if (program->statistics ().compiled_functions != functions)
+  if (!(program).has_value ()) return program.error ();
+  if (program.value ().statistics ().compiled_functions != functions)
     return Error{ErrorCode::InvalidOperand, "benchmark did not eagerly compile all functions"};
   // Validate every generated function, not just the first one in the batch.
-  for (auto &m : w.context->modules ())
+  for (auto &m : w.context.modules ())
     for (auto &f : m.functions ()) {
-      auto function = program->find_function (m.name (), f.symbol ().name ());
-      if (!function) return function.error ();
-      const auto address = function->address ();
+      auto function = program.value ().find_function (m.name (), f.symbol ().name ());
+      if (!(function).has_value ()) return function.error ();
+      const auto address = function.value ().address ();
       if (!address) return Error{ErrorCode::InvalidOperand, "missing executable entry"};
       const auto actual = w.argument
                             ? reinterpret_cast<std::int64_t (*) (std::int64_t)> (address) (42)
@@ -98,26 +98,27 @@ Result<void> sample (const Workload &w, unsigned level, int trial) {
   if (trial >= 0)
     std::cout << w.name << ',' << level << ',' << trial << ',' << functions << ',' << blocks << ','
               << instructions << ',' << us (begin, middle) << ',' << us (middle, end) << ','
-              << us (begin, end) << ',' << program->statistics ().code_bytes << '\n';
+              << us (begin, end) << ',' << program.value ().statistics ().code_bytes << '\n';
   return {};
 }
 Result<void> checked_entry_sample (const Workload &w, unsigned level, int trial) {
   auto begin = Clock::now ();
   auto session
-    = ExecutionSession::create (*w.context,
+    = ExecutionSession::create (w.context,
                                 {.optimization = transforms::OptimizationOptions{
                                    .level = static_cast<transforms::OptimizationLevel> (level)}});
   auto ready = Clock::now ();
-  if (!session) return session.error ();
+  if (!(session).has_value ()) return session.error ();
   const double session_us = us (begin, ready);
-  auto function = session->find_function ("bench", "f0");
-  if (!function) return function.error ();
+  auto function = session.value ().find_function ("bench", "f0");
+  if (!(function).has_value ()) return function.error ();
   const std::array<std::int64_t, 1> arguments{42};
   begin = Clock::now ();
-  auto first = function->call_i64 (arguments);
+  auto first = function.value ().call_i64 (arguments);
   auto end = Clock::now ();
-  if (!first) return first.error ();
-  if (*first != 43) return Error{ErrorCode::InvalidOperand, "wrong checked first-call result"};
+  if (!(first).has_value ()) return first.error ();
+  if ((first).value () != 43)
+    return Error{ErrorCode::InvalidOperand, "wrong checked first-call result"};
   const double first_us = us (begin, end);
   // The extra interval contains adapter construction and one tiny execution;
   // unlike total_us above, it is deliberately a first-call measurement.
@@ -125,16 +126,17 @@ Result<void> checked_entry_sample (const Workload &w, unsigned level, int trial)
   std::int64_t sum = 0;
   constexpr unsigned cached_calls = 1000;
   for (unsigned n = 0; n < cached_calls; ++n) {
-    auto value = function->call_i64 (arguments);
-    if (!value) return value.error ();
-    sum += *value;
+    auto value = function.value ().call_i64 (arguments);
+    if (!(value).has_value ()) return value.error ();
+    sum += (value).value ();
   }
   end = Clock::now ();
-  if (sum != 43 * cached_calls || session->host_entry_count () != 1)
+  if (sum != 43 * cached_calls || session.value ().host_entry_count () != 1)
     return Error{ErrorCode::InvalidOperand, "checked adapter was not reused"};
   if (trial >= 0)
     std::cout << level << ',' << trial << ',' << session_us << ',' << first_us << ','
-              << us (begin, end) / cached_calls << ',' << session->host_entry_count () << '\n';
+              << us (begin, end) / cached_calls << ',' << session.value ().host_entry_count ()
+              << '\n';
   return {};
 }
 }  // namespace
@@ -172,11 +174,11 @@ int main (int argc, char **argv) {
   }
   std::vector<Workload> workloads;
   auto append = [&] (Result<Workload> w) {
-    if (!w) {
+    if (!(w).has_value ()) {
       std::cerr << w.error ().message << '\n';
       return false;
     }
-    workloads.push_back (std::move (*w));
+    workloads.push_back (std::move ((w).value ()));
     return true;
   };
   if (!append (parsed ("tiny",
@@ -185,11 +187,11 @@ int main (int argc, char **argv) {
                        43)))
     return 1;
   auto loop = test::classic_loop ();
-  if (!loop) {
+  if (!(loop).has_value ()) {
     std::cerr << loop.error ().message << '\n';
     return 1;
   }
-  workloads.push_back ({"loop", std::move (*loop), 42});
+  workloads.push_back ({"loop", std::move ((loop).value ()), 42});
   if (!append (parsed ("sieve", test::classic_sieve_text (127, 2), 31, false))
       || !append (arithmetic (64)) || !append (arithmetic (256)) || !append (branches (32))
       || !append (arithmetic (8, 64)))
@@ -201,12 +203,12 @@ int main (int argc, char **argv) {
     if (!found || (checked_entry && selected_workload != "tiny")) return 1;
   }
   auto target = target::TargetMachine::native ();
-  if (!target) {
+  if (!(target).has_value ()) {
     std::cerr << target.error ().message << '\n';
     return 1;
   }
-  std::cout << "# target=" << target->name () << " trials=" << trials << " warmups=" << warmups
-            << '\n';
+  std::cout << "# target=" << target.value ().name () << " trials=" << trials
+            << " warmups=" << warmups << '\n';
   if (checked_entry)
     std::cout << "level,trial,session_create_us,first_checked_call_us,cached_checked_call_us,host_"
                  "entries\n";
@@ -225,7 +227,7 @@ int main (int argc, char **argv) {
         if (checked_entry && &w != &workloads.front ()) continue;
         auto result
           = checked_entry ? checked_entry_sample (w, level, round) : sample (w, level, round);
-        if (!result) {
+        if (!(result).has_value ()) {
           std::cerr << w.name << " O" << level << ": " << result.error ().message << '\n';
           return 1;
         }

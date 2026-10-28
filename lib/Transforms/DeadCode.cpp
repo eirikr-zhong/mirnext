@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Derived from MIR SSA dead code elimination. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #include "mirnext/Transforms/DeadCode.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
 #include "mirnext/IR/SSA.hpp"
@@ -20,7 +22,7 @@ struct State {
   };
   Function &function;
   SSAForm &form;
-  SSARewriter rewriter;
+  SSAUpdater rewriter;
   std::vector<Node> nodes;
   std::unordered_map<const Instruction *, std::size_t> instructions;
   std::unordered_map<const SSAPhi *, std::size_t> phis;
@@ -41,7 +43,8 @@ struct State {
     for (auto &block : f.blocks ()) {
       auto first = nodes.size ();
       std::unordered_map<const Instruction *, std::vector<SSAPhi *>> anchored;
-      for (auto phi : form.phis (block)) anchored[phi->before ()].push_back (phi);
+      for (auto phi : ir::detail::ReferenceAccess::pointers (form.phis (block)))
+        anchored[phi->before ().get ()].push_back (phi);
       auto add_phis = [&] (const Instruction *before) {
         auto found = anchored.find (before);
         if (found == anchored.end ()) return;
@@ -74,11 +77,13 @@ struct State {
     if (!wide_inputs) {
       for (std::size_t p = 0; p < small_count; ++p)
         if (small_detached[p].first == &value)
-          return value.uses ().size () != small_detached[p].second;
-      return !value.uses ().empty ();
+          return ir::detail::ReferenceAccess::pointers (value.uses ()).size ()
+                 != small_detached[p].second;
+      return !ir::detail::ReferenceAccess::pointers (value.uses ()).empty ();
     }
     auto found = detached.find (&value);
-    return value.uses ().size () != (found == detached.end () ? 0 : found->second);
+    return ir::detail::ReferenceAccess::pointers (value.uses ()).size ()
+           != (found == detached.end () ? 0 : found->second);
   }
   bool dead (std::size_t p) {
     auto &node = nodes[p];
@@ -86,10 +91,10 @@ struct State {
     if (node.phi) return !used (node.phi->output ());
     auto &i = *node.instruction;
     auto op = i.opcode ();
-    if (instruction_descriptor (op)->count == OperandCount::Call || op == Opcode::Alloca
+    if (instruction_descriptor (op).get ()->count == OperandCount::Call || op == Opcode::Alloca
         || op == Opcode::BStart || op == Opcode::VaStart || op == Opcode::VaArg)
       return false;
-    auto defs = form.definitions (i);
+    auto defs = ir::detail::ReferenceAccess::pointers (form.definitions (i));
     if (defs.empty ()) return false;
     for (auto value : defs)
       if (used (*value)) return false;
@@ -117,7 +122,9 @@ struct State {
       auto p = pending.back ();
       pending.pop_back ();
       auto &node = nodes[p];
-      auto inputs = node.phi ? node.phi->inputs () : form.inputs (*node.instruction);
+      auto inputs = node.phi
+                      ? ir::detail::ReferenceAccess::pointers (node.phi->inputs ())
+                      : ir::detail::ReferenceAccess::pointers (form.inputs (*node.instruction));
       // Evaluate definitions after each logical edge removal, before erasing the
       // instruction so overflow flag barriers still constrain definition removal.
       detached.clear ();
@@ -133,17 +140,17 @@ struct State {
           if (n == small_count) small_detached[small_count++] = {&value, 0};
           ++small_detached[n].second;
         }
-        if (value.instruction ())
-          enqueue (instructions.at (value.instruction ()));
-        else if (value.phi ())
-          enqueue (phis.at (value.phi ()));
+        if (value.instruction ().get ())
+          enqueue (instructions.at (value.instruction ().get ()));
+        else if (value.phi ().get ())
+          enqueue (phis.at (value.phi ().get ()));
       }
       detached.clear ();
       small_count = 0;
       wide_inputs = false;
       auto result = node.phi ? rewriter.erase_phi (*node.phi)
                              : rewriter.erase_instruction (*node.instruction);
-      if (!result) return result;
+      if (!(result).has_value ()) return result;
       node.alive = false;
       ++changes;
     }
@@ -151,27 +158,32 @@ struct State {
   }
 };
 }  // namespace
-Result<PassResult> SSADeadCodePass::run (ir::Function &function,
+Result<PassResult> SSADeadCodePass::run (ir::MIRBuilder &edit,
                                          analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   auto invalid = [&] (std::string reason) {
     return Error{ErrorCode::InvalidArgument,
                  std::string (function.symbol ().name ()) + ": ssa-dce: " + reason};
   };
   if (&analyses.function () != &function) return invalid ("analysis owner mismatch");
   auto checked = function.verify ();
-  if (!checked) return checked.error ();
-  auto form = function.ssa_form ();
+  if (!(checked).has_value ()) return checked.error ();
+  auto form = function.ssa_form ().get ();
   if (!form || !form->renamed () || form->conventional ())
     return invalid ("requires renamed nonconventional SSA");
   auto graph = analyses.get<analysis::FunctionGraphAnalysis> ();
-  if (!graph) return graph.error ();
+  if (!(graph).has_value ()) return graph.error ();
   auto retained = analyses.take_cached<analysis::FunctionGraphAnalysis> ();
-  if (!retained) return retained.error ();
+  if (!(retained).has_value ()) return retained.error ();
   State state (function, *const_cast<ir::SSAForm *> (form));
   checked = state.run ();
-  if (!checked) return checked.error ();
-  checked = analyses.set<analysis::FunctionGraphAnalysis> (std::move (**retained));
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
+  checked = analyses.set<analysis::FunctionGraphAnalysis> (std::move (*(retained).value ()));
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();
   return PassResult{state.changes, preserved};

@@ -4,6 +4,9 @@
 
 namespace mirnext::codegen {
 namespace detail {
+class NodeAccess;
+}
+namespace detail {
 struct AllocationRewriteEngine;
 struct MachineSpillEmitter;
 struct EdgeSpillEngine;
@@ -39,14 +42,20 @@ class MachineCoalescing {
 };
 // Levels and the register-scan threshold retain the original backend conditions.
 // The result borrows register identities; the function must outlive it.
-Result<MachineCoalescing> coalesce_registers (MachineFunction &, const MachineGraphAnalysis &,
-                                              unsigned optimization_level = 2,
-                                              std::size_t register_limit = 10000);
 
 struct MachineLiveRange {
   int start = 0, finish = 0, reference_cost = 1;
-  std::vector<const MachineBasicBlock *> blocks;
+  MachineLiveRange () = default;
+  MachineLiveRange (int start, int finish, int reference_cost = 1)
+    : start (start), finish (finish), reference_cost (reference_cost) {}
+  ir::ReferenceRange<const MachineBasicBlock> blocks () const {
+    return ir::ReferenceRange<const MachineBasicBlock> (blocks_);
+  }
   friend bool operator== (const MachineLiveRange &, const MachineLiveRange &) = default;
+
+ private:
+  friend class detail::NodeAccess;
+  std::vector<const MachineBasicBlock *> blocks_;
 };
 struct MachineSpillBlock {
   SparseBitSet gen, kill;
@@ -111,9 +120,20 @@ struct MachinePointLocations {
   SparseBitSet physical, stack;
 };
 struct MachineAllocationGap {
+  MachineAllocationGap (target::PhysicalRegister physical, const MachineVirtualRegister &reg,
+                        MachineLiveRange range)
+    : MachineAllocationGap (Key{}, std::move (physical), &reg, std::move (range)) {}
   target::PhysicalRegister physical;
-  const MachineVirtualRegister *reg;
+  const MachineVirtualRegister &reg () const { return *reg_; }
   MachineLiveRange range;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  MachineAllocationGap (Key, target::PhysicalRegister physical, const MachineVirtualRegister *reg,
+                        MachineLiveRange range)
+    : physical (physical), range (range), reg_ (reg) {}
+  const MachineVirtualRegister *reg_;
 };
 class MachineAllocation {
  public:
@@ -126,7 +146,9 @@ class MachineAllocation {
   std::span<const target::PhysicalRegister> global_registers () const { return globals_; }
   Result<MachineLocation> location (const MachineVirtualRegister &) const;
   Result<std::size_t> live_length (const MachineVirtualRegister &) const;
-  std::span<const MachineVirtualRegister *const> order () const { return order_; }
+  ir::ReferenceRange<const MachineVirtualRegister> order () const {
+    return ir::ReferenceRange<const MachineVirtualRegister> (order_);
+  }
   std::span<const MachinePointLocations> used () const { return used_; }
   std::span<const MachinePointLocations> busy () const { return busy_; }
   std::span<const target::PhysicalRegister> used_registers () const { return used_registers_; }
@@ -135,8 +157,8 @@ class MachineAllocation {
   std::span<const MachineSpillBlock> spill_blocks () const { return spill_; }
   std::span<const MachineAllocationGap> gaps () const { return gaps_; }
   std::size_t stack_bytes () const { return stack_bytes_; }
-  std::span<const MachineBasicBlock *const> loop_alignment_blocks () const {
-    return aligned_loops_;
+  ir::ReferenceRange<const MachineBasicBlock> loop_alignment_blocks () const {
+    return ir::ReferenceRange<const MachineBasicBlock> (aligned_loops_);
   }
   std::size_t reusable_stack_offset () const { return reusable_stack_; }
 

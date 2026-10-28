@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Typed frame storage and memory operations. */
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/Execution/detail/LoadedProgram.hpp"
 #include <bit>
 namespace mirnext::execution::detail {
@@ -87,25 +88,26 @@ Result<void> InterpreterFrame::initialize (std::span<const ExecutionArgument> in
   if (variadic) arguments.reserve (input.size ());
   for (std::size_t n = 0; n < input.size (); ++n) {
     auto argument = input[n];
-    if (auto block = argument.block ()) {
+    if (auto block = argument.block ().get ()) {
       auto bytes = block->bytes;
       if (block->type.kind () != ir::Type::Kind::ReturnBlock) {
         auto allocation = stack.allocate (bytes.size ());
-        if (!allocation) return allocation.error ();
-        std::memcpy (reinterpret_cast<std::byte *> (*allocation), bytes.data (), bytes.size ());
-        bytes = {reinterpret_cast<const std::byte *> (*allocation), bytes.size ()};
+        if (!(allocation).has_value ()) return allocation.error ();
+        std::memcpy (reinterpret_cast<std::byte *> ((allocation).value ()), bytes.data (),
+                     bytes.size ());
+        bytes = {reinterpret_cast<const std::byte *> ((allocation).value ()), bytes.size ()};
         argument = ExecutionArgument::block (bytes, block->type.block_class ());
       }
       if (n < body.arguments.size ())
         *registers[body.arguments[n]] = slot (reinterpret_cast<std::uintptr_t> (bytes.data ()));
     } else if (n < body.arguments.size ())
-      registers[body.arguments[n]]->bytes = argument.scalar ()->storage ();
+      registers[body.arguments[n]]->bytes = argument.scalar ().get ()->storage ();
     if (variadic) arguments.push_back (argument);
   }
   return {};
 }
 Result<std::uintptr_t> InterpreterFrame::address (const PreparedOperand &p) const {
-  auto mem = p.source->get<ir::Memory> ();
+  auto mem = ir::detail::operand_access (*(p.source)).get<ir::Memory> ();
   if (!mem) return invalid ("operand is not memory");
   auto bits = std::bit_cast<std::uint64_t> (mem->displacement);
   if (p.base != no_slot) bits += read_slot<std::uint64_t> (*registers[p.base]);
@@ -115,21 +117,21 @@ Result<std::uintptr_t> InterpreterFrame::address (const PreparedOperand &p) cons
 Result<ScalarValue> InterpreterFrame::read (const PreparedOperand &p, ir::Type type) {
   auto &o = *p.source;
   if (p.reg != no_slot) return ScalarValue::from_storage (type, registers[p.reg]->bytes);
-  if (auto memory = o.get<ir::Memory> ()) {
+  if (auto memory = ir::detail::operand_access (o).get<ir::Memory> ()) {
     auto a = address (p);
-    if (!a) return a.error ();
+    if (!(a).has_value ()) return a.error ();
     // Undef va-list operands denote their address, rather than a load.
-    if (memory->type.kind () == ir::Type::Kind::Undef) return ScalarValue::pointer (*a);
-    return load_scalar (memory->type, *a);
+    if (memory->type.kind () == ir::Type::Kind::Undef) return ScalarValue::pointer ((a).value ());
+    return load_scalar (memory->type, (a).value ());
   }
-  if (auto v = o.get<std::int64_t> ()) return ScalarValue (*v);
-  if (auto v = o.get<std::uint64_t> ()) return ScalarValue (*v);
-  if (auto v = o.get<float> ()) return ScalarValue (*v);
-  if (auto v = o.get<double> ()) return ScalarValue (*v);
-  if (auto v = o.get<long double> ()) return ScalarValue (*v);
-  if (auto v = o.get<std::string> ())
+  if (auto v = ir::detail::operand_access (o).get<std::int64_t> ()) return ScalarValue (*v);
+  if (auto v = ir::detail::operand_access (o).get<std::uint64_t> ()) return ScalarValue (*v);
+  if (auto v = ir::detail::operand_access (o).get<float> ()) return ScalarValue (*v);
+  if (auto v = ir::detail::operand_access (o).get<double> ()) return ScalarValue (*v);
+  if (auto v = ir::detail::operand_access (o).get<long double> ()) return ScalarValue (*v);
+  if (auto v = ir::detail::operand_access (o).get<std::string> ())
     return ScalarValue::pointer (reinterpret_cast<std::uintptr_t> (v->c_str ()));
-  if (auto v = o.get<ir::SymbolReference> ())
+  if (auto v = ir::detail::operand_access (o).get<ir::SymbolReference> ())
     return ScalarValue::pointer (invocation.state.binding (p.binding).address
                                  + std::bit_cast<std::uint64_t> (v->displacement));
   return invalid ("operand is not a scalar value");
@@ -139,14 +141,14 @@ Result<void> InterpreterFrame::write (const PreparedOperand &p, const ScalarValu
     registers[p.reg]->bytes = value.storage ();
     return {};
   }
-  if (auto mem = p.source->get<ir::Memory> ()) {
+  if (auto mem = ir::detail::operand_access (*(p.source)).get<ir::Memory> ()) {
     auto a = address (p);
-    if (!a) return a.error ();
+    if (!(a).has_value ()) return a.error ();
     auto layout = invocation.state.target.layout (mem->type);
-    if (!layout) return layout.error ();
-    auto writable = invocation.state.writable (*a, layout->size);
-    if (!writable) return writable;
-    return store_scalar (mem->type, *a, value);
+    if (!(layout).has_value ()) return layout.error ();
+    auto writable = invocation.state.writable ((a).value (), layout.value ().size);
+    if (!(writable).has_value ()) return writable;
+    return store_scalar (mem->type, (a).value (), value);
   }
   return invalid ("operand is not a scalar destination");
 }

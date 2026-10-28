@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Linear graph construction and nonrecursive traversal. */
+#include "mirnext/Analysis/Access.hpp"
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/Analysis/ControlFlow.hpp"
 #include <algorithm>
 
@@ -13,13 +15,14 @@ const unsigned char *RegisterUseAnalysis::id () noexcept {
 }
 mirnext::Result<ControlFlowGraph> ControlFlowAnalysis::run (const ir::Function &function) {
   auto verified = function.verify ();
-  if (!verified) return verified.error ();
+  if (!(verified).has_value ()) return verified.error ();
   ControlFlowGraph graph;
   for (auto &block : function.blocks ()) {
-    graph.indices.emplace (&block, graph.blocks.size ());
-    graph.blocks.push_back (&block);
+    detail::NodeAccess::indices (graph).emplace (&block,
+                                                 detail::NodeAccess::blocks (graph).size ());
+    detail::NodeAccess::blocks (graph).push_back (&block);
   }
-  const auto count = graph.blocks.size ();
+  const auto count = detail::NodeAccess::blocks (graph).size ();
   graph.incoming.resize (count);
   graph.outgoing.resize (count);
   graph.reachable.resize (count);
@@ -34,20 +37,24 @@ mirnext::Result<ControlFlowGraph> ControlFlowAnalysis::run (const ir::Function &
   for (auto &block : function.blocks ())
     for (auto &instruction : block.instructions ())
       if (instruction.opcode () == ir::Opcode::LAddr)
-        addressable[graph.indices.at (
-          &(*instruction.operands ()[1].get<const ir::Label *> ())->block ())] = true;
-  for (auto data : function.label_data_uses ())
+        addressable[detail::NodeAccess::indices (graph).at (
+          &(*ir::detail::operand_access (instruction.operands ()[1]).get<const ir::Label *> ())
+             ->block ())] = true;
+  for (auto data : ir::detail::ReferenceAccess::pointers (function.label_data_uses ()))
     if (auto reference = std::get_if<ir::LabelReference> (&data->initializer ())) {
-      if (&reference->label->function () == &function)
-        addressable[graph.indices.at (&reference->label->block ())] = true;
-      if (reference->base && &reference->base->function () == &function)
-        addressable[graph.indices.at (&reference->base->block ())] = true;
+      if (&ir::detail::NodeAccess::label (*(reference))->function () == &function)
+        addressable[detail::NodeAccess::indices (graph).at (
+          &ir::detail::NodeAccess::label (*(reference))->block ())] = true;
+      if (ir::detail::NodeAccess::base (*(reference))
+          && &ir::detail::NodeAccess::base (*(reference))->function () == &function)
+        addressable[detail::NodeAccess::indices (graph).at (
+          &ir::detail::NodeAccess::base (*(reference))->block ())] = true;
     }
   std::vector<std::size_t> indirect_targets;
   for (std::size_t b = 0; b < count; ++b)
     if (addressable[b]) indirect_targets.push_back (b);
   for (std::size_t b = 0; b < count; ++b) {
-    const auto terminator = graph.blocks[b]->terminator ();
+    const auto terminator = detail::NodeAccess::blocks (graph)[b]->terminator ().get ();
     if (!terminator) {
       if (b + 1 < count) edge (b, b + 1, EdgeKind::Fallthrough);
       continue;
@@ -56,19 +63,21 @@ mirnext::Result<ControlFlowGraph> ControlFlowAnalysis::run (const ir::Function &
     auto operands = terminator->operands ();
     if (opcode == ir::Opcode::Switch) {
       for (std::size_t n = 1; n < operands.size (); ++n)
-        edge (b, graph.indices.at (&(*operands[n].get<const ir::Label *> ())->block ()),
+        edge (b,
+              detail::NodeAccess::indices (graph).at (
+                &(*ir::detail::operand_access (operands[n]).get<const ir::Label *> ())->block ()),
               EdgeKind::SwitchCase, n);
     } else if (opcode == ir::Opcode::Jmp
-               || ir::instruction_descriptor (opcode)->flow == ir::ControlFlow::Branch) {
-      auto label = *operands[0].get<const ir::Label *> ();
+               || ir::instruction_descriptor (opcode).get ()->flow == ir::ControlFlow::Branch) {
+      auto label = *ir::detail::operand_access (operands[0]).get<const ir::Label *> ();
       if (opcode != ir::Opcode::Jmp && b + 1 < count) edge (b, b + 1, EdgeKind::Fallthrough);
-      edge (b, graph.indices.at (&label->block ()), EdgeKind::Branch, 0);
+      edge (b, detail::NodeAccess::indices (graph).at (&label->block ()), EdgeKind::Branch, 0);
     }
   }
   // MIR appends indirect edges after all direct edges. Incoming order is also
   // PHI operand order, even when an earlier block contains the indirect jump.
   for (std::size_t b = 0; b < count; ++b)
-    if (auto terminator = graph.blocks[b]->terminator ();
+    if (auto terminator = detail::NodeAccess::blocks (graph)[b]->terminator ().get ();
         terminator && terminator->opcode () == ir::Opcode::JmpIndirect)
       for (auto target : indirect_targets) edge (b, target, EdgeKind::Indirect);
   // An explicit stack avoids recursion proportional to the input's block count.
@@ -103,24 +112,25 @@ mirnext::Result<ControlFlowGraph> ControlFlowAnalysis::run (const ir::Function &
 }
 mirnext::Result<RegisterUseIndex> RegisterUseAnalysis::run (const ir::Function &function) {
   auto phase = function.require_register_ir ();
-  if (!phase) return phase.error ();
+  if (!(phase).has_value ()) return phase.error ();
   auto verified = function.verify ();
-  if (!verified) return verified.error ();
+  if (!(verified).has_value ()) return verified.error ();
   RegisterUseIndex index;
   for (auto &block : function.blocks ())
     for (auto &instruction : block.instructions ()) {
       for (std::size_t n = 0; n < instruction.operands ().size (); ++n) {
         auto &operand = instruction.operands ()[n];
-        if (auto reg = operand.get<const ir::Register *> ())
-          index.occurrences[*reg].push_back ({&instruction, n, RegisterOccurrence::Part::Value,
-                                              ir::output_operand (function, instruction, n)});
-        else if (auto memory = operand.get<ir::Memory> ()) {
-          if (memory->base)
-            index.occurrences[memory->base].push_back (
-              {&instruction, n, RegisterOccurrence::Part::MemoryBase, false});
-          if (memory->index)
-            index.occurrences[memory->index].push_back (
-              {&instruction, n, RegisterOccurrence::Part::MemoryIndex, false});
+        if (auto reg = ir::detail::operand_access (operand).get<const ir::Register *> ())
+          detail::NodeAccess::occurrences (index)[*reg].push_back (
+            {instruction, n, RegisterOccurrence::Part::Value,
+             ir::output_operand (function, instruction, n)});
+        else if (auto memory = ir::detail::operand_access (operand).get<ir::Memory> ()) {
+          if (ir::detail::NodeAccess::base (*(memory)))
+            detail::NodeAccess::occurrences (index)[ir::detail::NodeAccess::base (*(memory))]
+              .push_back ({instruction, n, RegisterOccurrence::Part::MemoryBase, false});
+          if (ir::detail::NodeAccess::index (*(memory)))
+            detail::NodeAccess::occurrences (index)[ir::detail::NodeAccess::index (*(memory))]
+              .push_back ({instruction, n, RegisterOccurrence::Part::MemoryIndex, false});
         }
       }
     }

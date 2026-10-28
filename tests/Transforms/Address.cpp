@@ -1,4 +1,7 @@
 /* Licensed under the MIT License. Address lowering uses only the native object model. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/Transforms/Testing.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -14,24 +17,25 @@ using namespace mirnext::ir;
 using namespace mirnext::analysis;
 using namespace mirnext::transforms;
 namespace {
-std::unique_ptr<Context> parse (std::string_view text) {
+std::unique_ptr<Program> parse (std::string_view text) {
   auto result = serialization::parse_text (text);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<Program> (std::move ((result).value ()));
 }
-Function &entry (Context &context) {
-  return const_cast<Function &> (*context.modules ().begin ()->find_symbol ("entry")->function ());
+Function &entry (Program &context) {
+  return const_cast<Function &> (
+    *context.modules ().begin ()->find_symbol ("entry").get ()->function ().get ());
 }
-void lower (Context &context) {
+void lower (Program &context) {
   FunctionPassManager passes;
   passes.add<SimplifyPass> ();
   passes.add<PrepareCFGPass> ();
   passes.add<BuildSSAPass> (false);
   passes.add<AddressTransformPass> ();
   auto result = passes.run (context);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
 }
 }  // namespace
 TEST_CASE (
@@ -50,7 +54,7 @@ TEST_CASE (
     prepare.add<SimplifyPass> ();
     prepare.add<PrepareCFGPass> ();
     prepare.add<BuildSSAPass> (false);
-    REQUIRE (prepare.run (*context));
+    REQUIRE ((prepare.run (*context)).has_value ());
     for (auto &b : f.blocks ())
       for (auto &i : b.instructions ())
         if (i.opcode () != Opcode::Addr && i.opcode () != Opcode::Addr8
@@ -58,24 +62,24 @@ TEST_CASE (
           identities.insert (&i);
     FunctionPassManager pass;
     pass.add<AddressTransformPass> ();
-    REQUIRE (pass.run (*context));
+    REQUIRE ((::mirnext::transforms::detail::run_pass (pass, *context)).has_value ());
     for (auto &b : f.blocks ())
       for (auto &i : b.instructions ()) identities.erase (&i);
     CHECK (identities.empty ());
-    REQUIRE (context->verify ());
-    CHECK (f.ssa_form () == nullptr);
+    REQUIRE ((context->verify ()).has_value ());
+    CHECK (f.ssa_form ().get () == nullptr);
     auto copied = clone (*context);
-    REQUIRE (copied);
-    CHECK (dump (**copied) == dump (*context));
+    REQUIRE ((copied).has_value ());
+    CHECK (dump ((copied).value ()) == dump (*context));
     auto binary = serialization::write_binary (*context);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
     FunctionPassManager ssa;
     ssa.add<BuildSSAPass> ();
     ssa.add<ConventionalSSAPass> ();
     ssa.add<DestroySSAPass> ();
-    REQUIRE (ssa.run (*context));
-    REQUIRE (context->verify ());
+    REQUIRE ((ssa.run (*context)).has_value ());
+    REQUIRE ((context->verify ()).has_value ());
   }
 }
 TEST_CASE ("narrow memory uses select every extension while scalar addresses vanish") {
@@ -86,7 +90,7 @@ TEST_CASE ("narrow memory uses select every extension while scalar addresses van
     auto context = parse (inputs[n]);
     lower (*context);
     auto &f = entry (*context);
-    auto v = f.find_register ("v");
+    auto v = f.find_register ("v").get ();
     REQUIRE (v);
     CHECK_FALSE (v->is_memory_backed ());
     bool extended = false;
@@ -107,40 +111,40 @@ TEST_CASE ("escaping copied storage preserves the separate hardware binding and 
   FunctionPassManager raw;
   raw.add<BuildSSAPass> (false);
   raw.add<AddressTransformPass> ();
-  REQUIRE (raw.run (*context));
+  REQUIRE ((raw.run (*context)).has_value ());
   auto &f = entry (*context);
-  auto reg = f.find_register ("storage");
+  auto reg = f.find_register ("storage").get ();
   REQUIRE (reg);
   CHECK (reg->is_memory_backed ());
   CHECK (reg->hardware_binding ().empty ());
-  auto bound = f.find_register ("v");
+  auto bound = f.find_register ("v").get ();
   REQUIRE (bound);
   CHECK_FALSE (bound->is_memory_backed ());
   CHECK_FALSE (bound->hardware_binding ().empty ());
   FunctionAnalysisManager analyses (f);
   FunctionPassManager build;
   build.add<BuildSSAPass> ();
-  REQUIRE (build.run (f, analyses));
+  REQUIRE ((build.run (f, analyses)).has_value ());
   bool hardware_return = false;
-  for (auto &use : f.ssa_form ()->uses ())
+  for (auto &use : f.ssa_form ().value ().uses ())
     if (use.alive ()) hardware_return |= std::holds_alternative<SSAHardwareUse> (use.site ());
   CHECK (hardware_return);
   FunctionPassManager exit;
   exit.add<ConventionalSSAPass> ();
   exit.add<DestroySSAPass> ();
-  REQUIRE (exit.run (f, analyses));
+  REQUIRE ((exit.run (f, analyses)).has_value ());
   auto live = analyses.get<LivenessAnalysis> ();
-  REQUIRE (live);
+  REQUIRE ((live).has_value ());
   auto copied = clone (*context);
-  REQUIRE (copied);
-  CHECK (entry (**copied).find_register ("storage")->is_memory_backed ());
-  CHECK_FALSE (entry (**copied).find_register ("v")->is_memory_backed ());
+  REQUIRE ((copied).has_value ());
+  CHECK (entry ((copied).value ()).find_register ("storage").value ().is_memory_backed ());
+  CHECK_FALSE (entry ((copied).value ()).find_register ("v").value ().is_memory_backed ());
   auto before = dump (f);
-  auto ret = const_cast<Instruction *> (std::prev (f.blocks ().end ())->terminator ());
+  auto ret = const_cast<Instruction *> (std::prev (f.blocks ().end ())->terminator ().get ());
   REQUIRE (ret);
-  CHECK_FALSE (IRRewriter (f).replace_operand (*ret, 0, Operand (*reg)));
+  CHECK_FALSE ((InstructionRewriter (f).replace_operand (*ret, 0, Operand (*reg))).has_value ());
   CHECK (dump (f) == before);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
 }
 TEST_CASE ("partial stores retain storage when any address exposes a wider integer view") {
   for (auto [type, kind] : {std::pair{"i8", Type::Kind::I8},
@@ -164,16 +168,19 @@ TEST_CASE ("partial stores retain storage when any address exposes a wider integ
           + (direct ? "mov r,v\n" : "mov r,i64:(q)\n") + "ret r\nendfunc\nendmodule\n");
         lower (*context);
         auto &f = entry (*context);
-        auto value = f.find_register ("v");
+        auto value = f.find_register ("v").get ();
         REQUIRE (value);
         CHECK (value->is_memory_backed ());
         bool partial_store = false;
         for (auto &b : f.blocks ())
           for (auto &i : b.instructions ())
-            if (i.operands ().size () && i.operands ()[0].get<Memory> ())
-              partial_store |= i.operands ()[0].get<Memory> ()->type == Type (kind);
+            if (i.operands ().size ()
+                && mirnext::ir::detail::operand_access (i.operands ()[0]).get<Memory> ())
+              partial_store
+                |= mirnext::ir::detail::operand_access (i.operands ()[0]).get<Memory> ()->type
+                   == Type (kind);
         CHECK (partial_store);
-        REQUIRE (context->verify ());
+        REQUIRE ((context->verify ()).has_value ());
       }
 }
 TEST_CASE (
@@ -185,37 +192,37 @@ TEST_CASE (
   FunctionAnalysisManager analyses (f), foreign_analyses (foreign);
   AddressTransformPass pass;
   auto before = dump (f);
-  CHECK_FALSE (pass.run (f, analyses));
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (pass, f, analyses)).has_value ());
   CHECK (dump (f) == before);
-  CHECK_FALSE (pass.run (f, foreign_analyses));
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (pass, f, foreign_analyses)).has_value ());
   CHECK (dump (f) == before);
   FunctionPassManager prepare;
   prepare.add<SimplifyPass> ();
   prepare.add<PrepareCFGPass> ();
   prepare.add<BuildSSAPass> ();
-  REQUIRE (prepare.run (f, analyses));
+  REQUIRE ((prepare.run (f, analyses)).has_value ());
   before = dump (f);
-  CHECK_FALSE (pass.run (f, analyses));
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (pass, f, analyses)).has_value ());
   CHECK (dump (f) == before);
   FunctionPassManager finish;
   finish.add<ConventionalSSAPass> ();
   finish.add<DestroySSAPass> ();
-  REQUIRE (finish.run (f, analyses));
+  REQUIRE ((finish.run (f, analyses)).has_value ());
   FunctionPassManager lower_pass;
   lower_pass.add<BuildSSAPass> (false);
   lower_pass.add<AddressTransformPass> ();
-  REQUIRE (lower_pass.run (f, analyses));
+  REQUIRE ((lower_pass.run (f, analyses)).has_value ());
   before = dump (f);
-  REQUIRE (lower_pass.run (f, analyses));
+  REQUIRE ((lower_pass.run (f, analyses)).has_value ());
   CHECK (dump (f) == before);
-  auto reg = foreign.find_register ("v");
+  auto reg = foreign.find_register ("v").get ();
   REQUIRE (reg);
-  CHECK_FALSE (IRRewriter (f).materialize_register_storage (*reg));
+  CHECK_FALSE ((InstructionRewriter (f).materialize_register_storage (*reg)).has_value ());
   CHECK (dump (f) == before);
-  auto target = foreign.find_register ("r");
+  auto target = foreign.find_register ("r").get ();
   REQUIRE (target);
   before = dump (foreign);
-  CHECK_FALSE (IRRewriter (foreign).materialize_register_storage (*target));
+  CHECK_FALSE ((InstructionRewriter (foreign).materialize_register_storage (*target)).has_value ());
   CHECK (dump (foreign) == before);
 }
 TEST_CASE (
@@ -225,14 +232,14 @@ TEST_CASE (
     auto context = parse (text);
     lower (*context);
     auto &f = entry (*context);
-    auto v = f.find_register ("v");
+    auto v = f.find_register ("v").get ();
     REQUIRE (v);
     CHECK (v->is_memory_backed ());
     std::size_t addresses = 0;
     for (auto &b : f.blocks ())
       for (auto &i : b.instructions ()) addresses += i.opcode () == Opcode::Addr;
     CHECK (addresses >= 2);
-    REQUIRE (context->verify ());
+    REQUIRE ((context->verify ()).has_value ());
   }
 }
 TEST_CASE ("noncanonical escaping memory indexes report an error before consuming SSA") {
@@ -251,15 +258,15 @@ endmodule
   FunctionAnalysisManager analyses (f);
   FunctionPassManager ssa;
   ssa.add<BuildSSAPass> (false);
-  REQUIRE (ssa.run (f, analyses));
+  REQUIRE ((ssa.run (f, analyses)).has_value ());
   auto before = dump (f);
-  auto form = f.ssa_form ();
-  auto result = AddressTransformPass ().run (f, analyses);
-  REQUIRE_FALSE (result);
+  auto form = f.ssa_form ().get ();
+  auto result = ::mirnext::transforms::detail::run_pass (AddressTransformPass (), f, analyses);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("simplify") != std::string::npos);
-  CHECK (f.ssa_form () == form);
+  CHECK (f.ssa_form ().get () == form);
   CHECK (dump (f) == before);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
 }
 TEST_CASE ("unsimplified memory address results fail before consuming SSA") {
   auto context = parse (
@@ -269,15 +276,15 @@ TEST_CASE ("unsimplified memory address results fail before consuming SSA") {
   FunctionAnalysisManager analyses (f);
   FunctionPassManager ssa;
   ssa.add<BuildSSAPass> (false);
-  REQUIRE (ssa.run (f, analyses));
+  REQUIRE ((ssa.run (f, analyses)).has_value ());
   auto before = dump (f);
-  auto form = f.ssa_form ();
-  auto result = AddressTransformPass ().run (f, analyses);
-  REQUIRE_FALSE (result);
+  auto form = f.ssa_form ().get ();
+  auto result = ::mirnext::transforms::detail::run_pass (AddressTransformPass (), f, analyses);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("simplify") != std::string::npos);
-  CHECK (f.ssa_form () == form);
+  CHECK (f.ssa_form ().get () == form);
   CHECK (dump (f) == before);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
 }
 TEST_CASE ("nested address definitions rename through PHIs while storage facts survive SSA exit") {
   auto inputs = test::address_fixtures ();
@@ -287,61 +294,72 @@ TEST_CASE ("nested address definitions rename through PHIs while storage facts s
   FunctionAnalysisManager analyses (f);
   FunctionPassManager build;
   build.add<BuildSSAPass> ();
-  REQUIRE (build.run (f, analyses));
+  REQUIRE ((build.run (f, analyses)).has_value ());
   bool pointer_phi = false;
-  for (auto &phi : f.ssa_form ()->phis ())
+  for (auto &phi : f.ssa_form ().get ()->phis ())
     if (phi.alive () && phi.output ().origin ().name () == "p") {
       pointer_phi = true;
-      CHECK (&phi.output ().reg () != f.find_register ("p"));
-      for (auto use : phi.output ().uses ())
+      CHECK (&phi.output ().reg () != f.find_register ("p").get ());
+      for (auto use : mirnext::ir::detail::ReferenceAccess::pointers (phi.output ().uses ()))
         if (auto site = std::get_if<SSAInstructionUse> (&use->site ());
-            site && site->instruction->opcode () == Opcode::Addr)
-          CHECK (*site->instruction->operands ()[site->operand].get<const Register *> ()
-                 == &phi.output ().reg ());
+            site
+            && mirnext::ir::detail::NodeAccess::instruction (*(site))->opcode () == Opcode::Addr)
+          CHECK (
+            *mirnext::ir::detail::operand_access (
+               mirnext::ir::detail::NodeAccess::instruction (*site)->operands ()[site->operand])
+               .get<const Register *> ()
+            == &phi.output ().reg ());
     }
   CHECK (pointer_phi);
   FunctionPassManager exit;
   exit.add<ConventionalSSAPass> ();
   exit.add<DestroySSAPass> ();
-  REQUIRE (exit.run (f, analyses));
+  REQUIRE ((exit.run (f, analyses)).has_value ());
   for (auto &block : f.blocks ())
     for (auto &instruction : block.instructions ())
       if (instruction.opcode () == Opcode::Addr)
-        CHECK ((*instruction.operands ()[1].get<const Register *> ())->is_memory_backed ());
-  REQUIRE (f.verify ());
+        CHECK ((*mirnext::ir::detail::operand_access (instruction.operands ()[1])
+                   .get<const Register *> ())
+                 ->is_memory_backed ());
+  REQUIRE ((f.verify ()).has_value ());
 }
 TEST_CASE ("addresses assigned after their pointer slot escapes remain observable") {
   for (bool direct : {false, true}) {
     auto context = parse (test::stored_pointer_address_fixture (direct));
     lower (*context);
     auto &f = entry (*context);
-    CHECK (f.find_register ("p")->is_memory_backed ());
-    CHECK (f.find_register ("v")->is_memory_backed ());
+    CHECK (f.find_register ("p").value ().is_memory_backed ());
+    CHECK (f.find_register ("v").value ().is_memory_backed ());
     bool retained = false;
     std::unordered_set<const Register *> slots, values;
     for (auto &block : f.blocks ())
       for (auto &instruction : block.instructions ())
         if (instruction.opcode () == Opcode::Addr) {
-          auto source = *instruction.operands ()[1].get<const Register *> ();
-          if (source == f.find_register ("p"))
-            slots.insert (*instruction.operands ()[0].get<const Register *> ());
-          if (source == f.find_register ("v"))
-            values.insert (*instruction.operands ()[0].get<const Register *> ());
+          auto source = *mirnext::ir::detail::operand_access (instruction.operands ()[1])
+                           .get<const Register *> ();
+          if (source == f.find_register ("p").get ())
+            slots.insert (*mirnext::ir::detail::operand_access (instruction.operands ()[0])
+                             .get<const Register *> ());
+          if (source == f.find_register ("v").get ())
+            values.insert (*mirnext::ir::detail::operand_access (instruction.operands ()[0])
+                              .get<const Register *> ());
         }
     for (auto &block : f.blocks ())
       for (auto &instruction : block.instructions ())
         if (instruction.opcode () == Opcode::Mov)
-          if (auto memory = instruction.operands ()[0].get<Memory> ();
-              memory && slots.contains (memory->base))
-            if (auto value = instruction.operands ()[1].get<const Register *> ())
+          if (auto memory
+              = mirnext::ir::detail::operand_access (instruction.operands ()[0]).get<Memory> ();
+              memory && slots.contains (mirnext::ir::detail::NodeAccess::base (*(memory))))
+            if (auto value = mirnext::ir::detail::operand_access (instruction.operands ()[1])
+                               .get<const Register *> ())
               retained |= values.contains (*value);
     CHECK (retained);
     FunctionPassManager ssa;
     ssa.add<BuildSSAPass> ();
     ssa.add<ConventionalSSAPass> ();
     ssa.add<DestroySSAPass> ();
-    REQUIRE (ssa.run (*context));
-    REQUIRE (context->verify ());
+    REQUIRE ((ssa.run (*context)).has_value ());
+    REQUIRE ((context->verify ()).has_value ());
   }
   for (auto &text : test::pointer_alias_address_fixtures ()) {
     auto context = parse (text);
@@ -350,10 +368,10 @@ TEST_CASE ("addresses assigned after their pointer slot escapes remain observabl
     ssa.add<BuildSSAPass> ();
     ssa.add<ConventionalSSAPass> ();
     ssa.add<DestroySSAPass> ();
-    REQUIRE (ssa.run (*context));
-    REQUIRE (context->verify ());
+    REQUIRE ((ssa.run (*context)).has_value ());
+    REQUIRE ((context->verify ()).has_value ());
     auto binary = serialization::write_binary (*context);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
   }
 }

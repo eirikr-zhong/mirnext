@@ -58,16 +58,17 @@ std::uintptr_t NativeBoundary::leave () noexcept {
 }
 Result<NativeRecovery> NativeRecovery::create (std::shared_ptr<CodeMemoryProvider> provider) {
   auto target = target::TargetMachine::native ();
-  if (!target) return target.error ();
-  auto bytes
-    = codegen::make_invocation_entries (*target, reinterpret_cast<std::uintptr_t> (&checkpoint));
-  if (!bytes) return bytes.error ();
-  const std::array sizes{bytes->invoke.size (), bytes->recover.size ()};
+  if (!(target).has_value ()) return target.error ();
+  auto bytes = codegen::make_invocation_entries ((target).value (),
+                                                 reinterpret_cast<std::uintptr_t> (&checkpoint));
+  if (!(bytes).has_value ()) return bytes.error ();
+  const std::array sizes{bytes.value ().invoke.size (), bytes.value ().recover.size ()};
   auto reservation = CodeMemory (std::move (provider)).reserve (sizes);
-  if (!reservation) return reservation.error ();
-  const std::array<std::span<const std::uint8_t>, 2> buffers{bytes->invoke, bytes->recover};
-  auto code = reservation->publish (buffers);
-  if (!code) return code.error ();
-  return NativeRecovery (std::move ((*code)[0]), std::move ((*code)[1]));
+  if (!(reservation).has_value ()) return reservation.error ();
+  const std::array<std::span<const std::uint8_t>, 2> buffers{bytes.value ().invoke,
+                                                             bytes.value ().recover};
+  auto code = reservation.value ().publish (buffers);
+  if (!(code).has_value ()) return code.error ();
+  return NativeRecovery (std::move (((code).value ())[0]), std::move (((code).value ())[1]));
 }
 }  // namespace mirnext::execution::detail

@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Text format tests. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -16,43 +18,44 @@ using namespace mirnext::ir;
 using namespace mirnext::serialization;
 
 namespace {
-void roundtrip (const Context &source) {
+void roundtrip (const Program &source) {
   test::check_data_uses (source);
   auto text = write_text (source);
-  REQUIRE (text);
-  auto parsed = parse_text (*text);
-  INFO ((*text));
-  REQUIRE (parsed);
-  REQUIRE ((*parsed)->verify ());
-  test::check_data_uses (**parsed);
-  auto second = write_text (**parsed);
-  REQUIRE (second);
-  CHECK (*second == *text);
+  REQUIRE ((text).has_value ());
+  auto parsed = parse_text ((text).value ());
+  INFO (((text).value ()));
+  REQUIRE ((parsed).has_value ());
+  REQUIRE ((parsed.value ().verify ()).has_value ());
+  test::check_data_uses ((parsed).value ());
+  auto second = write_text ((parsed).value ());
+  REQUIRE ((second).has_value ());
+  CHECK ((second).value () == (text).value ());
 }
 Operand integer (std::int64_t value) { return Operand (value); }
 }  // namespace
 TEST_CASE ("native text canonicalizes unsigned immediate bits without changing binary modes") {
-  Context context;
-  auto module = context.create_module ("bits");
-  REQUIRE (module);
-  auto function = (*module)->create_function ("entry", {{Type::i64 ()}, {}});
-  REQUIRE (function);
-  auto block = (*function)->create_block ();
-  REQUIRE (block);
-  IRBuilder builder (**block);
+  Program context;
+  auto module = mirnext::ir::detail::access (context).create_module ("bits");
+  REQUIRE ((module).has_value ());
+  auto function = mirnext::ir::detail::access (((module)).value ())
+                    .create_function ("entry", {{Type::i64 ()}, {}});
+  REQUIRE ((function).has_value ());
+  auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+  REQUIRE ((block).has_value ());
+  InstructionBuilder builder ((block).value ());
   auto value = builder.binary (Opcode::Xor, Operand (UINT64_MAX), Operand (UINT64_C (1) << 63));
-  REQUIRE (value);
-  REQUIRE (builder.ret (Operand (**value)));
-  REQUIRE (context.verify ());
+  REQUIRE ((value).has_value ());
+  REQUIRE ((builder.ret (Operand ((value).value ()))).has_value ());
+  REQUIRE ((context.verify ()).has_value ());
   auto text = write_text (context);
-  REQUIRE (text);
-  CHECK (text->find ("-1, -9223372036854775808") != std::string::npos);
+  REQUIRE ((text).has_value ());
+  CHECK (text.value ().find ("-1, -9223372036854775808") != std::string::npos);
   roundtrip (context);
   auto bytes = write_binary (context);
-  REQUIRE (bytes);
-  auto decoded = read_binary (*bytes);
-  REQUIRE (decoded);
-  auto &instruction = *(*decoded)
+  REQUIRE ((bytes).has_value ());
+  auto decoded = read_binary ((bytes).value ());
+  REQUIRE ((decoded).has_value ());
+  auto &instruction = *(&(decoded).value ())
                          ->modules ()
                          .begin ()
                          ->functions ()
@@ -61,10 +64,10 @@ TEST_CASE ("native text canonicalizes unsigned immediate bits without changing b
                          .begin ()
                          ->instructions ()
                          .begin ();
-  REQUIRE (instruction.operands ()[1].get<std::uint64_t> ());
-  CHECK (*instruction.operands ()[1].get<std::uint64_t> () == UINT64_MAX);
-  REQUIRE (instruction.operands ()[2].get<std::uint64_t> ());
-  CHECK (*instruction.operands ()[2].get<std::uint64_t> () == (UINT64_C (1) << 63));
+  REQUIRE ((instruction.operands ()[1].get<std::uint64_t> ()).has_value ());
+  CHECK ((instruction.operands ()[1].get<std::uint64_t> ()).value () == UINT64_MAX);
+  REQUIRE ((instruction.operands ()[2].get<std::uint64_t> ()).has_value ());
+  CHECK ((instruction.operands ()[2].get<std::uint64_t> ()).value () == (UINT64_C (1) << 63));
 }
 TEST_CASE ("native text reads MIR regression corpus into canonical owned objects") {
   for (unsigned n = 1; n <= 16; ++n) {
@@ -75,12 +78,12 @@ TEST_CASE ("native text reads MIR regression corpus into canonical owned objects
     REQUIRE (stream);
     std::string input ((std::istreambuf_iterator<char> (stream)), {});
     auto parsed = parse_text (input, {path});
-    INFO ((parsed ? "" : parsed.error ().message));
-    REQUIRE (parsed);
+    INFO (((parsed).has_value () ? "" : parsed.error ().message));
+    REQUIRE ((parsed).has_value ());
     input.clear ();
     input.shrink_to_fit ();
-    REQUIRE ((*parsed)->verify ());
-    roundtrip (**parsed);
+    REQUIRE ((parsed.value ().verify ()).has_value ());
+    roundtrip ((parsed).value ());
   }
 }
 TEST_CASE ("native text roundtrips each public opcode with validated operands") {
@@ -88,13 +91,13 @@ TEST_CASE ("native text roundtrips each public opcode with validated operands") 
     CAPTURE (descriptor.name);
     auto context = mirnext::test::public_instruction_example (descriptor);
     auto text = write_text (*context);
-    REQUIRE (text);
-    auto parsed = parse_text (*text);
-    INFO ((*text));
-    INFO ((parsed ? "" : parsed.error ().message));
-    REQUIRE (parsed);
-    roundtrip (**parsed);
-    auto &function = *(*parsed)->modules ().begin ()->functions ().begin ();
+    REQUIRE ((text).has_value ());
+    auto parsed = parse_text ((text).value ());
+    INFO (((text).value ()));
+    INFO (((parsed).has_value () ? "" : parsed.error ().message));
+    REQUIRE ((parsed).has_value ());
+    roundtrip ((parsed).value ());
+    auto &function = *parsed.value ().modules ().begin ()->functions ().begin ();
     if (descriptor.opcode == Opcode::Label)
       CHECK (function.labels ().begin () != function.labels ().end ());
     else {
@@ -117,28 +120,32 @@ TEST_CASE ("native floating parsing ignores locale and preserves canonical nonfi
     "m:module\nf:func d\nret 1.25\nendfunc\ng:func ld\nret 2.5L\nendfunc\nh:func f\nret "
     "3.75f\nendfunc\nendmodule");
   std::locale::global (original);
-  REQUIRE (parsed);
-  roundtrip (**parsed);
-  auto &f = *(*parsed)->modules ().begin ()->functions ().begin ();
-  CHECK (*f.blocks ().begin ()->instructions ().begin ()->operands ()[0].get<double> () == 1.25);
-  auto functions = (*parsed)->modules ().begin ()->functions ();
+  REQUIRE ((parsed).has_value ());
+  roundtrip ((parsed).value ());
+  auto &f = *parsed.value ().modules ().begin ()->functions ().begin ();
+  CHECK ((f.blocks ().begin ()->instructions ().begin ()->operands ()[0].get<double> ()).value ()
+         == 1.25);
+  auto functions = parsed.value ().modules ().begin ()->functions ();
   auto it = functions.begin ();
   ++it;
-  CHECK (*it->blocks ().begin ()->instructions ().begin ()->operands ()[0].get<long double> ()
-         == 2.5L);
+  CHECK (
+    (it->blocks ().begin ()->instructions ().begin ()->operands ()[0].get<long double> ()).value ()
+    == 2.5L);
   ++it;
-  CHECK (*it->blocks ().begin ()->instructions ().begin ()->operands ()[0].get<float> () == 3.75f);
+  CHECK ((it->blocks ().begin ()->instructions ().begin ()->operands ()[0].get<float> ()).value ()
+         == 3.75f);
   for (auto type :
        {Type (Type::Kind::F32), Type (Type::Kind::F64), Type (Type::Kind::LongDouble)}) {
     for (bool negative : {false, true})
       for (bool nan : {false, true}) {
-        Context context;
-        auto module = context.create_module ("m");
-        REQUIRE (module);
-        auto function = (*module)->create_function ("f", {{type}, {}});
-        REQUIRE (function);
-        auto block = (*function)->create_block ();
-        REQUIRE (block);
+        Program context;
+        auto module = mirnext::ir::detail::access (context).create_module ("m");
+        REQUIRE ((module).has_value ());
+        auto function
+          = mirnext::ir::detail::access (((module)).value ()).create_function ("f", {{type}, {}});
+        REQUIRE ((function).has_value ());
+        auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+        REQUIRE ((block).has_value ());
         auto number = [negative, nan]<class T> () {
           return std::copysign (nan ? std::numeric_limits<T>::quiet_NaN ()
                                     : std::numeric_limits<T>::infinity (),
@@ -149,8 +156,10 @@ TEST_CASE ("native floating parsing ignores locale and preserves canonical nonfi
                         : type.kind () == Type::Kind::F64
                           ? Operand (number.template operator()<double> ())
                           : Operand (number.template operator()<long double> ());
-        REQUIRE ((*module)->create_data ("inf", InitializedData{type, {value}}));
-        REQUIRE (IRBuilder (**block).ret (value));
+        REQUIRE ((mirnext::ir::detail::access (((module)).value ())
+                    .create_data ("inf", InitializedData{type, {value}}))
+                   .has_value ());
+        REQUIRE ((InstructionBuilder ((block).value ()).ret (value)).has_value ());
         roundtrip (context);
       }
   }
@@ -171,43 +180,47 @@ left: right: ret 42
       endmodule
 )";
   auto parsed = parse_text (text);
-  INFO ((parsed ? "" : parsed.error ().message));
-  REQUIRE (parsed);
-  auto &module = *(*parsed)->modules ().begin ();
+  INFO (((parsed).has_value () ? "" : parsed.error ().message));
+  REQUIRE ((parsed).has_value ());
+  auto &module = *parsed.value ().modules ().begin ();
   REQUIRE (module.items ().size () == 9);
-  CHECK (std::holds_alternative<const GlobalData *> (module.items ()[0]));
-  CHECK (std::holds_alternative<const GlobalData *> (module.items ()[1]));
-  CHECK (std::holds_alternative<const Symbol *> (module.items ()[2]));
-  CHECK (std::holds_alternative<const GlobalData *> (module.items ()[3]));
+  CHECK (module.items ()[0].get<GlobalData> ().has_value ());
+  CHECK (module.items ()[1].get<GlobalData> ().has_value ());
+  CHECK (module.items ()[2].get<Symbol> ().has_value ());
+  CHECK (module.items ()[3].get<GlobalData> ().has_value ());
   auto &function = *module.functions ().begin ();
   CHECK (function.labels ().begin ()->block ().labels ().size () == 2);
-  auto output = write_text (**parsed);
-  REQUIRE (output);
-  CHECK (output->find (".boundary") != output->npos);
-  roundtrip (**parsed);
-  auto clone_result = clone (**parsed);
-  REQUIRE (clone_result);
-  CHECK (dump (**clone_result) == dump (**parsed));
+  auto output = write_text ((parsed).value ());
+  REQUIRE ((output).has_value ());
+  CHECK (output.value ().find (".boundary") != output.value ().npos);
+  roundtrip ((parsed).value ());
+  auto clone_result = clone ((parsed).value ());
+  REQUIRE ((clone_result).has_value ());
+  CHECK (dump ((clone_result).value ()) == dump ((parsed).value ()));
 }
 TEST_CASE ("native data declaration fills its original module slot with stable symbol identity") {
-  Context context;
-  auto module = context.create_module ("m");
-  REQUIRE (module);
-  auto symbol = (*module)->reserve_symbol ("data");
-  REQUIRE (symbol);
-  CHECK ((*module)->items ().empty ());
-  auto declaration = (*module)->declare_data ("data");
-  REQUIRE (declaration);
-  CHECK (*declaration == *symbol);
-  REQUIRE_FALSE (context.verify ());
-  REQUIRE ((*module)->prototype ("between", {}));
-  REQUIRE ((*module)->create_data ("", ZeroData{4}));
-  auto data = (*module)->define_data (**declaration, InitializedData{Type::i64 (), {integer (42)}});
-  REQUIRE (data);
-  CHECK (&(*data)->symbol () == *symbol);
-  REQUIRE (context.verify ());
-  CHECK (std::get<const GlobalData *> ((*module)->items ()[0]) == *data);
-  CHECK (std::holds_alternative<const Symbol *> ((*module)->items ()[1]));
+  Program context;
+  auto module = mirnext::ir::detail::access (context).create_module ("m");
+  REQUIRE ((module).has_value ());
+  auto symbol = mirnext::ir::detail::access (((module)).value ()).reserve_symbol ("data");
+  REQUIRE ((symbol).has_value ());
+  CHECK (module.value ().items ().empty ());
+  auto declaration = mirnext::ir::detail::access (((module)).value ()).declare_data ("data");
+  REQUIRE ((declaration).has_value ());
+  CHECK (&(declaration).value () == &(symbol).value ());
+  REQUIRE_FALSE ((context.verify ()).has_value ());
+  REQUIRE (
+    (mirnext::ir::detail::access (((module)).value ()).prototype ("between", {})).has_value ());
+  REQUIRE (
+    (mirnext::ir::detail::access (((module)).value ()).create_data ("", ZeroData{4})).has_value ());
+  auto data
+    = mirnext::ir::detail::access (((module)).value ())
+        .define_data ((declaration).value (), InitializedData{Type::i64 (), {integer (42)}});
+  REQUIRE ((data).has_value ());
+  CHECK (&data.value ().symbol () == &(symbol).value ());
+  REQUIRE ((context.verify ()).has_value ());
+  CHECK (module.value ().items ()[0].get<GlobalData> ().get () == &(data).value ());
+  CHECK (module.value ().items ()[1].get<Symbol> ().has_value ());
   roundtrip (context);
 }
 TEST_CASE ("native text handles hardware identity block classes varargs and special memory") {
@@ -225,12 +238,12 @@ f: func i64, blk4:16(.a), ...
    endfunc
    endmodule
 )");
-  INFO ((parsed ? "" : parsed.error ().message));
-  REQUIRE (parsed);
-  auto &function = *(*(*parsed)->modules ().begin ()).functions ().begin ();
-  CHECK (function.find_register ("a") == function.find_register ("b"));
+  INFO (((parsed).has_value () ? "" : parsed.error ().message));
+  REQUIRE ((parsed).has_value ());
+  auto &function = *(*parsed.value ().modules ().begin ()).functions ().begin ();
+  CHECK (function.find_register ("a").get () == function.find_register ("b").get ());
   CHECK (function.signature ().parameters[0] == Type::block (16, Type::BlockClass::Class4));
-  roundtrip (**parsed);
+  roundtrip ((parsed).value ());
 }
 TEST_CASE ("native text materializes relocated memory without mutating write source") {
   auto parsed = parse_text (R"(m: module
@@ -242,61 +255,67 @@ f: func i64
    endfunc
    endmodule
 )");
-  INFO ((parsed ? "" : parsed.error ().message));
-  REQUIRE (parsed);
-  auto &module = *(*parsed)->modules ().begin ();
+  INFO (((parsed).has_value () ? "" : parsed.error ().message));
+  REQUIRE ((parsed).has_value ());
+  auto &module = *parsed.value ().modules ().begin ();
   auto &function = *module.functions ().begin ();
   CHECK (function.instruction_count () == 4);
   auto assignment = function.blocks ().begin ()->instructions ().begin ();
   CHECK (assignment->opcode () == Opcode::Mov);
-  CHECK (assignment->operands ()[1].get<SymbolReference> () != nullptr);
-  auto symbol = module.find_symbol ("d");
+  CHECK (assignment->operands ()[1].get<SymbolReference> ().has_value ());
+  auto symbol = module.find_symbol ("d").get ();
   REQUIRE (symbol);
   auto rewritten
-    = IRRewriter (function).replace_operand (*assignment, 1, Operand (SymbolReference{symbol, 8}));
-  REQUIRE (rewritten);
-  auto before = dump (**parsed);
+    = InstructionRewriter (function)
+        .replace_operand (*assignment, 1,
+                          Operand (
+                            mirnext::ir::detail::NodeAccess::make_SymbolReference (symbol, 8)));
+  REQUIRE ((rewritten).has_value ());
+  auto before = dump ((parsed).value ());
   auto revisions = function.revisions ();
-  auto output = write_text (**parsed);
-  REQUIRE (output);
-  CHECK (output->find (".addr") != output->npos);
-  CHECK (dump (**parsed) == before);
+  auto output = write_text ((parsed).value ());
+  REQUIRE ((output).has_value ());
+  CHECK (output.value ().find (".addr") != output.value ().npos);
+  CHECK (dump ((parsed).value ()) == before);
   CHECK (function.revisions () == revisions);
-  auto decoded = parse_text (*output);
-  INFO ((decoded ? "" : decoded.error ().message));
-  REQUIRE (decoded);
-  roundtrip (**decoded);
+  auto decoded = parse_text ((output).value ());
+  INFO (((decoded).has_value () ? "" : decoded.error ().message));
+  REQUIRE ((decoded).has_value ());
+  roundtrip ((decoded).value ());
 }
 TEST_CASE ("native text roundtrips floating bits strings and reports unrepresentable NaN payload") {
-  Context context;
-  auto module = context.create_module ("m");
-  REQUIRE (module);
-  auto function = (*module)->create_function ("f", {{Type (Type::Kind::F64)}, {}});
-  REQUIRE (function);
-  auto block = (*function)->create_block ();
-  REQUIRE (block);
-  IRBuilder builder (**block);
+  Program context;
+  auto module = mirnext::ir::detail::access (context).create_module ("m");
+  REQUIRE ((module).has_value ());
+  auto function = mirnext::ir::detail::access (((module)).value ())
+                    .create_function ("f", {{Type (Type::Kind::F64)}, {}});
+  REQUIRE ((function).has_value ());
+  auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+  REQUIRE ((block).has_value ());
+  InstructionBuilder builder ((block).value ());
   auto result = builder.ret (Operand (-0.0));
-  REQUIRE (result);
+  REQUIRE ((result).has_value ());
   auto output = write_text (context);
-  REQUIRE (output);
-  auto parsed = parse_text (*output);
-  REQUIRE (parsed);
-  auto &decoded_function = *(*(*parsed)->modules ().begin ()).functions ().begin ();
-  auto value
-    = decoded_function.blocks ().begin ()->instructions ().begin ()->operands ()[0].get<double> ();
+  REQUIRE ((output).has_value ());
+  auto parsed = parse_text ((output).value ());
+  REQUIRE ((parsed).has_value ());
+  auto &decoded_function = *(*parsed.value ().modules ().begin ()).functions ().begin ();
+  auto value = mirnext::ir::detail::operand_access (
+                 decoded_function.blocks ().begin ()->instructions ().begin ()->operands ()[0])
+                 .get<double> ();
   REQUIRE (value);
   CHECK (std::bit_cast<std::uint64_t> (*value) == UINT64_C (0x8000000000000000));
-  REQUIRE (IRRewriter (**function)
-             .replace_operand (**result, 0,
-                               Operand (std::bit_cast<double> (UINT64_C (0x7ff8000000000123)))));
+  REQUIRE ((InstructionRewriter ((function).value ())
+              .replace_operand ((result).value (), 0,
+                                Operand (std::bit_cast<double> (UINT64_C (0x7ff8000000000123)))))
+             .has_value ());
   auto unrepresentable = write_text (context);
-  REQUIRE_FALSE (unrepresentable);
+  REQUIRE_FALSE ((unrepresentable).has_value ());
   CHECK (unrepresentable.error ().message.find ("NaN payload") != std::string::npos);
   auto bytes = parse_text ("m:module\nd:string \"A\\000B\\x00\"\ne:string \"\"\nendmodule\n");
-  REQUIRE (bytes);
-  roundtrip (**bytes);
-  auto &data = *(*bytes)->modules ().begin ()->data ().begin ();
+  REQUIRE ((bytes).has_value ());
+  roundtrip ((bytes).value ());
+  auto &data = *bytes.value ().modules ().begin ()->data ().begin ();
   auto initializer = std::get_if<InitializedData> (&data.initializer ());
   REQUIRE (initializer);
   CHECK (initializer->values.size () == 4);
@@ -314,14 +333,14 @@ TEST_CASE ("native text returns bounded contextual diagnostics for malformed inp
         "m:module\nf:func i64\nret 0\nendfunc\nx:expr f\nexport unknown\nendmodule"}) {
     CAPTURE (input);
     auto failed = parse_text (input, {"malformed.mir"});
-    REQUIRE_FALSE (failed);
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK (failed.error ().message.find ("malformed.mir:") == 0);
   }
   ParseOptions options;
   options.max_tokens = 2;
-  CHECK_FALSE (parse_text ("m: module\nendmodule", options));
+  CHECK_FALSE ((parse_text ("m: module\nendmodule", options)).has_value ());
   options.max_tokens = 100;
   options.max_instructions = 0;
-  CHECK_FALSE (parse_text ("m:module\nf:func\nret\nendfunc\nendmodule", options));
-  CHECK_FALSE (parse_text (std::string_view ("m:module\0endmodule", 18)));
+  CHECK_FALSE ((parse_text ("m:module\nf:func\nret\nendfunc\nendmodule", options)).has_value ());
+  CHECK_FALSE ((parse_text (std::string_view ("m:module\0endmodule", 18))).has_value ());
 }

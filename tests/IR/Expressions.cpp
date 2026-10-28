@@ -1,3 +1,5 @@
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 /* Licensed under the MIT License. Typed selection, failure atomicity and canonical expression
  * storage. */
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
@@ -13,20 +15,21 @@ using namespace mirnext;
 using namespace mirnext::ir;
 namespace {
 struct Example {
-  Context context;
+  Program context;
   Module *module;
   Function *function;
   BasicBlock *block;
   Example (Signature signature = {}) {
-    auto m = context.create_module ("expressions");
-    REQUIRE (m);
-    module = *m;
-    auto f = module->create_function ("entry", std::move (signature));
-    REQUIRE (f);
-    function = *f;
-    auto b = function->create_block ();
-    REQUIRE (b);
-    block = *b;
+    auto m = mirnext::ir::detail::access (context).create_module ("expressions");
+    REQUIRE ((m).has_value ());
+    module = &(m).value ();
+    auto f
+      = mirnext::ir::detail::access (*(module)).create_function ("entry", std::move (signature));
+    REQUIRE ((f).has_value ());
+    function = &(f).value ();
+    auto b = mirnext::ir::detail::access (*(function)).create_block ();
+    REQUIRE ((b).has_value ());
+    block = &(b).value ();
   }
 };
 std::size_t register_count (const Function &f) {
@@ -35,7 +38,7 @@ std::size_t register_count (const Function &f) {
 Opcode last_opcode (const BasicBlock &block) {
   return std::prev (block.instructions ().end ())->opcode ();
 }
-Expression number (IRBuilder &builder, Type type) {
+mirnext::ir::detail::ExpressionState number (InstructionBuilder &builder, Type type) {
   return type.kind () == Type::Kind::F32          ? builder.literal (42.0f)
          : type.kind () == Type::Kind::F64        ? builder.literal (42.0)
          : type.kind () == Type::Kind::LongDouble ? builder.literal (42.0L)
@@ -48,21 +51,21 @@ TEST_CASE ("native expression DSL clones and roundtrips executable fixtures") {
     auto context = test::expression_example (static_cast<test::ExpressionExample> (n));
     auto before = dump (*context);
     auto copy = clone (*context);
-    REQUIRE (copy);
-    CHECK (dump (**copy) == before);
+    REQUIRE ((copy).has_value ());
+    CHECK (dump ((copy).value ()) == before);
     auto text = serialization::write_text (*context);
-    REQUIRE (text);
-    auto parsed = serialization::parse_text (*text);
-    REQUIRE (parsed);
-    auto normalized = serialization::write_text (**parsed);
-    REQUIRE (normalized);
-    CHECK (*normalized == *text);
+    REQUIRE ((text).has_value ());
+    auto parsed = serialization::parse_text ((text).value ());
+    REQUIRE ((parsed).has_value ());
+    auto normalized = serialization::write_text ((parsed).value ());
+    REQUIRE ((normalized).has_value ());
+    CHECK ((normalized).value () == (text).value ());
     auto bytes = serialization::write_binary (*context);
-    REQUIRE (bytes);
-    auto decoded = serialization::read_binary (*bytes);
-    REQUIRE (decoded);
+    REQUIRE ((bytes).has_value ());
+    auto decoded = serialization::read_binary ((bytes).value ());
+    REQUIRE ((decoded).has_value ());
     CHECK (dump (*context) == before);
-    CHECK ((*decoded)->verify ());
+    CHECK ((decoded.value ().verify ()).has_value ());
   }
 }
 TEST_CASE ("native expressions select signedness widths and exact arithmetic opcodes") {
@@ -84,7 +87,7 @@ TEST_CASE ("native expressions select signedness widths and exact arithmetic opc
         {Type::Kind::LongDouble, Opcode::LDAdd, Opcode::LDSub, Opcode::LDMul, Opcode::LDDiv}}) {
     CAPTURE (static_cast<unsigned> (row.type));
     Example e;
-    IRBuilder builder (*e.block);
+    InstructionBuilder builder (*e.block);
     auto value = number (builder, Type (row.type));
     auto sum = value + 2;
     REQUIRE (sum.is_valid ());
@@ -99,13 +102,13 @@ TEST_CASE ("native expressions select signedness widths and exact arithmetic opc
     CHECK (last_opcode (*e.block) == row.div);
     CHECK (e.block->size () == 4);
     CHECK (register_count (*e.function) == 4);
-    REQUIRE (builder.ret ());
-    REQUIRE (e.context.verify ());
+    REQUIRE ((builder.ret ()).has_value ());
+    REQUIRE ((e.context.verify ()).has_value ());
     auto bytes = serialization::write_binary (e.context);
-    REQUIRE (bytes);
-    auto decoded = serialization::read_binary (*bytes);
-    REQUIRE (decoded);
-    auto &body = *(*decoded)->modules ().begin ()->functions ().begin ()->blocks ().begin ();
+    REQUIRE ((bytes).has_value ());
+    auto decoded = serialization::read_binary ((bytes).value ());
+    REQUIRE ((decoded).has_value ());
+    auto &body = *decoded.value ().modules ().begin ()->functions ().begin ()->blocks ().begin ();
     auto instruction = body.instructions ().begin ();
     CHECK (instruction++->opcode () == row.add);
     CHECK (instruction++->opcode () == row.sub);
@@ -128,7 +131,7 @@ TEST_CASE ("native bit operations use unsigned shifts and modulo without implici
                    {Type::Kind::I64, Opcode::Mod, Opcode::Rsh, false},
                    {Type::Kind::U64, Opcode::UMod, Opcode::URsh, false}}) {
     Example e;
-    IRBuilder builder (*e.block);
+    InstructionBuilder builder (*e.block);
     auto value = number (builder, Type (row.type));
     REQUIRE ((value % 2).is_valid ());
     CHECK (last_opcode (*e.block) == row.mod);
@@ -144,8 +147,8 @@ TEST_CASE ("native bit operations use unsigned shifts and modulo without implici
     CHECK (last_opcode (*e.block) == (row.small ? Opcode::Xors : Opcode::Xor));
     REQUIRE ((~value).is_valid ());
     CHECK (last_opcode (*e.block) == (row.small ? Opcode::Xors : Opcode::Xor));
-    REQUIRE (builder.ret ());
-    REQUIRE (e.context.verify ());
+    REQUIRE ((builder.ret ()).has_value ());
+    REQUIRE ((e.context.verify ()).has_value ());
   }
 }
 TEST_CASE ("native comparison values and direct branches share exact type selection") {
@@ -185,7 +188,7 @@ TEST_CASE ("native comparison values and direct branches share exact type select
       CAPTURE (static_cast<unsigned> (row.type));
       CAPTURE (n);
       Example e;
-      IRBuilder builder (*e.block);
+      InstructionBuilder builder (*e.block);
       auto x = number (builder, Type (row.type));
       auto compared = n == 0   ? x == x
                       : n == 1 ? x != x
@@ -197,17 +200,17 @@ TEST_CASE ("native comparison values and direct branches share exact type select
       CHECK (compared.type ().kind () == Type::Kind::Bool);
       CHECK (last_opcode (*e.block) == row.value[n]);
       auto count = register_count (*e.function);
-      auto exit = e.function->create_block ();
-      REQUIRE (exit);
-      auto label = e.function->create_label (**exit);
-      REQUIRE (label);
-      REQUIRE (builder.branch (static_cast<Comparison> (n), x, x, **label));
+      auto exit = mirnext::ir::detail::access (*(e.function)).create_block ();
+      REQUIRE ((exit).has_value ());
+      auto label = mirnext::ir::detail::access (*(e.function)).create_label ((exit).value ());
+      REQUIRE ((label).has_value ());
+      REQUIRE ((builder.branch (static_cast<Comparison> (n), x, x, (label).value ())).has_value ());
       CHECK (last_opcode (*e.block) == row.branch[n]);
       CHECK (register_count (*e.function) == count);
       CHECK (e.block->size () == 2);
-      REQUIRE (builder.set_insert_point (**exit));
-      REQUIRE (builder.ret ());
-      REQUIRE (e.context.verify ());
+      REQUIRE ((builder.set_insert_point ((exit).value ())).has_value ());
+      REQUIRE ((builder.ret ()).has_value ());
+      REQUIRE ((e.context.verify ()).has_value ());
     }
   }
 }
@@ -215,7 +218,7 @@ TEST_CASE ("native unary expressions retain types and produce Boolean logical ne
   for (auto kind : {Type::Kind::I8, Type::Kind::U32, Type::Kind::I64, Type::Kind::U64,
                     Type::Kind::F32, Type::Kind::F64, Type::Kind::LongDouble}) {
     Example e;
-    IRBuilder builder (*e.block);
+    InstructionBuilder builder (*e.block);
     auto x = number (builder, Type (kind));
     auto negated = -x;
     REQUIRE (negated.is_valid ());
@@ -229,27 +232,28 @@ TEST_CASE ("native unary expressions retain types and produce Boolean logical ne
     auto logical = !x;
     REQUIRE (logical.is_valid ());
     CHECK (logical.type ().kind () == Type::Kind::Bool);
-    REQUIRE (builder.ret ());
-    REQUIRE (e.context.verify ());
+    REQUIRE ((builder.ret ()).has_value ());
+    REQUIRE ((e.context.verify ()).has_value ());
   }
 }
 TEST_CASE ("native literal construction is read-only and preserves exact immediate bits") {
   Example e;
-  IRBuilder builder (*e.block);
+  InstructionBuilder builder (*e.block);
   auto before = e.function->revisions ();
   auto maximum = builder.literal (UINT64_MAX);
   CHECK (maximum.type ().kind () == Type::Kind::U64);
-  CHECK (std::bit_cast<std::uint64_t> (*maximum.value ()->get<std::int64_t> ()) == UINT64_MAX);
-  CHECK (*builder.literal (-1).value ()->get<std::int64_t> () == -1);
+  CHECK (std::bit_cast<std::uint64_t> ((maximum.value ().value ().get<std::int64_t> ()).value ())
+         == UINT64_MAX);
+  CHECK ((builder.literal (-1).value ().value ().get<std::int64_t> ()).value () == -1);
   auto boolean = builder.literal (Type (Type::Kind::Bool), -7);
   REQUIRE (boolean.is_valid ());
-  CHECK (*boolean.value ()->get<std::int64_t> () == 1);
+  CHECK ((boolean.value ().value ().get<std::int64_t> ()).value () == 1);
   CHECK (builder.literal (true).type ().kind () == Type::Kind::Bool);
   CHECK (builder.literal (false).type ().kind () == Type::Kind::Bool);
   auto nan = builder.literal (std::numeric_limits<double>::quiet_NaN ());
   CHECK (nan.is_valid ());
   auto zero = builder.literal (-0.0);
-  CHECK (std::signbit (*zero.value ()->get<double> ()));
+  CHECK (std::signbit ((zero.value ().value ().get<double> ()).value ()));
   CHECK (e.block->size () == 0);
   CHECK (register_count (*e.function) == 0);
   CHECK (e.function->revisions () == before);
@@ -270,7 +274,7 @@ TEST_CASE ("native literal construction is read-only and preserves exact immedia
 }
 TEST_CASE ("native expression failures publish no result and retain their first diagnostic") {
   Example e;
-  IRBuilder builder (*e.block);
+  InstructionBuilder builder (*e.block);
   auto before = e.function->revisions ();
   auto x = builder.literal (42);
   SUBCASE ("type mismatch") { CHECK_FALSE ((x + builder.literal (2.0)).is_valid ()); }
@@ -289,28 +293,28 @@ TEST_CASE ("native expression failures publish no result and retain their first 
     CHECK_FALSE ((-builder.literal (Type::pointer (), 0)).is_valid ());
   }
   SUBCASE ("different Builder") {
-    IRBuilder other (*e.block);
+    InstructionBuilder other (*e.block);
     CHECK_FALSE ((x + other.literal (2)).is_valid ());
   }
   SUBCASE ("foreign literal") {
     Example foreign;
-    IRBuilder other (*foreign.block);
+    InstructionBuilder other (*foreign.block);
     CHECK_FALSE ((x + other.literal (2)).is_valid ());
   }
   SUBCASE ("foreign register") {
     Example foreign;
-    auto reg = foreign.function->create_register (Type::i64 ());
-    REQUIRE (reg);
-    CHECK_FALSE (builder.expression (**reg).is_valid ());
+    auto reg = mirnext::ir::detail::access (*(foreign.function)).create_register (Type::i64 ());
+    REQUIRE ((reg).has_value ());
+    CHECK_FALSE (builder.expression ((reg).value ()).is_valid ());
   }
   SUBCASE ("no insertion point") {
     builder.clear_insert_point ();
     CHECK_FALSE ((x + 1).is_valid ());
   }
-  REQUIRE (e.module->error ());
-  auto message = e.module->error ()->message;
-  CHECK_FALSE ((x * 2).value ());
-  CHECK (e.module->error ()->message == message);
+  REQUIRE ((e.module->error ()).has_value ());
+  auto message = e.module->error ().value ().message;
+  CHECK_FALSE (((x * 2).value ()).has_value ());
+  CHECK (e.module->error ().value ().message == message);
   CHECK (e.block->size () == 0);
   CHECK (register_count (*e.function) == 0);
   CHECK (e.function->revisions () == before);
@@ -321,7 +325,7 @@ TEST_CASE ("native conversion sequences cover every scalar source and destinatio
       CAPTURE (from);
       CAPTURE (to);
       Example e;
-      IRBuilder builder (*e.block);
+      InstructionBuilder builder (*e.block);
       auto source = Type (static_cast<Type::Kind> (from)),
            target = Type (static_cast<Type::Kind> (to));
       auto before = e.function->revisions ();
@@ -341,16 +345,16 @@ TEST_CASE ("native conversion sequences cover every scalar source and destinatio
       REQUIRE (result.is_valid ());
       CHECK (result.type () == target);
       if (source == target) CHECK (e.function->revisions () == before);
-      REQUIRE (builder.ret ());
-      REQUIRE (e.context.verify ());
+      REQUIRE ((builder.ret ()).has_value ());
+      REQUIRE ((e.context.verify ()).has_value ());
       auto bytes = serialization::write_binary (e.context);
-      REQUIRE (bytes);
-      CHECK (serialization::read_binary (*bytes));
+      REQUIRE ((bytes).has_value ());
+      CHECK ((serialization::read_binary ((bytes).value ())).has_value ());
     }
 }
 TEST_CASE ("native conversions validate complete sequences and normalize integer representations") {
   Example e;
-  IRBuilder builder (*e.block);
+  InstructionBuilder builder (*e.block);
   auto small = builder.literal (Type (Type::Kind::I8), 255).convert (Type (Type::Kind::U16));
   REQUIRE (small.is_valid ());
   auto instruction = e.block->instructions ().begin ();
@@ -374,25 +378,33 @@ TEST_CASE ("native conversions validate complete sequences and normalize integer
 }
 TEST_CASE ("native typed expression boundaries validate before publishing instructions") {
   Example e ({{Type::i64 ()}, {}});
-  IRBuilder builder (*e.block);
+  InstructionBuilder builder (*e.block);
   auto wrong = builder.literal (42.0);
-  auto variable = e.module->create_variable ("value", Type::i64 (), 0);
-  REQUIRE (variable);
-  auto reg = e.function->create_register (Type::i64 ());
-  REQUIRE (reg);
-  auto target = e.module->import ("target", Signature{{Type::i64 ()}, {Type::i64 ()}});
-  REQUIRE (target);
+  auto variable
+    = mirnext::ir::detail::access (*(e.module)).create_variable ("value", Type::i64 (), 0);
+  REQUIRE ((variable).has_value ());
+  auto reg = mirnext::ir::detail::access (*(e.function)).create_register (Type::i64 ());
+  REQUIRE ((reg).has_value ());
+  auto target = mirnext::ir::detail::access (*(e.module))
+                  .import ("target", Signature{{Type::i64 ()}, {Type::i64 ()}});
+  REQUIRE ((target).has_value ());
   auto before = e.function->revisions ();
-  SUBCASE ("return") { CHECK_FALSE (builder.ret (wrong)); }
-  SUBCASE ("assignment") { CHECK_FALSE (builder.assign (**reg, wrong)); }
-  SUBCASE ("global store") { CHECK_FALSE (builder.store (**variable, wrong)); }
-  SUBCASE ("memory store") { CHECK_FALSE (builder.store (Memory{Type::i64 ()}, wrong)); }
-  SUBCASE ("call") { CHECK_FALSE (builder.call (**target, {wrong})); }
+  SUBCASE ("return") { CHECK_FALSE ((builder.ret (wrong)).has_value ()); }
+  SUBCASE ("assignment") { CHECK_FALSE ((builder.assign ((reg).value (), wrong)).has_value ()); }
+  SUBCASE ("global store") {
+    CHECK_FALSE ((builder.store ((variable).value (), wrong)).has_value ());
+  }
+  SUBCASE ("memory store") {
+    CHECK_FALSE (
+      (builder.store (mirnext::ir::detail::NodeAccess::make_Memory (Type::i64 ()), wrong))
+        .has_value ());
+  }
+  SUBCASE ("call") { CHECK_FALSE ((builder.call ((target).value (), {wrong})).has_value ()); }
   SUBCASE ("foreign erroneous call argument") {
     Example foreign;
-    IRBuilder other (*foreign.block);
+    InstructionBuilder other (*foreign.block);
     auto failed = other.literal (42.0) % 2;
-    CHECK_FALSE (builder.call (**target, {failed}));
+    CHECK_FALSE ((builder.call ((target).value (), {failed})).has_value ());
   }
   CHECK (e.function->revisions () == before);
   CHECK (e.block->size () == 0);
@@ -412,54 +424,56 @@ TEST_CASE ("native integer conversions avoid redundant moves and extensions") {
                    {Type::Kind::U8, Type::Kind::I32, Opcode::UExt8},
                    {Type::Kind::I16, Type::Kind::U8, Opcode::UExt8}}) {
     Example e;
-    IRBuilder builder (*e.block);
+    InstructionBuilder builder (*e.block);
     auto result = number (builder, Type (row.from)).convert (Type (row.to));
     REQUIRE (result.is_valid ());
     CHECK (result.type () == Type (row.to));
     CHECK (e.block->size () == 1);
     CHECK (register_count (*e.function) == 1);
     CHECK (last_opcode (*e.block) == row.opcode);
-    REQUIRE (builder.ret ());
-    REQUIRE (e.context.verify ());
+    REQUIRE ((builder.ret ()).has_value ());
+    REQUIRE ((e.context.verify ()).has_value ());
   }
 }
 TEST_CASE ("native expression handles survive bulk insertion and independent cloning") {
-  std::unique_ptr<Context> copy;
+  std::unique_ptr<Program> copy;
   {
     Example e ({{Type::i64 ()}, {}});
-    IRBuilder builder (*e.block);
+    InstructionBuilder builder (*e.block);
     auto first = builder.literal (20) + 22;
     auto operand = first.value ();
-    REQUIRE (operand);
+    REQUIRE ((operand).has_value ());
     for (unsigned n = 0; n < 4096; ++n) REQUIRE ((first + n).is_valid ());
-    CHECK (*first.value () == *operand);
-    REQUIRE (builder.ret (first));
-    REQUIRE (e.context.verify ());
+    CHECK ((first.value ()).value () == (operand).value ());
+    REQUIRE ((builder.ret (first)).has_value ());
+    REQUIRE ((e.context.verify ()).has_value ());
     auto cloned = clone (e.context);
-    REQUIRE (cloned);
-    copy = std::move (*cloned);
+    REQUIRE ((cloned).has_value ());
+    copy = std::make_unique<Program> (std::move ((cloned).value ()));
   }
-  CHECK (copy->verify ());
-  CHECK (serialization::write_binary (*copy));
+  CHECK ((copy->verify ()).has_value ());
+  CHECK ((serialization::write_binary (*copy)).has_value ());
 }
 TEST_CASE ("native direct branch rejects invalid comparisons and owners atomically") {
   Example e;
-  IRBuilder builder (*e.block);
-  auto target = e.function->create_label (*e.block);
-  REQUIRE (target);
+  InstructionBuilder builder (*e.block);
+  auto target = mirnext::ir::detail::access (*(e.function)).create_label (*e.block);
+  REQUIRE ((target).has_value ());
   auto x = builder.literal (42);
   auto before = e.function->revisions ();
   SUBCASE ("invalid comparison") {
-    CHECK_FALSE (builder.branch (static_cast<Comparison> (99), x, x, **target));
+    CHECK_FALSE (
+      (builder.branch (static_cast<Comparison> (99), x, x, (target).value ())).has_value ());
   }
   SUBCASE ("mixed types") {
-    CHECK_FALSE (builder.branch (Comparison::Equal, x, builder.literal (42.0), **target));
+    CHECK_FALSE ((builder.branch (Comparison::Equal, x, builder.literal (42.0), (target).value ()))
+                   .has_value ());
   }
   SUBCASE ("foreign label") {
     Example other;
-    auto foreign = other.function->create_label (*other.block);
-    REQUIRE (foreign);
-    CHECK_FALSE (builder.branch (Comparison::Equal, x, x, **foreign));
+    auto foreign = mirnext::ir::detail::access (*(other.function)).create_label (*other.block);
+    REQUIRE ((foreign).has_value ());
+    CHECK_FALSE ((builder.branch (Comparison::Equal, x, x, (foreign).value ())).has_value ());
   }
   CHECK (e.block->size () == 0);
   CHECK (register_count (*e.function) == 0);
@@ -467,18 +481,19 @@ TEST_CASE ("native direct branch rejects invalid comparisons and owners atomical
 }
 TEST_CASE ("native Boolean memory expressions normalize raw writes before use") {
   Example e;
-  IRBuilder builder (*e.block);
-  auto address = e.function->create_register (Type::pointer ());
-  REQUIRE (address);
-  auto value = builder.expression (Memory{Type (Type::Kind::Bool), *address});
+  InstructionBuilder builder (*e.block);
+  auto address = mirnext::ir::detail::access (*(e.function)).create_register (Type::pointer ());
+  REQUIRE ((address).has_value ());
+  auto value = builder.expression (
+    mirnext::ir::detail::NodeAccess::make_Memory (Type (Type::Kind::Bool), &(address).value ()));
   REQUIRE (value.is_valid ());
   CHECK (value.type ().kind () == Type::Kind::Bool);
   REQUIRE (e.block->size () == 2);
   auto instruction = e.block->instructions ().begin ();
   CHECK (instruction->opcode () == Opcode::Mov);
-  REQUIRE (instruction->operands ()[1].get<Memory> ());
-  CHECK (instruction->operands ()[1].get<Memory> ()->type == Type::i64 ());
+  REQUIRE ((instruction->operands ()[1].get<Memory> ()).has_value ());
+  CHECK (instruction->operands ()[1].get<Memory> ().value ().type == Type::i64 ());
   CHECK ((++instruction)->opcode () == Opcode::Ne);
-  REQUIRE (builder.ret ());
-  REQUIRE (e.context.verify ());
+  REQUIRE ((builder.ret ()).has_value ());
+  REQUIRE ((e.context.verify ()).has_value ());
 }

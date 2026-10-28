@@ -59,9 +59,15 @@ class ExecutionArgument {
   static ExecutionArgument return_buffer (std::span<std::byte> bytes) {
     return ExecutionArgument (BlockValue{ir::Type::return_block (bytes.size ()), bytes, bytes});
   }
-  const ScalarValue *scalar () const { return std::get_if<ScalarValue> (&value_); }
-  const BlockValue *block () const { return std::get_if<BlockValue> (&value_); }
-  ir::Type type () const { return scalar () ? scalar ()->type () : block ()->type; }
+  OptionalRef<const ScalarValue> scalar () const {
+    return ::mirnext::detail::borrow_optional (std::get_if<ScalarValue> (&value_));
+  }
+  OptionalRef<const BlockValue> block () const {
+    return ::mirnext::detail::borrow_optional (std::get_if<BlockValue> (&value_));
+  }
+  ir::Type type () const {
+    return scalar ().get () ? scalar ().get ()->type () : block ().get ()->type;
+  }
 
  private:
   explicit ExecutionArgument (BlockValue v) : value_ (v) {}

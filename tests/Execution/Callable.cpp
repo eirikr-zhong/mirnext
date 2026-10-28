@@ -14,26 +14,26 @@ namespace {
 bool native () { return test::native_execution_available (); }
 auto parse (std::string_view text) {
   auto c = serialization::parse_text (text);
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
-  return std::move (*c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
+  return std::make_unique<Program> (std::move ((c).value ()));
 }
-ExecutionSession session (const Context &c, ExecutionOptions options) {
+ExecutionSession session (const Program &c, ExecutionOptions options) {
   auto s = ExecutionSession::create (c, std::move (options));
-  INFO ((s ? "" : s.error ().message));
-  REQUIRE (s);
-  return std::move (*s);
+  INFO (((s).has_value () ? "" : s.error ().message));
+  REQUIRE ((s).has_value ());
+  return std::move ((s).value ());
 }
 FunctionHandle find (const ExecutionSession &s, std::string_view module, std::string_view name) {
   auto f = s.find_function (module, name);
-  REQUIRE (f);
-  return *f;
+  REQUIRE ((f).has_value ());
+  return (f).value ();
 }
 auto call (const FunctionHandle &f, std::span<const ExecutionArgument> args = {}) {
   auto r = f.call (args);
-  INFO ((r ? "" : r.error ().message));
-  REQUIRE (r);
-  return std::move (*r);
+  INFO (((r).has_value () ? "" : r.error ().message));
+  REQUIRE ((r).has_value ());
+  return std::move ((r).value ());
 }
 }  // namespace
 TEST_CASE (
@@ -85,11 +85,11 @@ TEST_CASE (
             CHECK (bytes[0] == 42);
           } else if (kind == test::CallExample::MultipleResults) {
             REQUIRE (values.size () == 2);
-            CHECK (*values[0].as_i64 () == 20);
-            CHECK (*values[1].as_i64 () == 22);
+            CHECK ((values[0].as_i64 ()).value () == 20);
+            CHECK ((values[1].as_i64 ()).value () == 22);
           } else {
             REQUIRE (values.size () == 1);
-            CHECK (*values[0].as_i64 () == 42);
+            CHECK ((values[0].as_i64 ()).value () == 42);
           }
         }
       }
@@ -105,7 +105,7 @@ TEST_CASE (
     CAPTURE (warm);
     std::weak_ptr<Events> observer;
     std::optional<FunctionHandle> retained;
-    std::optional<LinkedData> data;
+    std::optional<mirnext::execution::DataHandle> data;
     {
       auto events = std::make_shared<Events> ();
       observer = events;
@@ -121,31 +121,31 @@ TEST_CASE (
                     }}});
       retained = find (s, "consumer", "entry");
       auto found = s.find_data ("consumer", "value");
-      REQUIRE (found);
-      data = std::move (*found);
+      REQUIRE ((found).has_value ());
+      data = std::move ((found).value ());
       if (warm) {
         auto scalar = s.call_i64 (*retained);
-        REQUIRE (scalar);
-        CHECK (*scalar == 42);
-        CHECK (*call (*retained)[0].as_i64 () == 64);
+        REQUIRE ((scalar).has_value ());
+        CHECK ((scalar).value () == 42);
+        CHECK ((call (*retained)[0].as_i64 ()).value () == 64);
         CHECK (s.host_entry_count () == 2);
       }
     }
     REQUIRE_FALSE (observer.expired ());
     auto copy = *retained;
     auto scalar = copy.call_i64 ();
-    REQUIRE (scalar);
-    CHECK (*scalar == (warm ? 86 : 42));
-    CHECK (*call (*retained)[0].as_i64 () == (warm ? 108 : 64));
+    REQUIRE ((scalar).has_value ());
+    CHECK ((scalar).value () == (warm ? 86 : 42));
+    CHECK ((call (*retained)[0].as_i64 ()).value () == (warm ? 108 : 64));
     scalar = retained->call_i64 ();
-    REQUIRE (scalar);
-    CHECK (*scalar == (warm ? 130 : 86));
+    REQUIRE ((scalar).has_value ());
+    CHECK ((scalar).value () == (warm ? 130 : 86));
     CHECK (observer.lock ()->scalar == 1);
     CHECK (observer.lock ()->generic == 1);
     {
       auto entry = retained->native_entry ();
-      REQUIRE (entry);
-      CHECK (entry->name () == "entry");
+      REQUIRE ((entry).has_value ());
+      CHECK (entry.value ().name () == "entry");
     }
     retained.reset ();
     CHECK (copy.valid ());
@@ -174,30 +174,30 @@ TEST_CASE (
     CHECK_FALSE (original.valid ());
     CHECK (moved.valid ());
     CHECK_FALSE (s.owns (original));
-    CHECK_FALSE (original.call ());
-    CHECK_FALSE (original.call_i64 ());
-    CHECK_FALSE (original.call_u64 ());
-    CHECK_FALSE (original.call_double ());
-    CHECK_FALSE (original.native_entry ());
-    CHECK_FALSE (original.compile ());
-    CHECK_FALSE (moved.call ());
-    CHECK_FALSE (moved.call_i64 ());
-    CHECK_FALSE (moved.call_double ());
+    CHECK_FALSE ((original.call ()).has_value ());
+    CHECK_FALSE ((original.call_i64 ()).has_value ());
+    CHECK_FALSE ((original.call_u64 ()).has_value ());
+    CHECK_FALSE ((original.call_double ()).has_value ());
+    CHECK_FALSE ((original.native_entry ()).has_value ());
+    CHECK_FALSE ((original.compile ()).has_value ());
+    CHECK_FALSE ((moved.call ()).has_value ());
+    CHECK_FALSE ((moved.call_i64 ()).has_value ());
+    CHECK_FALSE ((moved.call_double ()).has_value ());
     std::array args{ExecutionArgument (2.5)};
-    CHECK_FALSE (moved.call (args));
+    CHECK_FALSE ((moved.call (args)).has_value ());
     auto special = find (s, "m", "j");
-    CHECK_FALSE (special.call ());
-    CHECK_FALSE (special.call_i64 ());
-    CHECK_FALSE (special.native_entry ());
+    CHECK_FALSE ((special.call ()).has_value ());
+    CHECK_FALSE ((special.call_i64 ()).has_value ());
+    CHECK_FALSE ((special.native_entry ()).has_value ());
     CHECK (s.host_entry_count () == 0);
     std::array<std::int64_t, 1> value{42};
     auto result = moved.call_i64 (value);
-    REQUIRE (result);
-    CHECK (*result == 42);
-    if (mode == ExecutionMode::Interpreter) CHECK_FALSE (moved.native_entry ());
+    REQUIRE ((result).has_value ());
+    CHECK ((result).value () == 42);
+    if (mode == ExecutionMode::Interpreter) CHECK_FALSE ((moved.native_entry ()).has_value ());
     if (mode == ExecutionMode::Interpreter) {
       CHECK (moved.compilation_state () == FunctionCompilationState::Interpreted);
-      CHECK_FALSE (moved.compile ());
+      CHECK_FALSE ((moved.compile ()).has_value ());
     }
   }
 }
@@ -234,7 +234,7 @@ TEST_CASE (
     bool reject = false;
     unsigned attempts = 0;
     std::optional<FunctionHandle> retained;
-    std::optional<LinkedData> data;
+    std::optional<mirnext::execution::DataHandle> data;
     {
       auto c = test::variable_example (test::VariableExample::Initialized);
       auto s
@@ -252,14 +252,14 @@ TEST_CASE (
                                  }}});
       retained = find (s, "consumer", "entry");
       auto found = s.find_data ("consumer", "value");
-      REQUIRE (found);
-      data = std::move (*found);
+      REQUIRE ((found).has_value ());
+      data = std::move ((found).value ());
     }
     auto invoke = [&] () -> Result<std::int64_t> {
       if (!generic) return retained->call_i64 ();
       auto result = retained->call ();
-      if (!result) return result.error ();
-      return (*result)[0].as_i64 ();
+      if (!(result).has_value ()) return result.error ();
+      return ((result).value ())[0].as_i64 ();
     };
     auto value = [&] {
       std::int64_t v;
@@ -271,7 +271,7 @@ TEST_CASE (
     CHECK (provider->unmaps == 0);
     reject = true;
     auto failed = invoke ();
-    REQUIRE_FALSE (failed);
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK (failed.error ().code == ErrorCode::UnknownName);
     CHECK (failed.error ().message.find ("observer failure") != std::string::npos);
     CHECK (attempts == 1);
@@ -280,7 +280,7 @@ TEST_CASE (
     reject = false;
     provider->fail = true;
     failed = invoke ();
-    REQUIRE_FALSE (failed);
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK (failed.error ().message.find ("publication failure") != std::string::npos);
     CHECK (attempts == 2);
     CHECK (provider->maps == 2);
@@ -288,12 +288,12 @@ TEST_CASE (
     CHECK (value () == 20);
     provider->fail = false;
     auto recovered = invoke ();
-    REQUIRE (recovered);
-    CHECK (*recovered == 42);
+    REQUIRE ((recovered).has_value ());
+    CHECK ((recovered).value () == 42);
     CHECK (attempts == 3);
     recovered = invoke ();
-    REQUIRE (recovered);
-    CHECK (*recovered == 64);
+    REQUIRE ((recovered).has_value ());
+    CHECK ((recovered).value () == 64);
     CHECK (attempts == 3);
     CHECK (provider->maps == 3);
     retained.reset ();
@@ -324,11 +324,11 @@ TEST_CASE (
   }
   std::array<std::int64_t, 1> deep{10};
   auto failed = retained->call_i64 (deep);
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("depth limit") != std::string::npos);
   deep[0] = 1;
   auto recovered = retained->call_i64 (deep);
-  REQUIRE (recovered);
-  CHECK (*recovered == 42);
-  CHECK_FALSE (retained->native_entry ());
+  REQUIRE ((recovered).has_value ());
+  CHECK ((recovered).value () == 42);
+  CHECK_FALSE ((retained->native_entry ()).has_value ());
 }

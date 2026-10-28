@@ -1,4 +1,7 @@
 /* Licensed under the MIT License. Checked mixed scalar/block native calls. */
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #include "mirnext/Execution/detail/NativeCalls.hpp"
 #include "mirnext/Execution/detail/Recovery.hpp"
 #include "mirnext/Execution/detail/Values.hpp"
@@ -24,99 +27,109 @@ Result<std::uintptr_t> NativeCalls::entry (std::uintptr_t address, const ir::Sig
   std::vector<ir::Type> variadics;
   variadics.reserve (unnamed.size ());
   for (auto &arg : unnamed) variadics.push_back (arg.type ());
-  ir::Context context;
-  auto module = context.create_module ("$native-call");
-  if (!module) return module.error ();
-  auto callee = (*module)->import ("callee", signature);
-  if (!callee) return callee.error ();
-  auto wrapper
-    = (*module)->create_function ("entry", {{}, {ir::Type::pointer (), ir::Type::pointer ()}});
-  if (!wrapper) return wrapper.error ();
+  ir::Program context;
+  auto module = ir::detail::access (context).create_module ("$native-call");
+  if (!(module).has_value ()) return module.error ();
+  auto callee = ir::detail::access (((module)).value ()).import ("callee", signature);
+  if (!(callee).has_value ()) return callee.error ();
+  auto wrapper = ir::detail::access (((module)).value ())
+                   .create_function ("entry", {{}, {ir::Type::pointer (), ir::Type::pointer ()}});
+  if (!(wrapper).has_value ()) return wrapper.error ();
   std::vector<const ir::Register *> hardware;
   for (auto [type, name] : hardware_) {
-    auto r = (*wrapper)->create_register (type, {}, name);
-    if (!r) return r.error ();
-    hardware.push_back (*r);
+    auto r = ir::detail::access (((wrapper)).value ()).create_register (type, {}, name);
+    if (!(r).has_value ()) return r.error ();
+    hardware.push_back (&(r).value ());
   }
-  auto block = (*wrapper)->create_block ();
-  if (!block) return block.error ();
-  ir::IRBuilder b (**block);
-  auto input = (*wrapper)->arguments ()[0], output = (*wrapper)->arguments ()[1];
-  std::vector<ir::CallArgument> operands;
+  auto block = ir::detail::access (((wrapper)).value ()).create_block ();
+  if (!(block).has_value ()) return block.error ();
+  ir::InstructionBuilder b ((block).value ());
+  auto input = ir::detail::ReferenceAccess::pointers (wrapper.value ().arguments ())[0],
+       output = ir::detail::ReferenceAccess::pointers (wrapper.value ().arguments ())[1];
+  std::vector<ir::detail::CallArgumentState> operands;
   operands.reserve (args.size ());
   for (std::size_t n = 0; n < args.size (); ++n) {
     auto type = n < signature.parameters.size () ? signature.parameters[n] : args[n].type ();
     auto storage = type.is_block ()     ? ir::Type::pointer ()
                    : type.is_integer () ? ir::Type::i64 ()
                                         : type;
-    auto value = b.load (ir::Memory{storage, input, nullptr,
-                                    static_cast<std::int64_t> (n * ScalarValue::storage_size)});
-    if (!value) return value.error ();
+    auto value = b.load (ir::detail::NodeAccess::make_Memory (storage, input, nullptr,
+                                                              static_cast<std::int64_t> (
+                                                                n * ScalarValue::storage_size)));
+    if (!(value).has_value ()) return value.error ();
     if (!type.is_block ())
-      operands.emplace_back (ir::Operand (**value));
+      operands.emplace_back (ir::Operand ((value).value ()));
     else if (type.kind () == ir::Type::Kind::ReturnBlock)
-      operands.emplace_back (ir::BlockArgument::return_buffer (**value, type.block_size ()));
+      operands.emplace_back (
+        ir::detail::BlockArgumentState::return_buffer ((value).value (), type.block_size ()));
     else
-      operands.emplace_back (ir::BlockArgument (**value, type.block_size (), type.block_class ()));
+      operands.emplace_back (
+        ir::detail::BlockArgumentState ((value).value (), type.block_size (), type.block_class ()));
   }
   if (transfer)
     for (std::size_t n = 0; n < hardware.size (); ++n) {
       auto value
-        = b.load (ir::Memory{hardware_[n].first, input, nullptr,
-                             std::int64_t ((args.size () + n) * ScalarValue::storage_size)});
-      if (!value) return value.error ();
-      auto assigned = b.assign (*hardware[n], ir::Operand (**value));
-      if (!assigned) return assigned.error ();
+        = b.load (ir::detail::NodeAccess::make_Memory (hardware_[n].first, input, nullptr,
+                                                       std::int64_t ((args.size () + n)
+                                                                     * ScalarValue::storage_size)));
+      if (!(value).has_value ()) return value.error ();
+      auto assigned = b.assign (*hardware[n], ir::Operand ((value).value ()));
+      if (!(assigned).has_value ()) return assigned.error ();
     }
-  auto called = b.call (**callee, operands);
-  if (!called) return called.error ();
+  auto called = b.call ((callee).value (), operands);
+  if (!(called).has_value ()) return called.error ();
   for (std::size_t n = 0; n < signature.results.size (); ++n) {
     auto type = signature.results[n].is_integer () ? ir::Type::i64 () : signature.results[n];
-    auto saved = b.store (ir::Memory{type, output, nullptr,
-                                     static_cast<std::int64_t> (n * ScalarValue::storage_size)},
-                          ir::Operand (*called->results ()[n]));
-    if (!saved) return saved.error ();
+    auto saved = b.store (ir::detail::NodeAccess::make_Memory (type, output, nullptr,
+                                                               static_cast<std::int64_t> (
+                                                                 n * ScalarValue::storage_size)),
+                          ir::Operand (*ir::detail::ReferenceAccess::pointers (
+                            called.value ().results ())[n]));
+    if (!(saved).has_value ()) return saved.error ();
   }
   if (transfer)
     for (std::size_t n = 0; n < hardware.size (); ++n) {
-      auto stored = b.store (ir::Memory{hardware_[n].first, output, nullptr,
-                                        std::int64_t ((signature.results.size () + n)
-                                                      * ScalarValue::storage_size)},
-                             ir::Operand (*hardware[n]));
-      if (!stored) return stored.error ();
+      auto stored
+        = b.store (ir::detail::NodeAccess::make_Memory (hardware_[n].first, output, nullptr,
+                                                        std::int64_t (
+                                                          (signature.results.size () + n)
+                                                          * ScalarValue::storage_size)),
+                   ir::Operand (*hardware[n]));
+      if (!(stored).has_value ()) return stored.error ();
     }
   auto returned = b.ret ();
-  if (!returned) return returned.error ();
+  if (!(returned).has_value ()) return returned.error ();
   auto optimized = transforms::optimize (context, {.level = transforms::OptimizationLevel::O0});
-  if (!optimized) return optimized.error ();
+  if (!(optimized).has_value ()) return optimized.error ();
   auto target = target::TargetMachine::native ();
-  if (!target) return target.error ();
+  if (!(target).has_value ()) return target.error ();
   auto compiled
-    = codegen::compile_function (*optimized->find_function ("$native-call", "entry"), *target,
+    = codegen::compile_function (*optimized.value ().find_function ("$native-call", "entry").get (),
+                                 (target).value (),
                                  {.optimization_level = 0,
                                   .preserve_host_registers = true,
                                   .observer = options_.compilation_observer});
-  if (!compiled) return compiled.error ();
+  if (!(compiled).has_value ()) return compiled.error ();
   auto executable
     = CodeMemory (options_.memory_provider)
-        .publish (std::move (*compiled), [&] (auto &request) -> Result<std::uint64_t> {
-          auto id = request.builtin  ? request.builtin
-                    : request.symbol ? request.symbol->builtin
-                                     : std::nullopt;
+        .publish (std::move ((compiled).value ()), [&] (auto &request) -> Result<std::uint64_t> {
+          auto id = request.builtin                  ? request.builtin
+                    : request.symbol ().has_value () ? request.symbol ().value ().builtin
+                                                     : std::nullopt;
           if (id) {
             auto builtin = builtin_address (*id);
-            if (!builtin) return builtin.error ();
-            return std::uint64_t (*builtin);
+            if (!builtin.has_value ()) return builtin.error ();
+            return std::uint64_t (builtin.value ());
           }
-          if (request.symbol && request.symbol->module == "$native-call"
-              && request.symbol->name == "callee")
+          if (request.symbol ().has_value () && request.symbol ().value ().module == "$native-call"
+              && request.symbol ().value ().name == "callee")
             return std::uint64_t (address);
           return invalid ("unexpected native-call relocation");
         });
-  if (!executable) return executable.error ();
-  auto code = executable->address ();
+  if (!(executable).has_value ()) return executable.error ();
+  auto code = executable.value ().address ();
   entries_[address].push_back (
-    {signature, std::move (variadics), transfer, std::move (*executable)});
+    {signature, std::move (variadics), transfer, std::move ((executable).value ())});
   ++count_;
   return code;
 }
@@ -130,63 +143,71 @@ Result<std::uintptr_t> NativeCalls::scalar_entry (std::uintptr_t callee,
         return entry.function.address ();
   // One array pointer crosses the host boundary. Native ABI lowering handles
   // all real callee arguments, including exhausted register banks and stacks.
-  ir::Context context;
-  auto module = context.create_module ("$host");
-  if (!module) return module.error ();
-  auto imported = (*module)->import ("callee", signature);
-  if (!imported) return imported.error ();
+  ir::Program context;
+  auto module = ir::detail::access (context).create_module ("$host");
+  if (!(module).has_value ()) return module.error ();
+  auto imported = ir::detail::access (((module)).value ()).import ("callee", signature);
+  if (!(imported).has_value ()) return imported.error ();
   auto result_type
     = signature.results[0].is_float () ? ir::Type (ir::Type::Kind::F64) : ir::Type::i64 ();
-  auto wrapper = (*module)->create_function ("entry", {{result_type}, {ir::Type::pointer ()}});
-  if (!wrapper) return wrapper.error ();
+  auto wrapper = ir::detail::access (((module)).value ())
+                   .create_function ("entry", {{result_type}, {ir::Type::pointer ()}});
+  if (!(wrapper).has_value ()) return wrapper.error ();
   // Reserve observable bindings even when this wrapper never reads them.
   // Otherwise loading arguments could clobber a callee's initial hard value.
   for (auto [type, name] : hardware_) {
-    auto bound = (*wrapper)->create_register (type, {}, name);
-    if (!bound) return bound.error ();
+    auto bound = ir::detail::access (((wrapper)).value ()).create_register (type, {}, name);
+    if (!(bound).has_value ()) return bound.error ();
   }
-  auto block = (*wrapper)->create_block ();
-  if (!block) return block.error ();
-  ir::IRBuilder builder (**block);
-  std::vector<ir::CallArgument> arguments;
+  auto block = ir::detail::access (((wrapper)).value ()).create_block ();
+  if (!(block).has_value ()) return block.error ();
+  ir::InstructionBuilder builder ((block).value ());
+  std::vector<ir::detail::CallArgumentState> arguments;
   arguments.reserve (signature.parameters.size ());
   for (std::size_t n = 0; n < signature.parameters.size (); ++n) {
     // Integer slots hold full bit patterns; the callee signature controls
     // narrow extension at the ordinary MIR call boundary.
     auto type
       = signature.parameters[n].is_float () ? ir::Type (ir::Type::Kind::F64) : ir::Type::i64 ();
-    auto value = builder.load (ir::Memory{type, (*wrapper)->arguments ()[0], nullptr,
-                                          static_cast<std::int64_t> (n * sizeof (std::uint64_t))});
-    if (!value) return value.error ();
-    arguments.emplace_back (ir::Operand (**value));
+    auto value = builder.load (
+      ir::detail::NodeAccess::make_Memory (type,
+                                           ir::detail::ReferenceAccess::pointers (
+                                             wrapper.value ().arguments ())[0],
+                                           nullptr,
+                                           static_cast<std::int64_t> (n * sizeof (std::uint64_t))));
+    if (!(value).has_value ()) return value.error ();
+    arguments.emplace_back (ir::Operand ((value).value ()));
   }
-  auto called = builder.call (**imported, arguments);
-  if (!called) return called.error ();
-  auto value = called->value ();
-  if (!value) return value.error ();
-  auto returned = builder.ret (ir::Operand (**value));
-  if (!returned) return returned.error ();
+  auto called = builder.call ((imported).value (), arguments);
+  if (!(called).has_value ()) return called.error ();
+  auto value = called.value ().value ();
+  if (!(value).has_value ()) return value.error ();
+  auto returned = builder.ret (ir::Operand ((value).value ()));
+  if (!(returned).has_value ()) return returned.error ();
   auto optimized = transforms::optimize (context, {.level = transforms::OptimizationLevel::O0});
-  if (!optimized) return optimized.error ();
+  if (!(optimized).has_value ()) return optimized.error ();
   auto target = target::TargetMachine::native ();
-  if (!target) return target.error ();
-  auto compiled = codegen::compile_function (*optimized->find_function ("$host", "entry"), *target,
-                                             {.optimization_level = 0,
-                                              .preserve_host_registers = true,
-                                              .observer = options_.compilation_observer});
-  if (!compiled) return compiled.error ();
+  if (!(target).has_value ()) return target.error ();
+  auto compiled
+    = codegen::compile_function (*optimized.value ().find_function ("$host", "entry").get (),
+                                 (target).value (),
+                                 {.optimization_level = 0,
+                                  .preserve_host_registers = true,
+                                  .observer = options_.compilation_observer});
+  if (!(compiled).has_value ()) return compiled.error ();
   auto executable
     = CodeMemory (options_.memory_provider)
-        .publish (std::move (*compiled),
+        .publish (std::move ((compiled).value ()),
                   [&] (const codegen::CodeSymbolRequest &request) -> Result<std::uint64_t> {
-                    if (request.symbol && request.symbol->module == "$host"
-                        && request.symbol->name == "callee")
+                    if (codegen::detail::NodeAccess::symbol (request)
+                        && codegen::detail::NodeAccess::symbol (request)->module == "$host"
+                        && codegen::detail::NodeAccess::symbol (request)->name == "callee")
                       return static_cast<std::uint64_t> (callee);
                     return invalid ("unexpected host-entry relocation");
                   });
-  if (!executable) return executable.error ();
-  auto address = executable->address ();
-  scalars_[callee].push_back ({&signature, std::move (*executable)});
+  if (!(executable).has_value ()) return executable.error ();
+  auto address = executable.value ().address ();
+  scalars_[callee].push_back ({&signature, std::move ((executable).value ())});
   ++count_;
   return address;
 }
@@ -197,12 +218,12 @@ Result<std::vector<ScalarValue>> NativeCalls::call (std::uintptr_t address,
                                                     std::span<HardwareSlot> hardware) {
   if (!address) return invalid ("null native call target");
   auto valid = signature.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   if (args.size () > std::size_t (INT64_MAX) / ScalarValue::storage_size
       || signature.results.size () > std::size_t (INT64_MAX) / ScalarValue::storage_size)
     return invalid ("native call frame size overflow");
   auto count = check_argument_count (signature, args.size ());
-  if (!count) return count.error ();
+  if (!(count).has_value ()) return count.error ();
   if (!hardware.empty () && hardware.size () != hardware_.size ())
     return invalid ("hardware transfer bank size mismatch");
   const bool transfer = !hardware.empty ();
@@ -231,27 +252,27 @@ Result<std::vector<ScalarValue>> NativeCalls::call (std::uintptr_t address,
   for (std::size_t n = 0; n < args.size (); ++n) {
     auto type = n < signature.parameters.size () ? signature.parameters[n] : args[n].type ();
     auto v = normalize_argument (type, args[n], n >= signature.parameters.size ());
-    if (!v) return v.error ();
-    input[n]
-      = v->scalar ()
-          ? v->scalar ()->storage ()
-          : ScalarValue::pointer (reinterpret_cast<std::uintptr_t> (v->block ()->bytes.data ()))
-              .storage ();
+    if (!(v).has_value ()) return v.error ();
+    input[n] = v.value ().scalar ().get ()
+                 ? v.value ().scalar ().get ()->storage ()
+                 : ScalarValue::pointer (
+                     reinterpret_cast<std::uintptr_t> (v.value ().block ().get ()->bytes.data ()))
+                     .storage ();
   }
   for (std::size_t n = 0; n < hardware.size (); ++n) input[args.size () + n] = hardware[n].bytes;
   auto function = entry (address, signature, args, transfer);
-  if (!function) return function.error ();
+  if (!(function).has_value ()) return function.error ();
   if (recovery) {
-    auto status
-      = recovery->invoke<void> (*function, reinterpret_cast<std::uintptr_t> (input.data ()),
-                                reinterpret_cast<std::uintptr_t> (output.data ()));
-    if (!status) return status.error ();
+    auto status = recovery->invoke<void> ((function).value (),
+                                          reinterpret_cast<std::uintptr_t> (input.data ()),
+                                          reinterpret_cast<std::uintptr_t> (output.data ()));
+    if (!(status).has_value ()) return status.error ();
   } else {
     ExecutionInvocation invocation;
     reinterpret_cast<void (*) (const ScalarValue::Storage *, ScalarValue::Storage *)> (
-      *function) (input.data (), output.data ());
+      (function).value ()) (input.data (), output.data ());
     auto status = invocation.status ();
-    if (!status) return status.error ();
+    if (!(status).has_value ()) return status.error ();
   }
   for (std::size_t n = 0; n < hardware.size (); ++n)
     hardware[n].bytes = output[signature.results.size () + n];
@@ -259,10 +280,10 @@ Result<std::vector<ScalarValue>> NativeCalls::call (std::uintptr_t address,
   result.reserve (signature.results.size ());
   for (std::size_t n = 0; n < signature.results.size (); ++n) {
     auto value = ScalarValue::from_storage (signature.results[n], output[n]);
-    if (!value) return value.error ();
-    auto normalized = normalize_scalar (signature.results[n], *value);
-    if (!normalized) return normalized.error ();
-    result.push_back (*normalized);
+    if (!(value).has_value ()) return value.error ();
+    auto normalized = normalize_scalar (signature.results[n], (value).value ());
+    if (!(normalized).has_value ()) return normalized.error ();
+    result.push_back ((normalized).value ());
   }
   return result;
 }

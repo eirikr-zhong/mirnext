@@ -1,6 +1,10 @@
 /* Licensed under the MIT License. Native x86 constraints, without an x86 runtime. */
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
+#include "Navigation.hpp"
 #include "mirnext/CodeGen/Detail/X86Patterns.hpp"
 #include "mirnext/CodeGen/Lowering.hpp"
 #include <bit>
@@ -16,25 +20,33 @@ using namespace mirnext::codegen;
 namespace {
 std::unique_ptr<MachineFunction> function () {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  return std::make_unique<MachineFunction> ("native", "x86-pattern", Signature{{}, {}}, *target);
+  REQUIRE ((target).has_value ());
+  return std::make_unique<MachineFunction> ("native", "x86-pattern", Signature{{}, {}},
+                                            (target).value ());
 }
 MachineOperand reg (MachineFunction &f, Type t = Type::i64 ()) {
-  auto result = f.create_register (t);
-  REQUIRE (result);
-  return MachineOperand (**result);
+  auto result = mirnext::codegen::detail::access (f).create_register (t);
+  REQUIRE ((result).has_value ());
+  return mirnext::codegen::detail::NodeAccess::make_MachineOperand ((result).value ());
 }
 MachineOperand memory (MachineFunction &f, Type type = Type::i64 (), std::int64_t offset = 0) {
-  auto base = f.create_register (Type::i64 ());
-  REQUIRE (base);
-  return MachineOperand (MachineMemory{type, MachineRegister (*base), {}, offset, 1, {}, {}});
+  auto base = mirnext::codegen::detail::access (f).create_register (Type::i64 ());
+  REQUIRE ((base).has_value ());
+  return mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+    mirnext::codegen::detail::NodeAccess::
+      make_MachineMemory (type,
+                          mirnext::codegen::detail::NodeAccess::make_MachineRegister (
+                            &(base).value ()),
+                          {}, offset, 1, {}, {}));
 }
 std::optional<X86InstructionPattern> select (MachineOpcode code,
                                              std::initializer_list<MachineOperand> ops,
                                              X86PatternOptions options = {}) {
   return x86_instruction_pattern (code, std::span (ops.begin (), ops.size ()), options);
 }
-MachineOperand integer (std::int64_t v) { return MachineOperand (v); }
+MachineOperand integer (std::int64_t v) {
+  return mirnext::codegen::detail::NodeAccess::make_MachineOperand (v);
+}
 std::int64_t number (std::string_view text) {
   std::int64_t value = 0;
   auto result = std::from_chars (text.data (), text.data () + text.size (), value);
@@ -43,7 +55,8 @@ std::int64_t number (std::string_view text) {
   return value;
 }
 MachineOperand physical (MachineFunction &f, unsigned n) {
-  return MachineOperand (f.target ().registers ()[n].reg);
+  return mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+    f.target ().registers ()[n].reg);
 }
 }  // namespace
 TEST_CASE ("x86 constraints enforce ties widths signedness and ordered immediate forms") {
@@ -72,7 +85,7 @@ TEST_CASE ("x86 constraints enforce ties widths signedness and ordered immediate
     REQUIRE (p);
     CHECK (p->constraints == "r i3");
   }
-  auto unsigned_minus_one = MachineOperand (UINT64_MAX);
+  auto unsigned_minus_one = mirnext::codegen::detail::NodeAccess::make_MachineOperand (UINT64_MAX);
   CHECK (x86_operands_equal (integer (-1), unsigned_minus_one));
   auto p = select (Opcode::Sub, {a, a, unsigned_minus_one});
   REQUIRE (p);
@@ -101,28 +114,37 @@ TEST_CASE ("x86 memory rules preserve signed types displacement and SIB boundari
   CHECK_FALSE (select (Opcode::Subs, {a, a, memory (*f)}));
   for (auto offset : {std::int64_t (INT32_MIN) - 1, std::int64_t (INT32_MAX) + 1})
     CHECK_FALSE (select (Opcode::Mov, {a, memory (*f, Type::i64 (), offset)}));
-  auto m = *memory (*f).get<MachineMemory> ();
+  auto m = *mirnext::codegen::detail::operand_access (memory (*f)).get<MachineMemory> ();
   m.index = m.base;
   for (unsigned scale : {1u, 2u, 4u, 8u}) {
     m.scale = scale;
-    CHECK (select (Opcode::Mov, {a, MachineOperand (m)}));
+    CHECK (
+      select (Opcode::Mov, {a, mirnext::codegen::detail::NodeAccess::make_MachineOperand (m)}));
   }
   for (unsigned scale : {0u, 3u, 16u, UINT_MAX}) {
     m.scale = scale;
-    CHECK_FALSE (select (Opcode::Mov, {a, MachineOperand (m)}));
+    CHECK_FALSE (
+      select (Opcode::Mov, {a, mirnext::codegen::detail::NodeAccess::make_MachineOperand (m)}));
   }
   m.index.reset ();
   m.scale = 37;
-  CHECK (select (Opcode::Mov, {a, MachineOperand (m)}));
+  CHECK (select (Opcode::Mov, {a, mirnext::codegen::detail::NodeAccess::make_MachineOperand (m)}));
   auto other = m;
   other.alias = "different";
   other.nonalias = "metadata";
   other.scale = 12;
-  CHECK (x86_operands_equal (MachineOperand (m), MachineOperand (other)));
-  CHECK (select (Opcode::Sub, {MachineOperand (m), MachineOperand (other), b}));
+  CHECK (x86_operands_equal (mirnext::codegen::detail::NodeAccess::make_MachineOperand (m),
+                             mirnext::codegen::detail::NodeAccess::make_MachineOperand (other)));
+  CHECK (
+    select (Opcode::Sub, {mirnext::codegen::detail::NodeAccess::make_MachineOperand (m),
+                          mirnext::codegen::detail::NodeAccess::make_MachineOperand (other), b}));
   other.index = other.base;
-  CHECK_FALSE (x86_operands_equal (MachineOperand (m), MachineOperand (other)));
-  CHECK_FALSE (select (Opcode::Mov, {MachineOperand (m), MachineOperand (m)}));
+  CHECK_FALSE (
+    x86_operands_equal (mirnext::codegen::detail::NodeAccess::make_MachineOperand (m),
+                        mirnext::codegen::detail::NodeAccess::make_MachineOperand (other)));
+  CHECK_FALSE (
+    select (Opcode::Mov, {mirnext::codegen::detail::NodeAccess::make_MachineOperand (m),
+                          mirnext::codegen::detail::NodeAccess::make_MachineOperand (m)}));
   CHECK_FALSE (select (Opcode::FMov, {a, memory (*f, Type (Type::Kind::F64))}));
   CHECK (select (Opcode::DMov, {a, memory (*f, Type (Type::Kind::F64))}));
   CHECK_FALSE (select (Opcode::Mov, {a, memory (*f, Type (static_cast<Type::Kind> (65535)))}));
@@ -130,15 +152,17 @@ TEST_CASE ("x86 memory rules preserve signed types displacement and SIB boundari
 TEST_CASE ("x86 relocation selection reserves full addresses and retains call tails") {
   auto f = function ();
   auto a = reg (*f);
-  auto s = f->intern_symbol (
+  auto s = mirnext::codegen::detail::access (*(f)).intern_symbol (
     {"native", "callee", MachineSymbol::Kind::Function, Signature{{}, {}}, false, {}});
-  REQUIRE (s);
-  auto symbol = MachineOperand (MachineSymbolReference{*s, -16});
+  REQUIRE ((s).has_value ());
+  auto symbol = mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+    mirnext::codegen::detail::NodeAccess::make_MachineSymbolReference (&(s).value (), -16));
   auto p = select (Opcode::Mov, {a, symbol});
   REQUIRE (p);
   CHECK (p->constraints == "r i3");
   CHECK_FALSE (select (Opcode::Sub, {a, a, symbol}));
-  p = select (Opcode::Mov, {a, MachineOperand (BuiltinReference{Builtin::CopyBlock})});
+  p = select (Opcode::Mov, {a, mirnext::codegen::detail::NodeAccess::make_MachineOperand (
+                                 BuiltinReference{Builtin::CopyBlock})});
   REQUIRE (p);
   CHECK (p->constraints == "r i3");
   CHECK (select (Opcode::Call, {symbol, symbol}));
@@ -153,10 +177,10 @@ TEST_CASE ("x86 relocation selection reserves full addresses and retains call ta
 }
 TEST_CASE ("x86 short branches enforce layout bounds without signed overflow") {
   auto f = function ();
-  auto &block = f->create_block ();
-  auto label = f->create_label (block);
-  REQUIRE (label);
-  MachineOperand l (**label);
+  auto &block = mirnext::codegen::detail::access (*(f)).create_block ();
+  auto label = mirnext::codegen::detail::access (*(f)).create_label (block);
+  REQUIRE ((label).has_value ());
+  MachineOperand l ((label).value ());
   auto a = reg (*f);
   auto p = select (Opcode::Bt, {l, a});
   REQUIRE (p);
@@ -233,85 +257,85 @@ TEST_CASE ("x86 physical restrictions reject foreign physical identities") {
 TEST_CASE ("x86 memory legalization reloads ordered inputs and preserves x87 storage") {
   auto f = function ();
   if (f->target ().architecture () != target::Architecture::X86_64) return;
-  auto &b = f->create_block ();
+  auto &b = mirnext::codegen::detail::access (*(f)).create_block ();
   MachineRewriter rw (*f);
   auto left = memory (*f), right = memory (*f), result = reg (*f);
   auto sub = rw.append (b, Opcode::Sub, {left, left, right});
-  REQUIRE (sub);
+  REQUIRE ((sub).has_value ());
   auto eq = rw.append (b, Opcode::Eq, {result, left, right});
-  REQUIRE (eq);
+  REQUIRE ((eq).has_value ());
   auto ftype = Type (Type::Kind::F32);
   auto out = memory (*f, ftype), x = memory (*f, ftype), y = memory (*f, ftype);
   auto add = rw.append (b, Opcode::FAdd, {out, x, y});
-  REQUIRE (add);
+  REQUIRE ((add).has_value ());
   auto state = f->state ();
   state.machinized = true;
-  REQUIRE (rw.set_state (state));
-  REQUIRE (legalize_operands (*f));
-  REQUIRE (f->verify ());
-  auto before = rw.previous (**sub);
-  REQUIRE (before);
-  REQUIRE (*before);
-  CHECK ((*before)->opcode () == MachineOpcode (Opcode::Mov));
-  CHECK ((*before)->operands ()[1] == right);
-  CHECK ((*sub)->operands ()[0] == left);
-  CHECK ((*sub)->operands ()[1] == left);
-  CHECK ((*sub)->operands ()[2] == (*before)->operands ()[0]);
-  before = rw.previous (**eq);
-  REQUIRE (before);
-  REQUIRE (*before);
-  CHECK ((*before)->operands ()[1] == left);
-  CHECK ((*eq)->operands ()[2] == right);
-  CHECK ((*eq)->operands ()[1] == (*before)->operands ()[0]);
-  before = rw.previous (**add);
-  REQUIRE (before);
-  REQUIRE (*before);
-  CHECK ((*before)->opcode () == MachineOpcode (Opcode::FMov));
-  CHECK ((*before)->operands ()[1] == x);
-  auto temp = (*before)->operands ()[0];
-  CHECK ((*add)->operands ()[0] == temp);
-  CHECK ((*add)->operands ()[1] == temp);
-  CHECK ((*add)->operands ()[2] == y);
-  auto after = rw.next (**add);
-  REQUIRE (after);
-  REQUIRE (*after);
-  CHECK ((*after)->opcode () == MachineOpcode (Opcode::FMov));
-  CHECK ((*after)->operands ()[0] == out);
-  CHECK ((*after)->operands ()[1] == temp);
+  REQUIRE ((rw.set_state (state)).has_value ());
+  REQUIRE ((legalize_operands (*f)).has_value ());
+  REQUIRE ((f->verify ()).has_value ());
+  auto before = mirnext::test::neighbor (rw.previous ((sub).value ()));
+  REQUIRE ((before).has_value ());
+  REQUIRE (&(before).value ());
+  CHECK (before.value ().opcode () == MachineOpcode (Opcode::Mov));
+  CHECK (before.value ().operands ()[1] == right);
+  CHECK (sub.value ().operands ()[0] == left);
+  CHECK (sub.value ().operands ()[1] == left);
+  CHECK (sub.value ().operands ()[2] == before.value ().operands ()[0]);
+  before = mirnext::test::neighbor (rw.previous ((eq).value ()));
+  REQUIRE ((before).has_value ());
+  REQUIRE (&(before).value ());
+  CHECK (before.value ().operands ()[1] == left);
+  CHECK (eq.value ().operands ()[2] == right);
+  CHECK (eq.value ().operands ()[1] == before.value ().operands ()[0]);
+  before = mirnext::test::neighbor (rw.previous ((add).value ()));
+  REQUIRE ((before).has_value ());
+  REQUIRE (&(before).value ());
+  CHECK (before.value ().opcode () == MachineOpcode (Opcode::FMov));
+  CHECK (before.value ().operands ()[1] == x);
+  auto temp = before.value ().operands ()[0];
+  CHECK (add.value ().operands ()[0] == temp);
+  CHECK (add.value ().operands ()[1] == temp);
+  CHECK (add.value ().operands ()[2] == y);
+  auto after = mirnext::test::neighbor (rw.next ((add).value ()));
+  REQUIRE ((after).has_value ());
+  REQUIRE (&(after).value ());
+  CHECK (after.value ().opcode () == MachineOpcode (Opcode::FMov));
+  CHECK (after.value ().operands ()[0] == out);
+  CHECK (after.value ().operands ()[1] == temp);
   for (auto &i : b.instructions ()) {
     auto matched = has_instruction_pattern (i);
-    REQUIRE (matched);
-    CHECK (*matched);
+    REQUIRE ((matched).has_value ());
+    CHECK ((matched).value ());
   }
   if (sizeof (long double) > sizeof (double)) {
     auto ld = function ();
-    auto &lb = ld->create_block ();
+    auto &lb = mirnext::codegen::detail::access (*(ld)).create_block ();
     MachineRewriter lr (*ld);
     auto a = reg (*ld, Type (Type::Kind::LongDouble)), v = reg (*ld, Type (Type::Kind::LongDouble));
     auto m = memory (*ld, Type (Type::Kind::LongDouble));
     auto i = lr.append (lb, Opcode::LDAdd, {a, v, m});
-    REQUIRE (i);
+    REQUIRE ((i).has_value ());
     auto ls = ld->state ();
     ls.machinized = true;
-    REQUIRE (lr.set_state (ls));
-    REQUIRE (legalize_operands (*ld));
-    REQUIRE (ld->verify ());
-    CHECK ((*i)->operands ()[2] == m);
+    REQUIRE ((lr.set_state (ls)).has_value ());
+    REQUIRE ((legalize_operands (*ld)).has_value ());
+    REQUIRE ((ld->verify ()).has_value ());
+    CHECK (i.value ().operands ()[2] == m);
     CHECK (std::ranges::distance (lb.instructions ()) == 3);
-    CHECK (x86_instruction_ok ((*i)->opcode (), (*i)->operands ()));
+    CHECK (x86_instruction_ok (i.value ().opcode (), i.value ().operands ()));
   }
 }
 TEST_CASE ("x86 declaration rows have typed examples on every host without cross execution") {
   std::size_t exercised = 0, physical_rows = 0;
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   for (auto &p : x86_instruction_patterns ()) {
     CAPTURE (p.index);
     CAPTURE (p.constraints);
     auto f = function ();
-    auto &block = f->create_block ();
-    auto label = f->create_label (block);
-    REQUIRE (label);
+    auto &block = mirnext::codegen::detail::access (*(f)).create_block ();
+    auto label = mirnext::codegen::detail::access (*(f)).create_label (block);
+    REQUIRE ((label).has_value ());
     std::istringstream tokens{std::string (p.constraints)};
     std::string token;
     std::vector<MachineOperand> operands;
@@ -321,13 +345,13 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
       if (token == "X" || token == "r")
         operands.push_back (reg (*f));
       else if (token == "l" || token == "L")
-        operands.emplace_back (**label);
+        operands.emplace_back ((label).value ());
       else if (token == "z")
         operands.push_back (integer (0));
       else if (token == "s")
         operands.push_back (integer (4));
       else if (token.front () == 'h' || token == "t") {
-        if (target->architecture () != target::Architecture::X86_64) {
+        if (target.value ().architecture () != target::Architecture::X86_64) {
           unavailable = true;
           break;
         }
@@ -386,7 +410,7 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
   CAPTURE (physical_rows);
   CHECK (exercised > 600);
   CHECK (exercised + physical_rows == x86_instruction_patterns ().size ());
-  if (target->architecture () == target::Architecture::X86_64)
+  if (target.value ().architecture () == target::Architecture::X86_64)
     CHECK (physical_rows == 0);
   else
     CHECK (physical_rows > 0);
@@ -394,30 +418,30 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
 TEST_CASE ("x86 tied operand legalization preserves input and output locations") {
   auto f = function ();
   if (f->target ().architecture () != target::Architecture::X86_64) return;
-  auto &b = f->create_block ();
+  auto &b = mirnext::codegen::detail::access (*(f)).create_block ();
   MachineRewriter rw (*f);
   auto a = reg (*f), c = reg (*f), d = reg (*f);
   auto sub = rw.append (b, Opcode::Sub, {a, c, d});
-  REQUIRE (sub);
+  REQUIRE ((sub).has_value ());
   auto state = f->state ();
   state.machinized = true;
-  REQUIRE (rw.set_state (state));
-  REQUIRE (legalize_operands (*f));
-  REQUIRE (f->verify ());
+  REQUIRE ((rw.set_state (state)).has_value ());
+  REQUIRE ((legalize_operands (*f)).has_value ());
+  REQUIRE ((f->verify ()).has_value ());
   CHECK (std::ranges::distance (b.instructions ()) == 3);
   auto at = b.instructions ().begin ();
   CHECK (at->opcode () == MachineOpcode (Opcode::Mov));
   CHECK (at->operands ()[1] == c);
   auto temporary = at->operands ()[0];
   ++at;
-  CHECK (&*at == *sub);
+  CHECK (&*at == &(sub).value ());
   CHECK (at->operands ()[0] == temporary);
   CHECK (at->operands ()[1] == temporary);
-  REQUIRE (has_instruction_pattern (*at));
-  CHECK (*has_instruction_pattern (*at));
+  REQUIRE ((has_instruction_pattern (*at)).has_value ());
+  CHECK ((has_instruction_pattern (*at)).value ());
   ++at;
   CHECK (at->opcode () == MachineOpcode (Opcode::Mov));
   CHECK (at->operands ()[0] == a);
   CHECK (at->operands ()[1] == temporary);
-  CHECK_FALSE (legalize_operands (*f));
+  CHECK_FALSE ((legalize_operands (*f)).has_value ());
 }

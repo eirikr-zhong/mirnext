@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Expressions eagerly emit canonical register IR. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #include "mirnext/IR/IR.hpp"
 #include <array>
 #include <bit>
@@ -127,7 +129,8 @@ Opcode move_opcode (Type type) {
 }
 }  // namespace
 
-Expression::Expression (IRBuilder &builder, Type type, std::optional<Operand> value)
+detail::ExpressionState::ExpressionState (InstructionBuilder &builder, Type type,
+                                          std::optional<Operand> value)
   : builder_ (&builder), type_ (type) {
   if (value) {
     std::visit (
@@ -136,16 +139,16 @@ Expression::Expression (IRBuilder &builder, Type type, std::optional<Operand> va
         if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, const Register *>)
           value_.emplace (scalar);
       },
-      value->storage ());
+      detail::operand_access (*(value)).storage ());
     if (!value_) builder.fail (invalid ("expression requires a scalar immediate or register"));
   }
 }
-bool Expression::is_valid () const {
-  return value_.has_value () && !builder_->function_->module ().error ();
+bool detail::ExpressionState::is_valid () const {
+  return value_.has_value () && !(builder_->function_->module ().error ()).has_value ();
 }
-const Function &Expression::function () const { return *builder_->function_; }
-Result<Operand> Expression::value () const {
-  if (auto &error = function ().module ().error ()) return *error;
+const Function &detail::ExpressionState::function () const { return *builder_->function_; }
+Result<Operand> detail::ExpressionState::value () const {
+  if (auto error = function ().module ().error (); error.has_value ()) return (error).value ();
   if (!value_) return invalid ("invalid expression");
   return std::visit (
     [] (const auto &scalar) -> Operand {
@@ -156,90 +159,97 @@ Result<Operand> Expression::value () const {
     },
     *value_);
 }
-Expression IRBuilder::expression (const Register &reg) {
-  if (function_->module ().error ()) return {*this, reg.type (), {}};
+detail::ExpressionState InstructionBuilder::expression (const Register &reg) {
+  if ((function_->module ().error ()).has_value ()) return {*this, reg.type (), {}};
   if (&reg.function () != function_ || !reg.type ().valid () || !reg.type ().is_scalar ()) {
     fail (invalid ("expression requires a scalar register from this function"));
     return {*this, reg.type (), {}};
   }
   return {*this, reg.type (), Operand (reg)};
 }
-Expression IRBuilder::expression (Memory memory) {
+detail::ExpressionState InstructionBuilder::expression (Memory memory) {
   auto type = memory.type;
   if (type.kind () == Type::Kind::Bool) {
     memory.type = Type::i64 ();
     auto reg = load (std::move (memory));
-    return reg ? expression (**reg).convert (type) : Expression (*this, type, {});
+    return (reg).has_value () ? expression ((reg).value ()).convert (type)
+                              : detail::ExpressionState (*this, type, {});
   }
   auto reg = load (std::move (memory));
-  return reg ? expression (**reg) : Expression (*this, type, {});
+  return (reg).has_value () ? expression ((reg).value ())
+                            : detail::ExpressionState (*this, type, {});
 }
-Expression IRBuilder::expression (const GlobalVariable &variable) {
+detail::ExpressionState InstructionBuilder::expression (const GlobalVariable &variable) {
   auto reg = load (variable);
-  return reg ? expression (**reg) : Expression (*this, variable.type (), {});
+  return (reg).has_value () ? expression ((reg).value ())
+                            : detail::ExpressionState (*this, variable.type (), {});
 }
-Expression IRBuilder::literal (Operand value) {
-  auto type = value.get<std::uint64_t> () ? Type (Type::Kind::U64)
-              : value.get<float> ()       ? Type (Type::Kind::F32)
-              : value.get<double> ()      ? Type (Type::Kind::F64)
-              : value.get<long double> () ? Type (Type::Kind::LongDouble)
-                                          : Type::i64 ();
+detail::ExpressionState InstructionBuilder::literal (Operand value) {
+  auto type = detail::operand_access (value).get<std::uint64_t> () ? Type (Type::Kind::U64)
+              : detail::operand_access (value).get<float> ()       ? Type (Type::Kind::F32)
+              : detail::operand_access (value).get<double> ()      ? Type (Type::Kind::F64)
+              : detail::operand_access (value).get<long double> () ? Type (Type::Kind::LongDouble)
+                                                                   : Type::i64 ();
   return literal (type, std::move (value));
 }
-Expression IRBuilder::literal (Type type, Operand value) {
-  if (function_->module ().error ()) return {*this, type, {}};
+detail::ExpressionState InstructionBuilder::literal (Type type, Operand value) {
+  if ((function_->module ().error ()).has_value ()) return {*this, type, {}};
   if (!type.valid () || !type.is_scalar ()
-      || (!value.get<std::int64_t> () && !value.get<std::uint64_t> () && !value.get<float> ()
-          && !value.get<double> () && !value.get<long double> ())) {
+      || (!detail::operand_access (value).get<std::int64_t> ()
+          && !detail::operand_access (value).get<std::uint64_t> ()
+          && !detail::operand_access (value).get<float> ()
+          && !detail::operand_access (value).get<double> ()
+          && !detail::operand_access (value).get<long double> ())) {
     fail (invalid ("literal requires a scalar type and an immediate number"));
     return {*this, type, {}};
   }
   if (type.kind () == Type::Kind::Bool) {
-    if (auto number = value.get<std::int64_t> ())
+    if (auto number = detail::operand_access (value).get<std::int64_t> ())
       value = Operand (*number != 0);
-    else if (auto number = value.get<std::uint64_t> ())
+    else if (auto number = detail::operand_access (value).get<std::uint64_t> ())
       value = Operand (*number != 0);
   }
-  if (auto bits = value.get<std::uint64_t> ())
+  if (auto bits = detail::operand_access (value).get<std::uint64_t> ())
     value = Operand (std::bit_cast<std::int64_t> (*bits));
   Register candidate (*function_, type, {}, {}, false);
   const Operand operands[]{Operand (candidate), value};
   auto checked = validate_instruction (*function_, move_opcode (type), operands);
-  if (!checked) {
+  if (!(checked).has_value ()) {
     fail (checked.error ());
     return {*this, type, {}};
   }
   return {*this, type, std::move (value)};
 }
-Expression Expression::literal_like (Operand value) const {
+detail::ExpressionState detail::ExpressionState::literal_like (Operand value) const {
   if (type_.is_float ()) {
     auto floating = [&] (auto number) -> Operand {
       if (type_.kind () == Type::Kind::F32) return Operand (static_cast<float> (number));
       if (type_.kind () == Type::Kind::F64) return Operand (static_cast<double> (number));
       return Operand (static_cast<long double> (number));
     };
-    if (auto number = value.get<std::int64_t> ())
+    if (auto number = detail::operand_access (value).get<std::int64_t> ())
       value = floating (*number);
-    else if (auto number = value.get<std::uint64_t> ())
+    else if (auto number = detail::operand_access (value).get<std::uint64_t> ())
       value = floating (*number);
   }
   return builder_->literal (type_, std::move (value));
 }
-Result<Operand> IRBuilder::expression_operand (const Expression &expression,
-                                               std::optional<Type> expected) {
-  if (function_->module ().error ()) return *function_->module ().error ();
+Result<Operand> InstructionBuilder::expression_operand (const detail::ExpressionState &expression,
+                                                        std::optional<Type> expected) {
+  if ((function_->module ().error ()).has_value ()) return (function_->module ().error ()).value ();
   if (expression.builder_ != this) return fail (invalid ("expression belongs to another Builder"));
   auto value = expression.value ();
-  if (!value) return fail (value.error ());
+  if (!(value).has_value ()) return fail (value.error ());
   if (expected && expression.type () != *expected)
     return fail (invalid ("expression type mismatch; use convert explicitly"));
   return value;
 }
-Expression Expression::apply (Operation operation, const Expression &rhs) const {
+detail::ExpressionState detail::ExpressionState::apply (Operation operation,
+                                                        const detail::ExpressionState &rhs) const {
   auto lhs_value = builder_->expression_operand (*this);
-  if (!lhs_value) return {*builder_, type_, {}};
+  if (!(lhs_value).has_value ()) return {*builder_, type_, {}};
   auto rhs_value = builder_->expression_operand (rhs, type_);
-  if (!rhs_value) return {*builder_, type_, {}};
+  if (!(rhs_value).has_value ()) return {*builder_, type_, {}};
   bool comparison = operation >= Operation::Equal;
   auto opcode
     = comparison
@@ -254,13 +264,14 @@ Expression Expression::apply (Operation operation, const Expression &rhs) const 
     builder_->fail (invalid ("operation is not defined for this expression type"));
     return {*builder_, type, {}};
   }
-  const Operand inputs[]{std::move (*lhs_value), std::move (*rhs_value)};
+  const Operand inputs[]{std::move ((lhs_value).value ()), std::move ((rhs_value).value ())};
   auto reg = builder_->value_operation (*opcode, inputs, type, {});
-  return reg ? builder_->expression (**reg) : Expression (*builder_, type, {});
+  return (reg).has_value () ? builder_->expression ((reg).value ())
+                            : detail::ExpressionState (*builder_, type, {});
 }
-Expression Expression::operator- () const {
+detail::ExpressionState detail::ExpressionState::operator- () const {
   auto input = builder_->expression_operand (*this);
-  if (!input) return {*builder_, type_, {}};
+  if (!(input).has_value ()) return {*builder_, type_, {}};
   if (type_.kind () == Type::Kind::Bool || type_.kind () == Type::Kind::Pointer) {
     builder_->fail (invalid ("negation requires a numeric expression"));
     return {*builder_, type_, {}};
@@ -270,10 +281,12 @@ Expression Expression::operator- () const {
                 : type_.kind () == Type::Kind::LongDouble ? Opcode::LDNeg
                 : narrow (type_)                          ? Opcode::Negs
                                                           : Opcode::Neg;
-  auto reg = builder_->value_operation (opcode, std::span<const Operand> (&*input, 1), type_, {});
-  return reg ? builder_->expression (**reg) : Expression (*builder_, type_, {});
+  auto reg = builder_->value_operation (opcode, std::span<const Operand> (&(input).value (), 1),
+                                        type_, {});
+  return (reg).has_value () ? builder_->expression ((reg).value ())
+                            : detail::ExpressionState (*builder_, type_, {});
 }
-Expression Expression::operator~() const {
+detail::ExpressionState detail::ExpressionState::operator~() const {
   if (!type_.is_integer () || type_.kind () == Type::Kind::Bool
       || type_.kind () == Type::Kind::Pointer) {
     builder_->fail (invalid ("bitwise complement requires an integer expression"));
@@ -281,16 +294,17 @@ Expression Expression::operator~() const {
   }
   return apply (Operation::Xor, literal_like (Operand (-1)));
 }
-Expression Expression::operator!() const {
+detail::ExpressionState detail::ExpressionState::operator!() const {
   return apply (Operation::Equal, literal_like (Operand (0)));
 }
-Expression Expression::convert (Type type) const {
+detail::ExpressionState detail::ExpressionState::convert (Type type) const {
   return builder_->convert_expression (*this, type);
 }
 
-Expression IRBuilder::convert_expression (const Expression &expression, Type type) {
+detail::ExpressionState InstructionBuilder::convert_expression (
+  const detail::ExpressionState &expression, Type type) {
   auto value = expression_operand (expression);
-  if (!value) return {*this, type, {}};
+  if (!(value).has_value ()) return {*this, type, {}};
   if (!type.valid () || !type.is_scalar ()) {
     fail (invalid ("conversion requires a scalar destination"));
     return {*this, type, {}};
@@ -299,7 +313,7 @@ Expression IRBuilder::convert_expression (const Expression &expression, Type typ
   if (from == type) return expression;
   if (type.kind () == Type::Kind::Bool) {
     auto zero = expression.literal_like (Operand (0));
-    return expression.apply (Expression::Operation::NotEqual, zero);
+    return expression.apply (detail::ExpressionState::Operation::NotEqual, zero);
   }
   const bool pointer = from.kind () == Type::Kind::Pointer || type.kind () == Type::Kind::Pointer;
   auto wide_integer = [] (Type t) {
@@ -314,7 +328,7 @@ Expression IRBuilder::convert_expression (const Expression &expression, Type typ
     fail (invalid ("MIR has no full-range floating-to-u64 conversion"));
     return {*this, type, {}};
   }
-  if (!block_ || block_->terminator ()) {
+  if (!block_ || block_->terminator ().get ()) {
     fail (invalid ("conversion requires an open insertion block"));
     return {*this, type, {}};
   }
@@ -328,7 +342,7 @@ Expression IRBuilder::convert_expression (const Expression &expression, Type typ
   pending.reserve (3);
   auto stage = [&] (Opcode opcode, Type result_type) {
     auto reg = std::unique_ptr<Register> (new Register (*function_, result_type, {}, {}, false));
-    operations.push_back ({opcode, {Operand (*reg), *value}});
+    operations.push_back ({opcode, {Operand (*reg), (value).value ()}});
     value = Operand (*reg);
     pending.push_back (std::move (reg));
   };
@@ -373,7 +387,7 @@ Expression IRBuilder::convert_expression (const Expression &expression, Type typ
   }
   for (const auto &operation : operations) {
     auto checked = validate_instruction (*function_, operation.opcode, operation.operands);
-    if (!checked) {
+    if (!(checked).has_value ()) {
       fail (checked.error ());
       return {*this, type, {}};
     }
@@ -384,45 +398,50 @@ Expression IRBuilder::convert_expression (const Expression &expression, Type typ
   }
   for (auto &operation : operations)
     append_validated (operation.opcode, std::move (operation.operands));
-  return {*this, type, std::move (*value)};
+  return {*this, type, std::move ((value).value ())};
 }
-Result<Instruction *> IRBuilder::assign (const Register &target, const Expression &value) {
+Result<Instruction &> InstructionBuilder::assign (const Register &target,
+                                                  const detail::ExpressionState &value) {
   auto operand = expression_operand (value, target.type ());
-  if (!operand) return operand.error ();
-  return assign (target, std::move (*operand));
+  if (!(operand).has_value ()) return operand.error ();
+  return assign (target, std::move ((operand).value ()));
 }
-Result<Instruction *> IRBuilder::store (Memory target, const Expression &value) {
+Result<Instruction &> InstructionBuilder::store (Memory target,
+                                                 const detail::ExpressionState &value) {
   auto operand = expression_operand (value, target.type);
-  if (!operand) return operand.error ();
-  return store (std::move (target), std::move (*operand));
+  if (!(operand).has_value ()) return operand.error ();
+  return store (std::move (target), std::move ((operand).value ()));
 }
-Result<Instruction *> IRBuilder::store (const GlobalVariable &target, const Expression &value) {
+Result<Instruction &> InstructionBuilder::store (const GlobalVariable &target,
+                                                 const detail::ExpressionState &value) {
   auto operand = expression_operand (value, target.type ());
-  if (!operand) return operand.error ();
-  return store (target, std::move (*operand));
+  if (!(operand).has_value ()) return operand.error ();
+  return store (target, std::move ((operand).value ()));
 }
-Result<Instruction *> IRBuilder::ret (const Expression &value) {
+Result<Instruction &> InstructionBuilder::ret (const detail::ExpressionState &value) {
   const auto &results = function_->signature ().results;
   if (results.size () != 1) return fail (invalid ("expression return requires exactly one result"));
   auto operand = expression_operand (value, results[0]);
-  if (!operand) return operand.error ();
-  return ret (std::move (*operand));
+  if (!(operand).has_value ()) return operand.error ();
+  return ret (std::move ((operand).value ()));
 }
-Result<Instruction *> IRBuilder::branch_if (const Expression &value, const Label &target,
-                                            bool when_true) {
+Result<Instruction &> InstructionBuilder::branch_if (const detail::ExpressionState &value,
+                                                     const Label &target, bool when_true) {
   auto operand = expression_operand (value);
-  if (!operand) return operand.error ();
-  return branch_if (std::move (*operand), target, when_true);
+  if (!(operand).has_value ()) return operand.error ();
+  return branch_if (std::move ((operand).value ()), target, when_true);
 }
-Result<Instruction *> IRBuilder::branch (Comparison comparison, const Expression &lhs,
-                                         const Expression &rhs, const Label &target) {
+Result<Instruction &> InstructionBuilder::branch (Comparison comparison,
+                                                  const detail::ExpressionState &lhs,
+                                                  const detail::ExpressionState &rhs,
+                                                  const Label &target) {
   auto left = expression_operand (lhs);
-  if (!left) return left.error ();
+  if (!(left).has_value ()) return left.error ();
   auto right = expression_operand (rhs, lhs.type ());
-  if (!right) return right.error ();
+  if (!(right).has_value ()) return right.error ();
   if (static_cast<unsigned> (comparison) > static_cast<unsigned> (Comparison::GreaterEqual))
     return fail (invalid ("invalid comparison"));
   return emit (comparison_opcode (lhs.type (), comparison, true),
-               {Operand (target), std::move (*left), std::move (*right)});
+               {Operand (target), std::move ((left).value ()), std::move ((right).value ())});
 }
 }  // namespace mirnext::ir

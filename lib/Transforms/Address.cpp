@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Derived from MIR, Copyright 2018-2024 Vladimir Makarov. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #include "mirnext/Transforms/Address.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
 #include <algorithm>
@@ -16,8 +18,9 @@ bool move (Opcode code) {
          || code == Opcode::LDMov;
 }
 bool copy (const Instruction &i) {
-  return move (i.opcode ()) && i.operands ()[0].get<const Register *> ()
-         && i.operands ()[1].get<const Register *> ();
+  return move (i.opcode ())
+         && ir::detail::operand_access (i.operands ()[0]).get<const Register *> ()
+         && ir::detail::operand_access (i.operands ()[1]).get<const Register *> ();
 }
 Type scalar (Type type) { return type.is_float () ? type : Type::i64 (); }
 Opcode move_code (Type type) {
@@ -61,28 +64,33 @@ unsigned integer_width (Type type) {
   }
 }
 Family collect (const SSAForm &form, Instruction &addr) {
-  Family family{&addr, *addr.operands ()[1].get<const Register *> ()};
-  family.escapes = family.source->is_memory_backed ()
-                   || family.source == *addr.operands ()[0].get<const Register *> ();
-  std::vector<const SSAValue *> pending{form.definitions (addr)[0]};
+  Family family{&addr, *ir::detail::operand_access (addr.operands ()[1]).get<const Register *> ()};
+  family.escapes
+    = family.source->is_memory_backed ()
+      || family.source
+           == *ir::detail::operand_access (addr.operands ()[0]).get<const Register *> ();
+  std::vector<const SSAValue *> pending{
+    ir::detail::ReferenceAccess::pointers (form.definitions (addr))[0]};
   std::unordered_set<const Instruction *> seen;
   while (!pending.empty ()) {
     auto value = pending.back ();
     pending.pop_back ();
     // MIR prepends uses and pops copy work in LIFO order. Borrow inverse edges
     // directly instead of scanning the entire SSA body for every definition.
-    for (auto it = value->uses ().begin (); it != value->uses ().end (); ++it) {
+    for (auto it = ir::detail::ReferenceAccess::pointers (value->uses ()).begin ();
+         it != ir::detail::ReferenceAccess::pointers (value->uses ()).end (); ++it) {
       auto site = std::get_if<SSAInstructionUse> (&(*it)->site ());
       if (!site) {
         family.escapes = true;
         continue;
       }
-      auto &user = *site->instruction;
-      if (auto memory = user.operands ()[site->operand].get<Memory> ()) {
+      auto &user = *ir::detail::NodeAccess::instruction (*(site));
+      if (auto memory
+          = ir::detail::operand_access (user.operands ()[site->operand]).get<Memory> ()) {
         // Simplify supplies scalar base-only moves. Other address consumers
         // require real storage; a scalar substitution cannot represent them.
         if (!move (user.opcode ()) || site->operand > 1 || site->part != SSAOperandPart::MemoryBase
-            || memory->index || memory->displacement
+            || ir::detail::NodeAccess::index (*(memory)) || memory->displacement
             || scalar (memory->type) != scalar (family.source->type ())) {
           family.escapes = true;
           continue;
@@ -93,18 +101,23 @@ Family collect (const SSAForm &form, Instruction &addr) {
       } else if (!copy (user))
         family.escapes = true;
       else if (seen.insert (&user).second)
-        pending.push_back (form.definitions (user)[0]);
+        pending.push_back (ir::detail::ReferenceAccess::pointers (form.definitions (user))[0]);
     }
   }
   return family;
 }
 }  // namespace
-Result<PassResult> AddressTransformPass::run (ir::Function &function,
+Result<PassResult> AddressTransformPass::run (ir::MIRBuilder &edit,
                                               analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   if (&analyses.function () != &function) return invalid (function, "analysis owner mismatch");
   auto checked = function.verify ();
-  if (!checked) return checked.error ();
-  auto form = function.ssa_form ();
+  if (!(checked).has_value ()) return checked.error ();
+  auto form = function.ssa_form ().get ();
   if (!form || form->renamed ()) return invalid (function, "requires unrenamed SSA");
   std::vector<Family> families;
   std::unordered_map<const Instruction *, std::size_t> indices;
@@ -112,9 +125,9 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
   for (auto &block : function.blocks ())
     for (auto &instruction : block.instructions ())
       if (address (instruction.opcode ())) {
-        if (!instruction.operands ()[0].get<const Register *> ()
-            || !instruction.operands ()[1].get<const Register *> ()
-            || form->definitions (instruction).size () != 1)
+        if (!ir::detail::operand_access (instruction.operands ()[0]).get<const Register *> ()
+            || !ir::detail::operand_access (instruction.operands ()[1]).get<const Register *> ()
+            || ir::detail::ReferenceAccess::pointers (form->definitions (instruction)).size () != 1)
           return invalid (function, "simplify must materialize address operands before SSA");
         indices.emplace (&instruction, families.size ());
         families.push_back (collect (*form, instruction));
@@ -141,7 +154,7 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
       for (auto &i : block.instructions ())
         if (!address (i.opcode ()))
           for (std::size_t p = 0; p < i.operands ().size (); ++p)
-            if (auto reg = i.operands ()[p].get<const Register *> ();
+            if (auto reg = ir::detail::operand_access (i.operands ()[p]).get<const Register *> ();
                 reg && !output_operand (function, i, p))
               if (auto found = widths.find (*reg); found != widths.end ()) found->second = 64;
     for (auto &family : families)
@@ -157,7 +170,8 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
     for (auto &family : families)
       if (family.escapes || !family.memory_users.empty ()) observed.insert (family.source);
     for (auto &family : families)
-      if (observed.contains (*family.address->operands ()[0].get<const Register *> ()))
+      if (observed.contains (
+            *ir::detail::operand_access (family.address->operands ()[0]).get<const Register *> ()))
         escaping.insert (family.source);
   }
   // An address written into an escaping pointer slot escapes too, even when
@@ -166,7 +180,8 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
     std::unordered_multimap<const Register *, const Register *> stored_addresses;
     stored_addresses.reserve (families.size ());
     for (auto &family : families)
-      stored_addresses.emplace (*family.address->operands ()[0].get<const Register *> (),
+      stored_addresses.emplace (*ir::detail::operand_access (family.address->operands ()[0])
+                                   .get<const Register *> (),
                                 family.source);
     std::vector<const Register *> pending (escaping.begin (), escaping.end ());
     while (!pending.empty ()) {
@@ -178,7 +193,8 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
     }
     std::unordered_set<const Register *> addressed;
     for (auto &family : families) {
-      auto destination = *family.address->operands ()[0].get<const Register *> ();
+      auto destination
+        = *ir::detail::operand_access (family.address->operands ()[0]).get<const Register *> ();
       family.stored = destination == family.source
                       || (escaping.contains (destination) && addressed.contains (destination));
       if (escaping.contains (family.source)) addressed.insert (family.source);
@@ -187,19 +203,20 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
   for (auto &block : function.blocks ())
     for (auto &instruction : block.instructions ())
       for (auto &operand : instruction.operands ())
-        if (auto memory = operand.get<Memory> ();
-            memory && memory->index && escaping.contains (memory->index))
+        if (auto memory = ir::detail::operand_access (operand).get<Memory> ();
+            memory && ir::detail::NodeAccess::index (*(memory))
+            && escaping.contains (ir::detail::NodeAccess::index (*(memory))))
           return invalid (function,
                           "simplify must materialize an escaping memory index before SSA");
   // Decisions borrow the intact def-use graph. Exiting unrenamed SSA keeps all
   // canonical registers and instructions; no shadow instruction body is made.
   std::size_t changes = 0;
   for (auto &phi : form->phis ()) changes += phi.alive ();
-  auto ssa = SSARewriter::get (function);
-  if (!ssa) return ssa.error ();
-  checked = ssa->complete ();
-  if (!checked) return checked.error ();
-  IRRewriter rewriter (function);
+  auto ssa = SSAUpdater::get (function);
+  if (!(ssa).has_value ()) return ssa.error ();
+  checked = ssa.value ().complete ();
+  if (!(checked).has_value ()) return checked.error ();
+  InstructionRewriter rewriter (function);
   for (auto &block : function.blocks ())
     for (auto instruction = block.size () ? &*block.instructions ().begin () : nullptr;
          instruction;) {
@@ -210,45 +227,45 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
         bool edited = false;
         for (std::size_t p = 0; p < instruction->operands ().size (); ++p) {
           auto &operand = instruction->operands ()[p];
-          auto reg = operand.get<const Register *> ();
-          auto memory = operand.get<Memory> ();
-          auto variable = reg ? *reg : memory ? memory->base : nullptr;
+          auto reg = ir::detail::operand_access (operand).get<const Register *> ();
+          auto memory = ir::detail::operand_access (operand).get<Memory> ();
+          auto variable = reg ? *reg : memory ? ir::detail::NodeAccess::base (*(memory)) : nullptr;
           if (!variable || !escaping.contains (variable)) continue;
           if (!edited)
             operands.assign (instruction->operands ().begin (), instruction->operands ().end ());
           auto type = scalar (variable->type ());
           bool output = reg && output_operand (function, *instruction, p);
           if (previous != variable) {
-            auto created = function.create_register (Type::i64 ());
-            if (!created) return created.error ();
-            addr_reg = *created;
+            auto created = ir::detail::access (function).create_register (Type::i64 ());
+            if (!(created).has_value ()) return created.error ();
+            addr_reg = &(created).value ();
             auto added = rewriter.insert_before (*instruction, Opcode::Addr,
                                                  {Operand (*addr_reg), Operand (*variable)});
-            if (!added) return added.error ();
+            if (!(added).has_value ()) return added.error ();
             previous = variable;
             ++changes;
           }
-          auto temp = function.create_register (type);
-          if (!temp) return temp.error ();
-          Operand storage (Memory{type, addr_reg});
+          auto temp = ir::detail::access (function).create_register (type);
+          if (!(temp).has_value ()) return temp.error ();
+          Operand storage (ir::detail::NodeAccess::make_Memory (type, addr_reg));
           auto added = output ? rewriter.insert_after (*instruction, move_code (type),
-                                                       {storage, Operand (**temp)})
+                                                       {storage, Operand ((temp).value ())})
                               : rewriter.insert_before (*instruction, move_code (type),
-                                                        {Operand (**temp), storage});
-          if (!added) return added.error ();
+                                                        {Operand ((temp).value ()), storage});
+          if (!(added).has_value ()) return added.error ();
           ++changes;
           edited = true;
           if (reg)
-            operands[p] = Operand (**temp);
+            operands[p] = Operand ((temp).value ());
           else {
             auto updated = *memory;
-            updated.base = *temp;
+            ir::detail::NodeAccess::base (updated) = &(temp).value ();
             operands[p] = Operand (std::move (updated));
           }
         }
         if (edited) {
           checked = rewriter.replace (*instruction, instruction->opcode (), operands);
-          if (!checked) return checked.error ();
+          if (!(checked).has_value ()) return checked.error ();
           ++changes;
         }
       } else {
@@ -257,35 +274,40 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
           for (auto it = family.memory_users.rbegin (); it != family.memory_users.rend (); ++it) {
             auto user = *it;
             std::vector<Operand> operands (user->operands ().begin (), user->operands ().end ());
-            auto p = operands[0].get<Memory> () ? 0u : 1u;
-            auto type = operands[p].get<Memory> ()->type;
+            auto p = ir::detail::operand_access (operands[0]).get<Memory> () ? 0u : 1u;
+            auto type = ir::detail::operand_access (operands[p]).get<Memory> ()->type;
             auto code = extension (type).value_or (user->opcode ());
             operands[p] = Operand (*family.source);
             checked = rewriter.replace (*user, code, operands);
-            if (!checked) return checked.error ();
+            if (!(checked).has_value ()) return checked.error ();
             ++changes;
           }
           checked = rewriter.erase (*instruction);
-          if (!checked) return checked.error ();
+          if (!(checked).has_value ()) return checked.error ();
           ++changes;
         } else if (family.stored) {
           // Earlier and self addresses observe this pointer slot assignment.
           // Make the store explicit before SSA renaming changes its identity.
-          auto destination = *instruction->operands ()[0].get<const Register *> ();
-          auto pointer = function.create_register (Type::i64 ()),
-               value = function.create_register (Type::i64 ());
-          if (!pointer) return pointer.error ();
-          if (!value) return value.error ();
-          auto added = rewriter.insert_before (*instruction, Opcode::Addr,
-                                               {Operand (**pointer), Operand (*destination)});
-          if (!added) return added.error ();
+          auto destination
+            = *ir::detail::operand_access (instruction->operands ()[0]).get<const Register *> ();
+          auto pointer = ir::detail::access (function).create_register (Type::i64 ()),
+               value = ir::detail::access (function).create_register (Type::i64 ());
+          if (!(pointer).has_value ()) return pointer.error ();
+          if (!(value).has_value ()) return value.error ();
+          auto added
+            = rewriter.insert_before (*instruction, Opcode::Addr,
+                                      {Operand ((pointer).value ()), Operand (*destination)});
+          if (!(added).has_value ()) return added.error ();
           added
             = rewriter.insert_after (*instruction, Opcode::Mov,
-                                     {Operand (Memory{Type::i64 (), *pointer}), Operand (**value)});
-          if (!added) return added.error ();
-          const Operand operands[]{Operand (**value), Operand (*family.source)};
+                                     {Operand (
+                                        ir::detail::NodeAccess::make_Memory (Type::i64 (),
+                                                                             &(pointer).value ())),
+                                      Operand ((value).value ())});
+          if (!(added).has_value ()) return added.error ();
+          const Operand operands[]{Operand ((value).value ()), Operand (*family.source)};
           checked = rewriter.replace (*instruction, instruction->opcode (), operands);
-          if (!checked) return checked.error ();
+          if (!(checked).has_value ()) return checked.error ();
           changes += 3;
         }
       }
@@ -294,9 +316,9 @@ Result<PassResult> AddressTransformPass::run (ir::Function &function,
   std::vector<const Register *> storage (escaping.begin (), escaping.end ());
   for (auto reg : storage) changes += !reg->is_memory_backed ();
   checked = rewriter.materialize_register_storage (storage);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   checked = function.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<analysis::ControlFlowAnalysis> ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();

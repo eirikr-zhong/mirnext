@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Shared typed allocation spill service. */
+#include "mirnext/CodeGen/Checked.hpp"
 #pragma once
 #include "mirnext/CodeGen/RegisterRewrite.hpp"
 namespace mirnext::codegen::detail {

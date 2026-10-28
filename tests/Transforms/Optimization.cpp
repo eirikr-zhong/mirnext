@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Owning canonical optimization pipeline. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -16,28 +18,28 @@ using namespace mirnext::transforms;
 namespace {
 constexpr std::string_view scalar
   = "m:module\nentry:func i64\nlocal i64:r\nadd r, 20, 22\nret r\nendfunc\nendmodule\n";
-std::unique_ptr<Context> parse (std::string_view text = scalar) {
+std::unique_ptr<Program> parse (std::string_view text = scalar) {
   auto c = serialization::parse_text (text);
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
-  return std::move (*c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
+  return std::make_unique<Program> (std::move ((c).value ()));
 }
 void formats (const OptimizedProgram &p) {
-  REQUIRE (p.verify ());
+  REQUIRE ((p.verify ()).has_value ());
   CHECK_FALSE (p.dump ().empty ());
   auto text = p.write_text ();
-  REQUIRE (text);
-  REQUIRE (serialization::parse_text (*text));
+  REQUIRE ((text).has_value ());
+  REQUIRE ((serialization::parse_text ((text).value ())).has_value ());
   for (auto encoding :
        {serialization::BinaryEncoding::Raw, serialization::BinaryEncoding::Compressed}) {
-    auto binary = p.encode_binary (encoding);
-    REQUIRE (binary);
-    auto decoded = serialization::read_binary (*binary, {encoding});
-    INFO ((decoded ? "" : decoded.error ().message));
-    REQUIRE (decoded);
-    auto again = serialization::write_binary (**decoded, encoding);
-    REQUIRE (again);
-    CHECK (*again == *binary);
+    auto binary = p.write_binary (encoding);
+    REQUIRE ((binary).has_value ());
+    auto decoded = serialization::read_binary ((binary).value (), {encoding});
+    INFO (((decoded).has_value () ? "" : decoded.error ().message));
+    REQUIRE ((decoded).has_value ());
+    auto again = serialization::write_binary ((decoded).value (), encoding);
+    REQUIRE ((again).has_value ());
+    CHECK ((again).value () == (binary).value ());
   }
 }
 }  // namespace
@@ -51,32 +53,32 @@ TEST_CASE ("owning pipeline selects original levels and exposes real analysis an
     OptimizationOptions options;
     options.level = static_cast<OptimizationLevel> (n);
     options.observer = [&] (const OptimizationSnapshot &s) -> Result<void> {
-      REQUIRE (s.function.verify ());
+      REQUIRE ((s.function.verify ()).has_value ());
       if (s.phase == PassEvent::Phase::Before) {
         ++before;
         return {};
       }
       phases.push_back (s.statistics.pass);
       if (s.statistics.pass == PassId::BuildCFG) {
-        REQUIRE (s.graph);
-        CHECK_FALSE (s.ssa ());
+        REQUIRE ((s.graph).has_value ());
+        CHECK_FALSE ((s.ssa ()).has_value ());
       }
       if (s.statistics.pass == PassId::BuildSSA) {
-        REQUIRE (s.ssa ());
-        CHECK (s.ssa ()->renamed ());
-        REQUIRE (s.graph);
+        REQUIRE ((s.ssa ()).has_value ());
+        CHECK (s.ssa ().value ().renamed ());
+        REQUIRE ((s.graph).has_value ());
       }
       if (s.statistics.pass == PassId::BuildLoops) {
-        REQUIRE (s.loops);
-        REQUIRE (s.ssa ());
+        REQUIRE ((s.loops).has_value ());
+        REQUIRE ((s.ssa ()).has_value ());
       }
       if (s.statistics.pass == PassId::DestroySSA || s.statistics.pass == PassId::JumpOptimization)
-        CHECK_FALSE (s.ssa ());
+        CHECK_FALSE ((s.ssa ()).has_value ());
       return {};
     };
     auto p = optimize (*source, options);
-    INFO ((p ? "" : p.error ().message));
-    REQUIRE (p);
+    INFO (((p).has_value () ? "" : p.error ().message));
+    REQUIRE ((p).has_value ());
     std::vector<PassId> expected{PassId::Materialize, PassId::Simplify, PassId::Inline,
                                  PassId::BuildCFG};
     if (n >= 2)
@@ -87,11 +89,11 @@ TEST_CASE ("owning pipeline selects original levels and exposes real analysis an
         expected.push_back (pass);
     CHECK (phases == expected);
     CHECK (before == phases.size ());
-    CHECK (p->statistics ().size () == phases.size ());
+    CHECK (p.value ().statistics ().size () == phases.size ());
     CHECK (dump (*source) == original);
-    CHECK (p->level () == options.level);
-    CHECK (p->target () != target::Architecture::Native);
-    formats (*p);
+    CHECK (p.value ().level () == options.level);
+    CHECK (p.value ().target () != target::Architecture::Native);
+    formats ((p).value ());
   }
 }
 TEST_CASE ("address path is chosen before unreachable blocks disappear") {
@@ -106,22 +108,22 @@ TEST_CASE ("address path is chosen before unreachable blocks disappear") {
       if (s.phase != PassEvent::Phase::After) return {};
       stages.push_back (s.statistics.pass);
       if (s.statistics.pass == PassId::BuildSSA) {
-        REQUIRE (s.ssa ());
-        renames.push_back (s.ssa ()->renamed ());
+        REQUIRE ((s.ssa ()).has_value ());
+        renames.push_back (s.ssa ().get ()->renamed ());
       }
-      if (s.statistics.pass == PassId::TransformAddresses) CHECK_FALSE (s.ssa ());
+      if (s.statistics.pass == PassId::TransformAddresses) CHECK_FALSE ((s.ssa ()).has_value ());
       return {};
     };
     auto p = optimize (*source, options);
-    INFO ((p ? "" : p.error ().message));
-    REQUIRE (p);
+    INFO (((p).has_value () ? "" : p.error ().message));
+    REQUIRE ((p).has_value ());
     CHECK (renames == std::vector<bool>{false, true});
     REQUIRE (stages.size () > 7);
     CHECK (stages[4] == PassId::BuildSSA);
     CHECK (stages[5] == PassId::TransformAddresses);
     CHECK (stages[6] == PassId::CloneBlocks);
     CHECK (stages[7] == PassId::BuildSSA);
-    formats (*p);
+    formats ((p).value ());
   }
 }
 TEST_CASE (
@@ -138,74 +140,75 @@ TEST_CASE (
       return {};
     };
     auto result = optimize (*source, options);
-    REQUIRE (result);
-    CHECK (result->find_function ("m", "entry") != identity);
+    REQUIRE ((result).has_value ());
+    CHECK (result.value ().find_function ("m", "entry").get () != identity);
     return result;
   };
   auto first = make ();
-  REQUIRE (first);
+  REQUIRE ((first).has_value ());
   CHECK (callback_lifetime.expired ());
-  formats (*first);
-  auto second = optimize (first->context ());
-  REQUIRE (second);
-  formats (*second);
-  auto moved = std::move (*first);
-  CHECK_FALSE (first->verify ());
-  CHECK_FALSE (first->encode_binary ());
-  CHECK_FALSE (first->write_text ());
-  CHECK (first->statistics ().empty ());
-  CHECK (first->find_function ("m", "entry") == nullptr);
-  *second = std::move (moved);
-  CHECK_FALSE (moved.verify ());
-  formats (*second);
+  formats ((first).value ());
+  auto second = optimize (first.value ().program ());
+  REQUIRE ((second).has_value ());
+  formats ((second).value ());
+  auto moved = std::move ((first).value ());
+  CHECK_FALSE ((first.value ().verify ()).has_value ());
+  CHECK_FALSE ((first.value ().write_binary ()).has_value ());
+  CHECK_FALSE ((first.value ().write_text ()).has_value ());
+  CHECK (first.value ().statistics ().empty ());
+  CHECK (first.value ().find_function ("m", "entry").get () == nullptr);
+  (second).value () = std::move (moved);
+  CHECK_FALSE ((moved.verify ()).has_value ());
+  formats ((second).value ());
 }
 TEST_CASE ("module cloning and optimization ignore unrelated invalid source modules") {
   auto source = parse ();
   auto &module = *source->modules ().begin ();
-  auto bad = source->create_module ("unrelated");
-  REQUIRE (bad);
-  auto f = (*bad)->create_function ("bad", {});
-  REQUIRE (f);
-  auto b = (*f)->create_block ();
-  REQUIRE (b);
-  CHECK_FALSE (IRBuilder (**b).emit (Opcode::Add, {}));
-  CHECK_FALSE (source->verify ());
+  auto bad = mirnext::ir::detail::access (*(source)).create_module ("unrelated");
+  REQUIRE ((bad).has_value ());
+  auto f = mirnext::ir::detail::access (((bad)).value ()).create_function ("bad", {});
+  REQUIRE ((f).has_value ());
+  auto b = mirnext::ir::detail::access (((f)).value ()).create_block ();
+  REQUIRE ((b).has_value ());
+  CHECK_FALSE ((InstructionBuilder ((b).value ()).emit (Opcode::Add, {})).has_value ());
+  CHECK_FALSE ((source->verify ()).has_value ());
   auto copied = clone (module);
-  REQUIRE (copied);
-  CHECK (std::distance ((*copied)->modules ().begin (), (*copied)->modules ().end ()) == 1);
+  REQUIRE ((copied).has_value ());
+  CHECK (std::distance (copied.value ().modules ().begin (), copied.value ().modules ().end ())
+         == 1);
   auto p = optimize (module);
-  REQUIRE (p);
-  formats (*p);
-  CHECK_FALSE (optimize (*source));
+  REQUIRE ((p).has_value ());
+  formats ((p).value ());
+  CHECK_FALSE ((optimize (*source)).has_value ());
 }
 TEST_CASE (
   "module optimization retains external imports while context optimization resolves cross module "
   "inline") {
   auto fixtures = test::inline_fixtures ();
   auto source = parse (fixtures[fixtures.size () - 2]);
-  auto module = source->find_module ("b");
+  auto module = source->find_module ("b").get ();
   REQUIRE (module);
   auto imported = optimize (*module);
-  REQUIRE (imported);
-  auto entry = imported->find_function ("b", "entry");
+  REQUIRE ((imported).has_value ());
+  auto entry = imported.value ().find_function ("b", "entry").get ();
   REQUIRE (entry);
   std::size_t calls = 0;
   for (auto &b : entry->blocks ())
     for (auto &i : b.instructions ()) calls += i.opcode () == Opcode::Call;
   CHECK (calls == 1);
-  CHECK (imported->context ().find_module ("a") == nullptr);
-  formats (*imported);
+  CHECK (imported.value ().program ().find_module ("a").get () == nullptr);
+  formats ((imported).value ());
   auto complete = optimize (*source);
-  REQUIRE (complete);
-  entry = complete->find_function ("b", "entry");
+  REQUIRE ((complete).has_value ());
+  entry = complete.value ().find_function ("b", "entry").get ();
   REQUIRE (entry);
   calls = 0;
   for (auto &b : entry->blocks ())
     for (auto &i : b.instructions ()) calls += i.opcode () == Opcode::Call;
   CHECK (calls == 0);
-  CHECK (complete->context ().find_module ("a") != nullptr);
+  CHECK (complete.value ().program ().find_module ("a").get () != nullptr);
   source.reset ();
-  formats (*complete);
+  formats ((complete).value ());
 }
 TEST_CASE (
   "pipeline diagnostics preserve source state for observer invalid target level and SSA failures") {
@@ -219,46 +222,46 @@ TEST_CASE (
       return {};
     };
     auto p = optimize (*source, options);
-    CHECK_FALSE (p);
+    CHECK_FALSE ((p).has_value ());
     CHECK (p.error ().message.find ("entry [build-ssa]") != std::string::npos);
     CHECK (p.error ().message.find ("observer rejected SSA") != std::string::npos);
     CHECK (dump (*source) == original);
   }
   OptimizationOptions options;
   options.level = static_cast<OptimizationLevel> (4);
-  CHECK_FALSE (optimize (*source, options));
+  CHECK_FALSE ((optimize (*source, options)).has_value ());
   options = {};
   options.target = static_cast<target::Architecture> (255);
-  CHECK_FALSE (optimize (*source, options));
+  CHECK_FALSE ((optimize (*source, options)).has_value ());
   auto native = target::AddressingRules::get ();
-  REQUIRE (native);
-  options.target = native->architecture () == target::Architecture::X86_64
+  REQUIRE ((native).has_value ());
+  options.target = native.value ().architecture () == target::Architecture::X86_64
                      ? target::Architecture::AArch64
                      : target::Architecture::X86_64;
-  CHECK_FALSE (optimize (*source, options));
+  CHECK_FALSE ((optimize (*source, options)).has_value ());
   CHECK (dump (*source) == original);
   auto &f = *source->modules ().begin ()->functions ().begin ();
   FunctionAnalysisManager analyses (f);
   FunctionPassManager passes;
   passes.add<PrepareCFGPass> ();
   passes.add<BuildSSAPass> ();
-  REQUIRE (passes.run (f, analyses));
-  CHECK_FALSE (optimize (*source));
+  REQUIRE ((passes.run (f, analyses)).has_value ());
+  CHECK_FALSE ((optimize (*source)).has_value ());
 }
 TEST_CASE ("cached analysis observations never construct recompute or erase analyses") {
   auto source = parse ();
   auto &f = *source->modules ().begin ()->functions ().begin ();
   FunctionAnalysisManager a (f);
-  CHECK (a.get_cached<FunctionGraphAnalysis> () == nullptr);
+  CHECK (a.get_cached<FunctionGraphAnalysis> ().get () == nullptr);
   CHECK (a.cached () == 0);
   auto graph = a.get<FunctionGraphAnalysis> ();
-  REQUIRE (graph);
-  CHECK (a.get_cached<FunctionGraphAnalysis> () == *graph);
+  REQUIRE ((graph).has_value ());
+  CHECK (a.get_cached<FunctionGraphAnalysis> ().get () == &(graph).value ());
   auto count = a.cached ();
-  auto block = f.create_block ();
-  REQUIRE (block);
-  REQUIRE (IRBuilder (**block).ret (Operand (0)));
-  CHECK (a.get_cached<FunctionGraphAnalysis> () == nullptr);
+  auto block = mirnext::ir::detail::access (f).create_block ();
+  REQUIRE ((block).has_value ());
+  REQUIRE ((InstructionBuilder ((block).value ()).ret (Operand (0))).has_value ());
+  CHECK (a.get_cached<FunctionGraphAnalysis> ().get () == nullptr);
   CHECK (a.cached () == count);
 }
 TEST_CASE ("branch register rewrites preserve CFG but label rewrites invalidate it") {
@@ -268,21 +271,21 @@ TEST_CASE ("branch register rewrites preserve CFG but label rewrites invalidate 
   auto &f = *source->modules ().begin ()->functions ().begin ();
   FunctionAnalysisManager analyses (f);
   auto graph = analyses.get<FunctionGraphAnalysis> ();
-  REQUIRE (graph);
+  REQUIRE ((graph).has_value ());
   auto branch = &*f.blocks ().begin ()->instructions ().begin ();
   auto revision = f.revisions ();
   std::vector<Operand> operands (branch->operands ().begin (), branch->operands ().end ());
-  operands[1] = Operand (*f.arguments ()[1]);
-  REQUIRE (IRRewriter (f).replace (*branch, Opcode::Bt, operands));
+  operands[1] = Operand (*mirnext::ir::detail::ReferenceAccess::pointers (f.arguments ())[1]);
+  REQUIRE ((InstructionRewriter (f).replace (*branch, Opcode::Bt, operands)).has_value ());
   CHECK (f.revisions ().instructions > revision.instructions);
   CHECK (f.revisions ().control_flow == revision.control_flow);
-  CHECK (analyses.get_cached<FunctionGraphAnalysis> () == *graph);
-  auto label = f.find_label ("other");
+  CHECK (analyses.get_cached<FunctionGraphAnalysis> ().get () == &(graph).value ());
+  auto label = f.find_label ("other").get ();
   REQUIRE (label);
   operands[0] = Operand (*label);
-  REQUIRE (IRRewriter (f).replace (*branch, Opcode::Bt, operands));
+  REQUIRE ((InstructionRewriter (f).replace (*branch, Opcode::Bt, operands)).has_value ());
   CHECK (f.revisions ().control_flow > revision.control_flow);
-  CHECK (analyses.get_cached<FunctionGraphAnalysis> () == nullptr);
+  CHECK (analyses.get_cached<FunctionGraphAnalysis> ().get () == nullptr);
 }
 TEST_CASE ("cloning constant pruning and GVN eliminate closed single input PHIs") {
   auto source = parse (
@@ -292,9 +295,9 @@ TEST_CASE ("cloning constant pruning and GVN eliminate closed single input PHIs"
     OptimizationOptions options;
     options.level = level;
     auto p = optimize (*source, options);
-    INFO ((p ? "" : p.error ().message));
-    REQUIRE (p);
-    formats (*p);
+    INFO (((p).has_value () ? "" : p.error ().message));
+    REQUIRE ((p).has_value ());
+    formats ((p).value ());
   }
 }
 TEST_CASE ("pipeline materializes nested scope edges without altering source scope handles") {
@@ -303,16 +306,16 @@ TEST_CASE ("pipeline materializes nested scope edges without altering source sco
     auto source = test::stack_scope_example (mode);
     auto before = dump (*source);
     auto p = optimize (*source);
-    INFO ((p ? "" : p.error ().message));
-    REQUIRE (p);
+    INFO (((p).has_value () ? "" : p.error ().message));
+    REQUIRE ((p).has_value ());
     CHECK (dump (*source) == before);
-    for (auto &m : p->context ().modules ())
+    for (auto &m : p.value ().program ().modules ())
       for (auto &f : m.functions ()) {
         CHECK_FALSE (f.needs_materialization ());
-        CHECK_FALSE (f.ssa_form ());
+        CHECK_FALSE ((f.ssa_form ()).has_value ());
       }
     source.reset ();
-    formats (*p);
+    formats ((p).value ());
   }
 }
 TEST_CASE ("full pipeline covers all public opcodes at every optimization level") {
@@ -324,9 +327,9 @@ TEST_CASE ("full pipeline covers all public opcodes at every optimization level"
       OptimizationOptions options;
       options.level = static_cast<OptimizationLevel> (n);
       auto p = optimize (*source, options);
-      INFO ((p ? "" : p.error ().message));
-      REQUIRE (p);
-      formats (*p);
+      INFO (((p).has_value () ? "" : p.error ().message));
+      REQUIRE ((p).has_value ());
+      formats ((p).value ());
     }
 }
 TEST_CASE ("owning pipeline integrates inlining relocations and seeded jump interactions") {
@@ -337,12 +340,12 @@ TEST_CASE ("owning pipeline integrates inlining relocations and seeded jump inte
     CAPTURE (text);
     auto source = parse (text);
     auto p = optimize (*source);
-    INFO ((p ? "" : p.error ().message));
-    REQUIRE (p);
+    INFO (((p).has_value () ? "" : p.error ().message));
+    REQUIRE ((p).has_value ());
     for (auto &m : source->modules ())
       for (auto &f : m.functions ())
-        CHECK (p->find_function (m.name (), f.symbol ().name ()) != nullptr);
+        CHECK (p.value ().find_function (m.name (), f.symbol ().name ()).get () != nullptr);
     source.reset ();
-    formats (*p);
+    formats ((p).value ());
   }
 }

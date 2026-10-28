@@ -1,5 +1,6 @@
+#include "mirnext/CodeGen/Access.hpp"
 /* MIR spill generation, Copyright (C) 2018-2024 Vladimir Makarov. MIT License. */
-#include "mirnext/CodeGen/Detail/SpillEmitter.hpp"
+#include "mirnext/CodeGen/SpillEmitter.hpp"
 #include "mirnext/Target/X86ABI.hpp"
 #include <array>
 #include <climits>
@@ -34,10 +35,10 @@ Result<std::int64_t> MachineSpillEmitter::offset (StackLocation slot, Type type,
     auto disp
       = target::x86_spill_displacement (f.target ().abi (), f.state ().requires_frame_pointer,
                                         f.signature ().variadic, type, slot.offset);
-    if (!disp) return invalid (disp.error ().message);
-    if (*disp > INT64_MAX - static_cast<std::int64_t> (extra))
+    if (!(disp).has_value ()) return invalid (disp.error ().message);
+    if ((disp).value () > INT64_MAX - static_cast<std::int64_t> (extra))
       return invalid ("stack displacement overflow");
-    auto value = *disp + static_cast<std::int64_t> (extra);
+    auto value = (disp).value () + static_cast<std::int64_t> (extra);
     if (!valid_offset (f.target ().architecture (), type, value))
       return invalid ("stack displacement exceeds x86 signed 32-bit addressing");
     return value;
@@ -63,16 +64,14 @@ Result<void> MachineSpillEmitter::access (StackLocation slot, Type type,
                                           MachineBasicBlock &block, MachineInstruction *anchor,
                                           bool after, bool store) {
   auto disp = offset (slot, type);
-  if (!disp) return disp.error ();
-  const bool direct = valid_offset (f.target ().architecture (), type, *disp);
+  if (!(disp).has_value ()) return disp.error ();
+  const bool direct = valid_offset (f.target ().architecture (), type, (disp).value ());
   auto stack_base = base ();
-  MachineOperand memory (MachineMemory{type,
-                                       MachineRegister (direct ? stack_base : address),
-                                       {},
-                                       direct ? *disp : 0,
-                                       1,
-                                       {},
-                                       {}});
+  MachineOperand memory (
+    detail::NodeAccess::make_MachineMemory (type,
+                                            detail::NodeAccess::make_MachineRegister (
+                                              direct ? stack_base : address),
+                                            {}, direct ? (disp).value () : 0, 1, {}, {}));
   auto move = type.kind () == K::F32          ? Opcode::FMov
               : type.kind () == K::F64        ? Opcode::DMov
               : type.kind () == K::LongDouble ? Opcode::LDMov
@@ -85,19 +84,23 @@ Result<void> MachineSpillEmitter::access (StackLocation slot, Type type,
   std::array<Emission, 3> code;
   std::size_t count = 0;
   if (!direct) {
-    code[count++] = {Opcode::Mov, {MachineOperand (address), MachineOperand (*disp)}};
-    code[count++]
-      = {Opcode::Add,
-         {MachineOperand (address), MachineOperand (address), MachineOperand (stack_base)}};
+    code[count++] = {Opcode::Mov,
+                     {detail::NodeAccess::make_MachineOperand (address),
+                      detail::NodeAccess::make_MachineOperand ((disp).value ())}};
+    code[count++] = {Opcode::Add,
+                     {detail::NodeAccess::make_MachineOperand (address),
+                      detail::NodeAccess::make_MachineOperand (address),
+                      detail::NodeAccess::make_MachineOperand (stack_base)}};
   }
-  code[count++] = {move, store ? std::vector{memory, MachineOperand (data)}
-                               : std::vector{MachineOperand (data), memory}};
+  code[count++]
+    = {move, store ? std::vector{memory, detail::NodeAccess::make_MachineOperand (data)}
+                   : std::vector{detail::NodeAccess::make_MachineOperand (data), memory}};
   if (anchor && after) std::reverse (code.begin (), code.begin () + count);
   for (auto &i : std::span (code.data (), count)) {
     auto r = !anchor ? rw.append (block, i.code, std::move (i.operands))
              : after ? rw.insert_after (*anchor, i.code, std::move (i.operands))
                      : rw.insert_before (*anchor, i.code, std::move (i.operands));
-    if (!r) return invalid (r.error ().message);
+    if (!(r).has_value ()) return invalid (r.error ().message);
   }
   return {};
 }
@@ -107,7 +110,8 @@ Result<void> MachineSpillEmitter::preserve (const MachineVirtualRegister *r,
   auto &a = result.allocation_;
   auto index = a.virtuals_.find (r);
   if (index == a.virtuals_.end ()) return invalid ("foreign preserved register");
-  auto p = std::get_if<target::PhysicalRegister> (&a.locations_[index->second]);
+  auto p = std::get_if<target::PhysicalRegister> (
+    detail::NodeAccess::storage (&a.locations_[index->second]));
   if (!p) return invalid ("preserved register is not assigned to hardware");
   auto found = result.spill_slots_.find (r);
   if (found == result.spill_slots_.end ()) {

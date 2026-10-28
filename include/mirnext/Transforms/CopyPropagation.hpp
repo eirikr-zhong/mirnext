@@ -5,6 +5,6 @@ namespace mirnext::transforms {
 class CopyPropagationPass final : public FunctionPass {
  public:
   std::string_view name () const noexcept override { return "copy-propagation"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 };
 }  // namespace mirnext::transforms

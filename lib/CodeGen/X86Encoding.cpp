@@ -1,3 +1,5 @@
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/IR/Access.hpp"
 /* MIR encoding rules, Copyright (C) 2018-2024 Vladimir Makarov. MIT License. */
 #include "mirnext/CodeGen/Detail/X86Encoding.hpp"
 #include "mirnext/CodeGen/Detail/CompiledFunction.hpp"
@@ -11,8 +13,9 @@ namespace {
 using ir::Opcode;
 using R = target::X86Register;
 std::optional<std::uint64_t> integer (const MachineOperand &o) {
-  if (auto n = o.get<std::int64_t> ()) return std::bit_cast<std::uint64_t> (*n);
-  if (auto n = o.get<std::uint64_t> ()) return *n;
+  if (auto n = detail::operand_access (o).get<std::int64_t> ())
+    return std::bit_cast<std::uint64_t> (*n);
+  if (auto n = detail::operand_access (o).get<std::uint64_t> ()) return *n;
   return {};
 }
 }  // namespace
@@ -88,7 +91,8 @@ struct X86EncodingEngine {
       options (std::move (options)),
       result (std::string (f.module_name ()), std::string (f.name ()), f.target ().architecture (),
               frame.layout ()) {
-    aligned.insert (frame.aligned_loop_labels ().begin (), frame.aligned_loop_labels ().end ());
+    aligned.insert (ir::detail::ReferenceAccess::pointers (frame.aligned_loop_labels ()).begin (),
+                    ir::detail::ReferenceAccess::pointers (frame.aligned_loop_labels ()).end ());
   }
   Error invalid (std::string why) const {
     return {ErrorCode::InvalidOperand,
@@ -102,37 +106,40 @@ struct X86EncodingEngine {
     for (unsigned n = 0; n < size; ++n, value >>= 8) result.bytes_[at + n] = value & 255;
   }
   Result<unsigned> physical (const MachineOperand &o) const {
-    auto r = o.get<target::PhysicalRegister> ();
+    auto r = detail::operand_access (o).get<target::PhysicalRegister> ();
     if (!r || r->architecture () != target::Architecture::X86_64 || r->encoding () >= 32)
       return invalid ("expected allocated x86 register");
     return r->encoding ();
   }
   Result<std::uint64_t> resolve (const MachineOperand &operand) {
     if (auto n = integer (operand)) return *n;
-    auto symbol = operand.get<MachineSymbolReference> ();
-    auto builtin = operand.get<BuiltinReference> ();
+    auto symbol = detail::operand_access (operand).get<MachineSymbolReference> ();
+    auto builtin = detail::operand_access (operand).get<BuiltinReference> ();
     if ((!symbol && !builtin) || !options.known_addresses) return invalid ("unresolved immediate");
     for (auto &v : known)
       if (v.operand == operand) return v.value;
-    auto r = options.known_addresses ({symbol ? symbol->symbol : nullptr,
-                                       builtin ? std::optional (builtin->builtin) : std::nullopt});
-    if (!r) {
+    auto r = options.known_addresses (
+      CodeSymbolRequest (::mirnext::detail::borrow_optional (
+                           symbol ? detail::NodeAccess::symbol (*(symbol)) : nullptr),
+                         builtin ? std::optional (builtin->builtin) : std::nullopt));
+    if (!(r).has_value ()) {
       auto error = invalid (r.error ().message);
       error.code = r.error ().code;
       return error;
     }
-    auto value = *r + (symbol ? std::bit_cast<std::uint64_t> (symbol->displacement) : 0);
+    auto value = (r).value () + (symbol ? std::bit_cast<std::uint64_t> (symbol->displacement) : 0);
     known.push_back ({operand, value});
     return value;
   }
   Result<void> relocation (const MachineOperand &operand, std::size_t offset) {
-    auto symbol = operand.get<MachineSymbolReference> ();
-    auto builtin = operand.get<BuiltinReference> ();
+    auto symbol = detail::operand_access (operand).get<MachineSymbolReference> ();
+    auto builtin = detail::operand_access (operand).get<BuiltinReference> ();
     if (!symbol && !builtin) return invalid ("invalid symbolic immediate");
-    result.relocations_.push_back ({CodeRelocation::Kind::AbsoluteSymbol, offset, 0,
-                                    symbol ? std::optional (*symbol->symbol) : std::nullopt,
-                                    builtin ? std::optional (builtin->builtin) : std::nullopt,
-                                    symbol ? symbol->displacement : 0});
+    result.relocations_.push_back (
+      {CodeRelocation::Kind::AbsoluteSymbol, offset, 0,
+       symbol ? std::optional (*detail::NodeAccess::symbol (*(symbol))) : std::nullopt,
+       builtin ? std::optional (builtin->builtin) : std::nullopt,
+       symbol ? symbol->displacement : 0});
     return {};
   }
   Result<void> normalize (Prepared &p) {
@@ -141,15 +148,16 @@ struct X86EncodingEngine {
       if (auto n = integer (ops[1])) {
         if (*n > std::uint64_t (INT64_MAX) - 15)
           return invalid ("stack allocation roundup overflow");
-        p.change (1, MachineOperand ((*n + 15) & ~std::uint64_t{15}));
+        p.change (1, detail::NodeAccess::make_MachineOperand ((*n + 15) & ~std::uint64_t{15}));
       }
     if (options.known_addresses)
       for (std::size_t n = 0; n < ops.size (); ++n) {
         if (n == 0 && p.instruction->has_lowered_call ()) continue;
-        if (ops[n].get<MachineSymbolReference> () || ops[n].get<BuiltinReference> ()) {
+        if (detail::operand_access (ops[n]).get<MachineSymbolReference> ()
+            || detail::operand_access (ops[n]).get<BuiltinReference> ()) {
           auto r = resolve (ops[n]);
-          if (!r) return r.error ();
-          p.change (n, MachineOperand (*r));
+          if (!(r).has_value ()) return r.error ();
+          p.change (n, detail::NodeAccess::make_MachineOperand ((r).value ()));
         }
       }
     return {};
@@ -191,19 +199,19 @@ struct X86EncodingEngine {
         if (mod || rm || scale || index || base || disp_size)
           return invalid ("duplicate address fields");
         auto a = encode_x86_address (b, i, d, s);
-        if (!a) return invalid (a.error ().message);
-        mod = a->mod;
-        rm = a->rm;
-        if (a->rex_b) rex |= 1;
-        if (a->rex_x) rex |= 2;
-        if (a->sib) {
-          scale = a->scale;
-          index = a->index;
-          base = a->base;
+        if (!(a).has_value ()) return invalid (a.error ().message);
+        mod = a.value ().mod;
+        rm = a.value ().rm;
+        if (a.value ().rex_b) rex |= 1;
+        if (a.value ().rex_x) rex |= 2;
+        if (a.value ().sib) {
+          scale = a.value ().scale;
+          index = a.value ().index;
+          base = a.value ().base;
         }
-        if (a->displacement_bytes) {
-          disp_size = a->displacement_bytes;
-          disp = a->displacement;
+        if (a.value ().displacement_bytes) {
+          disp_size = a.value ().displacement_bytes;
+          disp = a.value ().displacement;
         }
         return {};
       };
@@ -229,9 +237,9 @@ struct X86EncodingEngine {
         case K::ByteRegisterRM:
         case K::OpcodeRegister: {
           auto r = number (n);
-          if (!r) return r.error ();
-          auto v
-            = encoded_reg (*r, field.kind == K::Register ? 4 : 1, field.kind == K::ByteRegisterRM);
+          if (!(r).has_value ()) return r.error ();
+          auto v = encoded_reg ((r).value (), field.kind == K::Register ? 4 : 1,
+                                field.kind == K::ByteRegisterRM);
           if (field.kind == K::Register)
             reg = v;
           else if (field.kind == K::OpcodeRegister)
@@ -251,41 +259,43 @@ struct X86EncodingEngine {
         case K::Extension: reg = n; break;
         case K::Memory: {
           auto o = operand (n);
-          auto m = o ? o->get<MachineMemory> () : nullptr;
+          auto m = o ? detail::operand_access (*(o)).get<MachineMemory> () : nullptr;
           if (!m) return invalid ("missing memory operand");
           std::optional<R> b, i;
           if (m->base) {
-            auto r = std::get_if<target::PhysicalRegister> (&*m->base);
+            auto r
+              = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&*m->base));
             if (!r) return invalid ("unallocated address base");
             b = static_cast<R> (r->encoding ());
           }
           if (m->index) {
-            auto r = std::get_if<target::PhysicalRegister> (&*m->index);
+            auto r
+              = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&*m->index));
             if (!r) return invalid ("unallocated address index");
             i = static_cast<R> (r->encoding ());
           }
           auto r = memory (b, i, m->displacement, m->scale);
-          if (!r) return r.error ();
+          if (!(r).has_value ()) return r.error ();
           break;
         }
         case K::TemporaryMemory: {
           auto r = memory (R::SP, {}, -16, 1);
-          if (!r) return r.error ();
+          if (!(r).has_value ()) return r.error ();
           break;
         }
         case K::SwitchMemory: {
           auto r = number (0);
-          if (!r) return r.error ();
-          auto a = memory (R::R11, static_cast<R> (*r), 0, 8);
-          if (!a) return a.error ();
+          if (!(r).has_value ()) return r.error ();
+          auto a = memory (R::R11, static_cast<R> ((r).value ()), 0, 8);
+          if (!(a).has_value ()) return a.error ();
           break;
         }
         case K::AddressAdd:
         case K::AddressDisplacement:
         case K::AddressScale: {
           auto r = number (1);
-          if (!r) return r.error ();
-          std::optional<R> b = static_cast<R> (*r), i;
+          if (!(r).has_value ()) return r.error ();
+          std::optional<R> b = static_cast<R> ((r).value ()), i;
           std::int64_t d = 0;
           unsigned s = 1;
           if (field.kind == K::AddressDisplacement)
@@ -300,10 +310,10 @@ struct X86EncodingEngine {
               s = *v;
               i = b;
               b.reset ();
-            } else if (o->get<target::PhysicalRegister> ()) {
+            } else if (detail::operand_access (*(o)).get<target::PhysicalRegister> ()) {
               auto r = physical (*o);
-              if (!r) return r.error ();
-              i = static_cast<R> (*r);
+              if (!(r).has_value ()) return r.error ();
+              i = static_cast<R> ((r).value ());
             } else {
               auto v = integer (*o);
               if (!v) return invalid ("noninteger address displacement");
@@ -311,7 +321,7 @@ struct X86EncodingEngine {
             }
           }
           auto a = memory (b, i, d, s);
-          if (!a) return a.error ();
+          if (!(a).has_value ()) return a.error ();
           break;
         }
         case K::Immediate8:
@@ -346,7 +356,7 @@ struct X86EncodingEngine {
         case K::Label8:
         case K::Label32: {
           auto o = operand (n);
-          auto l = o ? o->get<const MachineLabel *> () : nullptr;
+          auto l = o ? detail::operand_access (*(o)).get<const MachineLabel *> () : nullptr;
           if (!l || label || disp_size) return invalid ("invalid label field");
           label = *l;
           label_operand = n;
@@ -354,7 +364,7 @@ struct X86EncodingEngine {
           break;
         }
         case K::PoolConstant:
-          literal = MachineOperand (n);
+          literal = detail::NodeAccess::make_MachineOperand (n);
           constant = &literal;
           mod = 0;
           rm = 5;
@@ -385,7 +395,7 @@ struct X86EncodingEngine {
       if (imm_size) {
         if (symbolic_imm) {
           auto r = relocation (*symbolic_imm, result.bytes_.size ());
-          if (!r) return r.error ();
+          if (!(r).has_value ()) return r.error ();
         }
         put (imm, *imm_size);
       }
@@ -406,7 +416,7 @@ struct X86EncodingEngine {
       if (displacement > INT32_MAX) return invalid ("switch table too far");
       set (*table_at, displacement, 4);
       for (std::size_t n = 1; n < ops.size (); ++n) {
-        auto l = ops[n].get<const MachineLabel *> ();
+        auto l = detail::operand_access (ops[n]).get<const MachineLabel *> ();
         if (!l) return invalid ("invalid switch target");
         labels.push_back ({*l, result.bytes_.size (), 0, 8, n});
         put (0, 8);
@@ -418,7 +428,7 @@ struct X86EncodingEngine {
     prepared.reserve (f.instruction_count ());
     std::size_t estimate = 0;
     for (auto &b : f.blocks ()) {
-      for (auto l : b.labels ()) {
+      for (auto l : ir::detail::ReferenceAccess::pointers (b.labels ())) {
         if (aligned.contains (l)) estimate += 8;
         offsets.emplace (l, estimate);
       }
@@ -427,7 +437,7 @@ struct X86EncodingEngine {
         prepared.push_back ({&i, {}});
         auto &p = prepared.back ();
         auto normalized = normalize (p);
-        if (!normalized) return normalized.error ();
+        if (!(normalized).has_value ()) return normalized.error ();
         auto selected
           = x86_instruction_pattern (i.opcode (), p.operands (), {.allow_short_branches = false});
         if (!selected)
@@ -453,7 +463,7 @@ struct X86EncodingEngine {
                                       {0x0f, 0x1f, 0x80, 0, 0, 0, 0}};
     std::size_t instruction_index = 0;
     for (auto &b : f.blocks ()) {
-      for (auto l : b.labels ()) {
+      for (auto l : ir::detail::ReferenceAccess::pointers (b.labels ())) {
         if (aligned.contains (l)) {
           auto size = (8 - result.bytes_.size () % 8) % 8;
           for (std::size_t n = 0; n < size; ++n) put (nops[size][n], 1);
@@ -467,10 +477,12 @@ struct X86EncodingEngine {
         auto code = i.opcode ();
         auto op = std::get_if<Opcode> (&code);
         if (op
-            && (ir::instruction_descriptor (*op)->flow == ir::ControlFlow::Branch
+            && (ir::instruction_descriptor (*op).get ()->flow == ir::ControlFlow::Branch
                 || *op == Opcode::Jmp)) {
           auto operands = p.operands ();
-          auto l = operands.empty () ? nullptr : operands[0].get<const MachineLabel *> ();
+          auto l = operands.empty ()
+                     ? nullptr
+                     : detail::operand_access (operands[0]).get<const MachineLabel *> ();
           if (!l) return invalid ("branch has no label");
           auto selected
             = x86_instruction_pattern (i.opcode (), operands,
@@ -484,7 +496,7 @@ struct X86EncodingEngine {
           pattern = selected->index;
         }
         auto r = instruction (p, pattern);
-        if (!r) return r.error ();
+        if (!(r).has_value ()) return r.error ();
       }
     }
     for (auto &r : labels) {
@@ -503,7 +515,7 @@ struct X86EncodingEngine {
       }
     }
     auto finished = finish_pool ();
-    if (!finished) return finished.error ();
+    if (!(finished).has_value ()) return finished.error ();
     for (auto &l : f.labels ())
       result.labels_.push_back ({std::string (l.name ()), offsets.at (&l), l.source_ordinal ()});
     return ArtifactBuilder::finish (std::move (result));
@@ -518,7 +530,7 @@ struct X86EncodingEngine {
         put (*n, 8);
       else {
         auto status = relocation (r.value, at);
-        if (!status) return status.error ();
+        if (!(status).has_value ()) return status.error ();
         put (0, 8);
       }
       put (0, 8);
@@ -527,16 +539,16 @@ struct X86EncodingEngine {
     return {};
   }
   Result<CompiledBlock> run_block (const BBVVersion &version) {
-    const auto &plan = *version.specialization ();
+    const auto &plan = *version.specialization ().get ();
     BlockTargets targets (plan);
     std::vector<BlockRelocation> successors;
     for (auto &emission : plan.emissions ()) {
-      auto &i = *emission.instruction;
+      auto &i = *detail::NodeAccess::instruction (emission);
       Prepared p{&i, {}};
       if (emission.opcode != i.opcode ())
         p.normalized.emplace (i.operands ().begin (), i.operands ().begin () + 1);
       auto normalized = normalize (p);
-      if (!normalized) return normalized.error ();
+      if (!(normalized).has_value ()) return normalized.error ();
       // BBV targets live in separately published blocks. Match MIR's forced
       // rel32 selection, never whole-function branch shortening or alignment.
       auto selected
@@ -545,15 +557,15 @@ struct X86EncodingEngine {
         return invalid ("no BBV encoding for " + std::string (opcode_name (emission.opcode)));
       auto start = labels.size ();
       auto status = instruction (p, selected->index);
-      if (!status) return status.error ();
+      if (!(status).has_value ()) return status.error ();
       for (std::size_t n = start; n < labels.size (); ++n) {
         auto &r = labels[n];
         if (r.size != 4 && r.size != 8) return invalid ("short branch in BBV artifact");
         auto target = targets.find (&i, r.operand);
-        if (!target) return target.error ();
+        if (!(target).has_value ()) return target.error ();
         successors.push_back ({r.size == 8 ? BlockRelocation::Kind::AbsoluteAddress
                                            : BlockRelocation::Kind::X86Relative32,
-                               r.offset, r.next, *target});
+                               r.offset, r.next, (target).value ()});
       }
     }
     for (auto &edge : plan.successors ())
@@ -561,16 +573,17 @@ struct X86EncodingEngine {
         put (0xe9, 1);
         auto at = result.bytes_.size ();
         put (0, 4);
-        successors.push_back (
-          {BlockRelocation::Kind::X86Relative32, at, result.bytes_.size (), edge.version->id ()});
+        successors.push_back ({BlockRelocation::Kind::X86Relative32, at, result.bytes_.size (),
+                               detail::NodeAccess::version (edge)->id ()});
       }
     auto finished = finish_pool ();
-    if (!finished) return finished.error ();
-    for (auto label : version.block ().labels ())
+    if (!(finished).has_value ()) return finished.error ();
+    for (auto label : ir::detail::ReferenceAccess::pointers (version.block ().labels ()))
       result.labels_.push_back ({std::string (label->name ()), 0, label->source_ordinal ()});
     auto code = ArtifactBuilder::finish (std::move (result));
-    if (!code) return code.error ();
-    return BlockArtifactBuilder::finish (version.id (), std::move (*code), std::move (successors));
+    if (!(code).has_value ()) return code.error ();
+    return BlockArtifactBuilder::finish (version.id (), std::move ((code).value ()),
+                                         std::move (successors));
   }
 };
 Result<CompiledFunction> encode_x86 (const MachineFunction &f, const MachineFrameResult &frame,

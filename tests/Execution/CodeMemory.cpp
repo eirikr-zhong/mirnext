@@ -77,37 +77,38 @@ TEST_CASE ("owning code memory batches aligned slots and rounds pages without un
   CodeMemory memory (p);
   std::array<std::size_t, 3> sizes{1, 17, 16};
   auto r = memory.reserve (sizes);
-  REQUIRE (r);
-  CHECK (r->size () == 3);
-  auto a = r->address (0), b = r->address (1), c = r->address (2);
-  REQUIRE (a);
-  REQUIRE (b);
-  REQUIRE (c);
-  CHECK (*a % 4096 == 0);
-  CHECK (*b == *a + 16);
-  CHECK (*c == *a + 48);
+  REQUIRE ((r).has_value ());
+  CHECK (r.value ().size () == 3);
+  auto a = r.value ().address (0), b = r.value ().address (1), c = r.value ().address (2);
+  REQUIRE ((a).has_value ());
+  REQUIRE ((b).has_value ());
+  REQUIRE ((c).has_value ());
+  CHECK ((a).value () % 4096 == 0);
+  CHECK ((b).value () == (a).value () + 16);
+  CHECK ((c).value () == (a).value () + 48);
   CHECK (p->last_size == 4096);
-  CHECK_FALSE (r->address (3));
+  CHECK_FALSE ((r.value ().address (3)).has_value ());
   CHECK (p->writes == 0);
   CHECK (p->seals == 0);
   std::array<std::vector<std::uint8_t>, 3> bytes{std::vector<std::uint8_t> (1, 0xa1),
                                                  std::vector<std::uint8_t> (17, 0xb2),
                                                  std::vector<std::uint8_t> (16, 0xc3)};
   std::array<std::span<const std::uint8_t>, 3> buffers{bytes[0], bytes[1], bytes[2]};
-  auto published = r->publish (buffers);
-  REQUIRE (published);
-  CHECK (r->size () == 0);
-  CHECK_FALSE (r->address (0));
-  CHECK_FALSE (r->publish (buffers));
+  auto published = r.value ().publish (buffers);
+  REQUIRE ((published).has_value ());
+  CHECK (r.value ().size () == 0);
+  CHECK_FALSE ((r.value ().address (0)).has_value ());
+  CHECK_FALSE ((r.value ().publish (buffers)).has_value ());
   CHECK (p->events == std::vector<std::string>{"allocate", "write", "seal", "flush"});
   for (std::size_t n = 0; n < sizes.size (); ++n) {
-    CHECK ((*published)[n].bytes ().size () == sizes[n]);
-    CHECK ((*published)[n].address () % 16 == 0);
-    CHECK (std::equal (bytes[n].begin (), bytes[n].end (), (*published)[n].bytes ().begin ()));
+    CHECK (((published).value ())[n].bytes ().size () == sizes[n]);
+    CHECK (((published).value ())[n].address () % 16 == 0);
+    CHECK (
+      std::equal (bytes[n].begin (), bytes[n].end (), ((published).value ())[n].bytes ().begin ()));
   }
   std::size_t exact = 4096;
   auto page = memory.reserve ({&exact, 1});
-  REQUIRE (page);
+  REQUIRE ((page).has_value ());
   CHECK (p->last_size == 4096);
 }
 TEST_CASE ("owning code handles retain their mapping and provider beyond all producer lifetimes") {
@@ -118,15 +119,15 @@ TEST_CASE ("owning code handles retain their mapping and provider beyond all pro
     CodeMemory memory (provider);
     std::array<std::size_t, 2> sizes{4, 4};
     auto r = memory.reserve (sizes);
-    REQUIRE (r);
-    auto moved = std::move (*r);
-    CHECK (r->size () == 0);
-    CHECK_FALSE (r->address (0));
+    REQUIRE ((r).has_value ());
+    auto moved = std::move ((r).value ());
+    CHECK (r.value ().size () == 0);
+    CHECK_FALSE ((r.value ().address (0)).has_value ());
     std::array<std::uint8_t, 4> data{1, 2, 3, 4};
     std::array<std::span<const std::uint8_t>, 2> buffers{data, data};
     auto batch = moved.publish (buffers);
-    REQUIRE (batch);
-    code = (*batch)[1];
+    REQUIRE ((batch).has_value ());
+    code = ((batch).value ())[1];
   }
   CHECK (provider->releases == 0);
   provider.reset ();
@@ -142,19 +143,19 @@ TEST_CASE ("owning code handles retain their mapping and provider beyond all pro
 TEST_CASE ("owning code reservations reject malformed sizes and mapping results before writing") {
   auto p = std::make_shared<Provider> ();
   CodeMemory memory (p);
-  CHECK_FALSE (memory.reserve ({}));
-  CHECK_FALSE (CodeMemory (nullptr).reserve ({}));
+  CHECK_FALSE ((memory.reserve ({})).has_value ());
+  CHECK_FALSE ((CodeMemory (nullptr).reserve ({})).has_value ());
   for (auto size : {std::size_t{0}, SIZE_MAX, SIZE_MAX - 14}) {
-    CHECK_FALSE (memory.reserve ({&size, 1}));
+    CHECK_FALSE ((memory.reserve ({&size, 1})).has_value ());
     CHECK (p->allocations == 0);
   }
   std::array<std::size_t, 2> overflow{SIZE_MAX - 4095, 4096};
-  CHECK_FALSE (memory.reserve (overflow));
+  CHECK_FALSE ((memory.reserve (overflow)).has_value ());
   CHECK (p->allocations == 0);
   for (std::size_t page : {0u, 31u}) {
     p->page = page;
     std::size_t size = 1;
-    CHECK_FALSE (memory.reserve ({&size, 1}));
+    CHECK_FALSE ((memory.reserve ({&size, 1})).has_value ());
     CHECK (p->allocations == 0);
   }
   p->page = 4096;
@@ -163,7 +164,7 @@ TEST_CASE ("owning code reservations reject malformed sizes and mapping results 
     p->bad_size = kind == 1;
     p->bad_alignment = kind == 2;
     std::size_t size = 16;
-    CHECK_FALSE (memory.reserve ({&size, 1}));
+    CHECK_FALSE ((memory.reserve ({&size, 1})).has_value ());
     CHECK (p->writes == 0);
   }
   CHECK (p->releases == 2);
@@ -173,19 +174,19 @@ TEST_CASE ("owning publication validates the entire batch before touching code")
   CodeMemory memory (p);
   std::array<std::size_t, 2> sizes{4, 4};
   auto r = memory.reserve (sizes);
-  REQUIRE (r);
-  auto before = r->address (0);
-  REQUIRE (before);
+  REQUIRE ((r).has_value ());
+  auto before = r.value ().address (0);
+  REQUIRE ((before).has_value ());
   std::array<std::uint8_t, 4> data{1, 2, 3, 4};
   std::array<std::span<const std::uint8_t>, 2> buffers{data, std::span (data).first (3)};
-  CHECK_FALSE (r->publish (buffers));
-  CHECK_FALSE (r->publish (std::span (buffers).first (1)));
+  CHECK_FALSE ((r.value ().publish (buffers)).has_value ());
+  CHECK_FALSE ((r.value ().publish (std::span (buffers).first (1))).has_value ());
   CHECK (p->writes == 0);
-  auto bytes = reinterpret_cast<const std::uint8_t *> (*before);
+  auto bytes = reinterpret_cast<const std::uint8_t *> ((before).value ());
   CHECK (std::all_of (bytes, bytes + 20, [] (auto v) { return v == 0; }));
   buffers[1] = data;
-  auto code = r->publish (buffers);
-  REQUIRE (code);
+  auto code = r.value ().publish (buffers);
+  REQUIRE ((code).has_value ());
   CHECK (p->writes == 1);
 }
 TEST_CASE (
@@ -195,9 +196,9 @@ TEST_CASE (
     CodeMemory memory (p);
     std::size_t size = 4;
     auto r = memory.reserve ({&size, 1});
-    REQUIRE (r);
-    auto address = r->address (0);
-    REQUIRE (address);
+    REQUIRE ((r).has_value ());
+    auto address = r.value ().address (0);
+    REQUIRE ((address).has_value ());
     if (!kind)
       p->fail_write = 1;
     else if (kind == 1)
@@ -206,15 +207,15 @@ TEST_CASE (
       p->fail_flush = 1;
     std::array<std::uint8_t, 4> data{1, 2, 3, 4};
     std::span<const std::uint8_t> buffer = data;
-    auto failed = r->publish ({&buffer, 1});
-    REQUIRE_FALSE (failed);
+    auto failed = r.value ().publish ({&buffer, 1});
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK (failed.error ().message.find ("injected") != std::string::npos);
     CHECK_FALSE (p->writable);
-    CHECK (r->size () == 1);
-    CHECK (*r->address (0) == *address);
-    auto code = r->publish ({&buffer, 1});
-    REQUIRE (code);
-    CHECK ((*code)[0].address () == *address);
+    CHECK (r.value ().size () == 1);
+    CHECK ((r.value ().address (0)).value () == (address).value ());
+    auto code = r.value ().publish ({&buffer, 1});
+    REQUIRE ((code).has_value ());
+    CHECK (((code).value ())[0].address () == (address).value ());
     CHECK (p->allocations == 1);
   }
 }
@@ -224,8 +225,8 @@ TEST_CASE ("abandoned owning code reservations release unpublished pages exactly
     CodeMemory memory (p);
     std::size_t size = 16;
     auto r = memory.reserve ({&size, 1});
-    REQUIRE (r);
-    auto moved = std::move (*r);
+    REQUIRE ((r).has_value ());
+    auto moved = std::move ((r).value ());
     CHECK (p->releases == 0);
   }
   CHECK (p->allocations == 1);
@@ -239,11 +240,11 @@ TEST_CASE ("native immutable code batches execute after service destruction") {
     auto first = scalar (17), second = scalar (42);
     std::array<std::size_t, 2> sizes{first.size (), second.size ()};
     auto r = memory.reserve (sizes);
-    REQUIRE (r);
+    REQUIRE ((r).has_value ());
     std::array<std::span<const std::uint8_t>, 2> buffers{first, second};
-    auto code = r->publish (buffers);
-    REQUIRE (code);
-    functions = std::move (*code);
+    auto code = r.value ().publish (buffers);
+    REQUIRE ((code).has_value ());
+    functions = std::move ((code).value ());
   }
   CHECK (reinterpret_cast<int (*) ()> (functions[0].address ()) () == 17);
   CHECK (reinterpret_cast<int (*) ()> (functions[1].address ()) () == 42);
@@ -259,17 +260,17 @@ TEST_CASE ("native independent code batches publish concurrently without reopeni
         auto bytes = scalar (n);
         std::size_t size = bytes.size ();
         auto r = memory.reserve ({&size, 1});
-        if (!r) {
+        if (!(r).has_value ()) {
           ++failures;
           continue;
         }
         std::span<const std::uint8_t> buffer = bytes;
-        auto result = r->publish ({&buffer, 1});
-        if (!result) {
+        auto result = r.value ().publish ({&buffer, 1});
+        if (!(result).has_value ()) {
           ++failures;
           continue;
         }
-        code[n] = std::move ((*result)[0]);
+        code[n] = std::move (((result).value ())[0]);
       }
     });
   for (auto &w : workers) w.join ();
@@ -282,35 +283,35 @@ TEST_CASE ("native independent code batches publish concurrently without reopeni
 TEST_CASE ("owning code arenas reserve stable disjoint page batches and publish in any order") {
   auto p = std::make_shared<Provider> ();
   auto arena = CodeArena::create (3 * 4096, p);
-  REQUIRE (arena);
+  REQUIRE ((arena).has_value ());
   CHECK (p->allocations == 1);
-  CHECK (arena->capacity () == 3 * 4096);
-  CHECK (arena->remaining () == arena->capacity ());
+  CHECK (arena.value ().capacity () == 3 * 4096);
+  CHECK (arena.value ().remaining () == arena.value ().capacity ());
   std::array<std::size_t, 2> sizes{4, 17};
-  auto first = arena->reserve (sizes);
-  REQUIRE (first);
+  auto first = arena.value ().reserve (sizes);
+  REQUIRE ((first).has_value ());
   std::size_t size = 4;
-  auto second = arena->reserve ({&size, 1});
-  REQUIRE (second);
-  CHECK (*first->address (0) == arena->address ());
-  CHECK (*first->address (1) == arena->address () + 16);
-  CHECK (*second->address (0) == arena->address () + 4096);
-  CHECK (arena->remaining () == 4096);
+  auto second = arena.value ().reserve ({&size, 1});
+  REQUIRE ((second).has_value ());
+  CHECK ((first.value ().address (0)).value () == arena.value ().address ());
+  CHECK ((first.value ().address (1)).value () == arena.value ().address () + 16);
+  CHECK ((second.value ().address (0)).value () == arena.value ().address () + 4096);
+  CHECK (arena.value ().remaining () == 4096);
   CHECK (p->writes == 0);
   CHECK (p->allocations == 1);
-  auto moved = std::move (*arena);
-  CHECK (arena->capacity () == 0);
-  CHECK (arena->remaining () == 0);
-  CHECK (arena->address () == 0);
-  CHECK_FALSE (arena->reserve ({&size, 1}));
+  auto moved = std::move ((arena).value ());
+  CHECK (arena.value ().capacity () == 0);
+  CHECK (arena.value ().remaining () == 0);
+  CHECK (arena.value ().address () == 0);
+  CHECK_FALSE ((arena.value ().reserve ({&size, 1})).has_value ());
   std::vector<std::uint8_t> a (4, 0xa1), b (17, 0xb2);
   std::span<const std::uint8_t> view = a;
-  auto later = second->publish ({&view, 1});
-  REQUIRE (later);
+  auto later = second.value ().publish ({&view, 1});
+  REQUIRE ((later).has_value ());
   CHECK (p->written.back ().data == reinterpret_cast<std::uint8_t *> (moved.address () + 4096));
   const std::array<std::span<const std::uint8_t>, 2> buffers{a, b};
-  auto earlier = first->publish (buffers);
-  REQUIRE (earlier);
+  auto earlier = first.value ().publish (buffers);
+  REQUIRE ((earlier).has_value ());
   CHECK (p->writes == 2);
   CHECK (p->seals == 2);
   CHECK (p->flushes == 2);
@@ -323,15 +324,15 @@ TEST_CASE ("owning code arenas reserve stable disjoint page batches and publish 
     CHECK (p->sealed[n].size == 4096);
     CHECK (p->flushed[n].size == 4096);
   }
-  CHECK_FALSE (first->publish (buffers));
+  CHECK_FALSE ((first.value ().publish (buffers)).has_value ());
   CHECK (p->writes == 2);
   auto third = moved.reserve ({&size, 1});
-  REQUIRE (third);
+  REQUIRE ((third).has_value ());
   CHECK (moved.remaining () == 0);
-  CHECK_FALSE (moved.reserve ({&size, 1}));
+  CHECK_FALSE ((moved.reserve ({&size, 1})).has_value ());
   CHECK (p->allocations == 1);
-  CHECK (std::equal (a.begin (), a.end (), later->front ().bytes ().begin ()));
-  CHECK (std::equal (b.begin (), b.end (), earlier->back ().bytes ().begin ()));
+  CHECK (std::equal (a.begin (), a.end (), later.value ().front ().bytes ().begin ()));
+  CHECK (std::equal (b.begin (), b.end (), earlier.value ().back ().bytes ().begin ()));
 }
 TEST_CASE (
   "owning code arena publication failures retain reservations and never touch other published "
@@ -339,40 +340,40 @@ TEST_CASE (
   for (unsigned kind = 0; kind < 3; ++kind) {
     auto p = std::make_shared<Provider> ();
     auto arena = CodeArena::create (8192, p);
-    REQUIRE (arena);
+    REQUIRE ((arena).has_value ());
     std::size_t size = 4;
-    auto first = arena->reserve ({&size, 1});
-    REQUIRE (first);
+    auto first = arena.value ().reserve ({&size, 1});
+    REQUIRE ((first).has_value ());
     std::array<std::uint8_t, 4> bytes{1, 2, 3, 4};
     std::span<const std::uint8_t> view = bytes;
-    auto old = first->publish ({&view, 1});
-    REQUIRE (old);
-    auto address = old->front ().address ();
-    auto second = arena->reserve ({&size, 1});
-    REQUIRE (second);
-    auto next = second->address (0);
-    REQUIRE (next);
+    auto old = first.value ().publish ({&view, 1});
+    REQUIRE ((old).has_value ());
+    auto address = old.value ().front ().address ();
+    auto second = arena.value ().reserve ({&size, 1});
+    REQUIRE ((second).has_value ());
+    auto next = second.value ().address (0);
+    REQUIRE ((next).has_value ());
     if (!kind)
       p->fail_write = p->writes + 1;
     else if (kind == 1)
       p->fail_seal = p->seals + 1;
     else
       p->fail_flush = p->flushes + 1;
-    auto failed = second->publish ({&view, 1});
-    REQUIRE_FALSE (failed);
+    auto failed = second.value ().publish ({&view, 1});
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK_FALSE (p->writable);
     CHECK (failed.error ().message.find ("injected") != std::string::npos);
-    CHECK (std::equal (bytes.begin (), bytes.end (), old->front ().bytes ().begin ()));
-    CHECK (old->front ().address () == address);
-    auto retried = second->publish ({&view, 1});
-    REQUIRE (retried);
-    CHECK (retried->front ().address () == *next);
+    CHECK (std::equal (bytes.begin (), bytes.end (), old.value ().front ().bytes ().begin ()));
+    CHECK (old.value ().front ().address () == address);
+    auto retried = second.value ().publish ({&view, 1});
+    REQUIRE ((retried).has_value ());
+    CHECK (retried.value ().front ().address () == (next).value ());
     for (std::size_t n = 1; n < p->written.size (); ++n)
-      CHECK (p->written[n].data == reinterpret_cast<std::uint8_t *> (*next));
+      CHECK (p->written[n].data == reinterpret_cast<std::uint8_t *> ((next).value ()));
     for (std::size_t n = 1; n < p->sealed.size (); ++n)
-      CHECK (p->sealed[n].data == reinterpret_cast<std::uint8_t *> (*next));
+      CHECK (p->sealed[n].data == reinterpret_cast<std::uint8_t *> ((next).value ()));
     CHECK (p->allocations == 1);
-    CHECK (arena->remaining () == 0);
+    CHECK (arena.value ().remaining () == 0);
   }
 }
 TEST_CASE (
@@ -380,12 +381,12 @@ TEST_CASE (
   "allocating again") {
   auto p = std::make_shared<Provider> ();
   for (auto size : {std::size_t{0}, SIZE_MAX, SIZE_MAX - 4094})
-    CHECK_FALSE (CodeArena::create (size, p));
-  CHECK_FALSE (CodeArena::create (1, nullptr));
+    CHECK_FALSE ((CodeArena::create (size, p)).has_value ());
+  CHECK_FALSE ((CodeArena::create (1, nullptr)).has_value ());
   CHECK (p->allocations == 0);
   for (auto page : {0u, 31u}) {
     p->page = page;
-    CHECK_FALSE (CodeArena::create (1, p));
+    CHECK_FALSE ((CodeArena::create (1, p)).has_value ());
   }
   CHECK (p->allocations == 0);
   p->page = 4096;
@@ -393,31 +394,31 @@ TEST_CASE (
     p->fail_allocate = !bad ? p->allocations + 1 : 0;
     p->bad_size = bad == 1;
     p->bad_alignment = bad == 2;
-    CHECK_FALSE (CodeArena::create (1, p));
+    CHECK_FALSE ((CodeArena::create (1, p)).has_value ());
   }
   CHECK (p->releases == 2);
   p->bad_size = p->bad_alignment = false;
   std::optional<CodeReservation> retained;
   {
     auto arena = CodeArena::create (4097, p);
-    REQUIRE (arena);
-    CHECK (arena->capacity () == 8192);
-    auto left = arena->remaining ();
-    CHECK_FALSE (arena->reserve ({}));
+    REQUIRE ((arena).has_value ());
+    CHECK (arena.value ().capacity () == 8192);
+    auto left = arena.value ().remaining ();
+    CHECK_FALSE ((arena.value ().reserve ({})).has_value ());
     for (auto size : {std::size_t{0}, SIZE_MAX, SIZE_MAX - 14})
-      CHECK_FALSE (arena->reserve ({&size, 1}));
+      CHECK_FALSE ((arena.value ().reserve ({&size, 1})).has_value ());
     std::size_t huge = 8193;
-    CHECK_FALSE (arena->reserve ({&huge, 1}));
-    CHECK (arena->remaining () == left);
+    CHECK_FALSE ((arena.value ().reserve ({&huge, 1})).has_value ());
+    CHECK (arena.value ().remaining () == left);
     std::size_t size = 16;
     {
-      auto abandoned = arena->reserve ({&size, 1});
-      REQUIRE (abandoned);
+      auto abandoned = arena.value ().reserve ({&size, 1});
+      REQUIRE ((abandoned).has_value ());
     }
-    CHECK (arena->remaining () == 4096);
-    auto r = arena->reserve ({&size, 1});
-    REQUIRE (r);
-    retained.emplace (std::move (*r));
+    CHECK (arena.value ().remaining () == 4096);
+    auto r = arena.value ().reserve ({&size, 1});
+    REQUIRE ((r).has_value ());
+    retained.emplace (std::move ((r).value ()));
     CHECK (p->releases == 2);
   }
   CHECK (p->releases == 2);
@@ -432,21 +433,21 @@ TEST_CASE (
     auto provider = native_code_memory_provider ();
     auto page = provider->page_size ();
     auto arena = CodeArena::create (32 * page, provider);
-    REQUIRE (arena);
-    auto base = arena->address ();
+    REQUIRE ((arena).has_value ());
+    auto base = arena.value ().address ();
     for (unsigned n = 0; n < 32; ++n) {
       auto bytes = scalar (n + 1);
       const auto size = bytes.size ();
-      auto r = arena->reserve ({&size, 1});
-      REQUIRE (r);
-      CHECK (*r->address (0) == base + n * page);
+      auto r = arena.value ().reserve ({&size, 1});
+      REQUIRE ((r).has_value ());
+      CHECK ((r.value ().address (0)).value () == base + n * page);
       for (auto &old : code) CHECK (reinterpret_cast<int (*) ()> (old.address ()) () > 0);
       std::span<const std::uint8_t> view = bytes;
-      auto batch = r->publish ({&view, 1});
-      REQUIRE (batch);
-      code.push_back (std::move (batch->front ()));
+      auto batch = r.value ().publish ({&view, 1});
+      REQUIRE ((batch).has_value ());
+      code.push_back (std::move (batch.value ().front ()));
     }
-    CHECK (arena->remaining () == 0);
+    CHECK (arena.value ().remaining () == 0);
   }
   for (unsigned n = 0; n < code.size (); ++n)
     CHECK (reinterpret_cast<int (*) ()> (code[n].address ()) () == int (n + 1));

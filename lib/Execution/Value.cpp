@@ -51,7 +51,7 @@ Result<void> check_argument_count (const ir::Signature &sig, std::size_t count) 
 Result<ExecutionArgument> normalize_argument (ir::Type type, const ExecutionArgument &argument,
                                               bool unnamed) {
   if (type.is_block ()) {
-    auto block = argument.block ();
+    auto block = argument.block ().get ();
     if (!type.valid () || !block || block->type != type
         || block->bytes.size () != type.block_size ()
         || (type.kind () == ir::Type::Kind::ReturnBlock
@@ -61,31 +61,31 @@ Result<ExecutionArgument> normalize_argument (ir::Type type, const ExecutionArgu
       return invalid ("invalid variadic block argument");
     return argument;
   }
-  auto scalar = argument.scalar ();
+  auto scalar = argument.scalar ().get ();
   if (!scalar) return invalid ("scalar parameter received a block");
   if (unnamed && scalar->type ().kind () == ir::Type::Kind::F32)
     return invalid ("float variadic argument must be promoted to double");
   auto value = normalize_scalar (type, *scalar);
-  if (!value) return value.error ();
-  return ExecutionArgument (*value);
+  if (!(value).has_value ()) return value.error ();
+  return ExecutionArgument ((value).value ());
 }
 Result<NormalizedArguments> normalize_arguments (const ir::Signature &sig,
                                                  std::span<const ExecutionArgument> arguments,
                                                  bool copy_blocks) {
   auto count = check_argument_count (sig, arguments.size ());
-  if (!count) return count.error ();
+  if (!(count).has_value ()) return count.error ();
   NormalizedArguments normalized;
   normalized.values.reserve (arguments.size ());
   for (std::size_t n = 0; n < arguments.size (); ++n) {
     auto type = n < sig.parameters.size () ? sig.parameters[n] : arguments[n].type ();
     auto value = normalize_argument (type, arguments[n], n >= sig.parameters.size ());
-    if (!value) return value.error ();
-    if (auto block = value->block ();
+    if (!(value).has_value ()) return value.error ();
+    if (auto block = value.value ().block ().get ();
         copy_blocks && block && type.kind () != ir::Type::Kind::ReturnBlock) {
       auto &copy = normalized.blocks.emplace_back (block->bytes.begin (), block->bytes.end ());
       normalized.values.push_back (ExecutionArgument::block (copy, type.block_class ()));
     } else
-      normalized.values.push_back (std::move (*value));
+      normalized.values.push_back (std::move ((value).value ()));
   }
   return normalized;
 }

@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Private block artifact construction. */
+#include "mirnext/CodeGen/Access.hpp"
 #pragma once
 #include "mirnext/CodeGen/CompiledBlock.hpp"
 #include "mirnext/CodeGen/BlockVersioning.hpp"
@@ -8,7 +9,7 @@ struct BlockArtifactBuilder {
                                        std::vector<BlockRelocation> successors) {
     CompiledBlock result (std::move (id), std::move (code), std::move (successors));
     auto valid = result.verify ();
-    if (!valid) return valid.error ();
+    if (!(valid).has_value ()) return valid.error ();
     return result;
   }
 };
@@ -35,7 +36,9 @@ class BlockTargets {
   explicit BlockTargets (const BBVSpecialization &plan) {
     targets_.reserve (plan.successors ().size ());
     for (auto &edge : plan.successors ())
-      targets_.emplace (Key{edge.instruction, edge.operand}, edge.version->id ());
+      targets_.emplace (Key{::mirnext::codegen::detail::NodeAccess::instruction (edge),
+                            edge.operand},
+                        ::mirnext::codegen::detail::NodeAccess::version (edge)->id ());
   }
   Result<BlockVersionId> find (const MachineInstruction *i, std::size_t operand) const {
     auto found = targets_.find ({i, operand});

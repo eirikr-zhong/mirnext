@@ -1,4 +1,7 @@
 /* Licensed under the MIT License. Canonical SSA deletion and code motion. */
+#include "mirnext/Transforms/Testing.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -23,14 +26,15 @@ using namespace mirnext::ir;
 using namespace mirnext::analysis;
 using namespace mirnext::transforms;
 namespace {
-std::unique_ptr<Context> parse (std::string_view text) {
+std::unique_ptr<Program> parse (std::string_view text) {
   auto result = serialization::parse_text (text);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<Program> (std::move ((result).value ()));
 }
-Function &entry (Context &c) {
-  return const_cast<Function &> (*c.modules ().begin ()->find_symbol ("entry")->function ());
+Function &entry (Program &c) {
+  return const_cast<Function &> (
+    *c.modules ().begin ()->find_symbol ("entry").get ()->function ().get ());
 }
 void prepare (Function &f, FunctionAnalysisManager &a, bool gvn = false) {
   FunctionPassManager passes;
@@ -43,8 +47,8 @@ void prepare (Function &f, FunctionAnalysisManager &a, bool gvn = false) {
     passes.add<DeadStoresPass> ();
   }
   auto result = passes.run (f, a);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
 }
 std::size_t count (const Function &f, Opcode op) {
   std::size_t result = 0;
@@ -52,17 +56,17 @@ std::size_t count (const Function &f, Opcode op) {
     for (auto &i : b.instructions ()) result += i.opcode () == op;
   return result;
 }
-void finish (Context &c) {
+void finish (Program &c) {
   FunctionPassManager passes;
   passes.add<ConventionalSSAPass> ();
   passes.add<DestroySSAPass> ();
-  REQUIRE (passes.run (c));
+  REQUIRE ((passes.run (c)).has_value ());
   auto binary = serialization::write_binary (c);
-  REQUIRE (binary);
-  REQUIRE (serialization::read_binary (*binary));
+  REQUIRE ((binary).has_value ());
+  REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
   auto text = serialization::write_text (c);
-  REQUIRE (text);
-  REQUIRE (serialization::parse_text (*text));
+  REQUIRE ((text).has_value ());
+  REQUIRE ((serialization::parse_text ((text).value ())).has_value ());
 }
 }  // namespace
 TEST_CASE ("SSA dead code recursively removes unused definitions and PHIs with stable live nodes") {
@@ -85,20 +89,20 @@ endmodule
   FunctionAnalysisManager a (f);
   prepare (f, a);
   auto old = f.instruction_count ();
-  REQUIRE (f.ssa_form ()->phis ().begin () != f.ssa_form ()->phis ().end ());
+  REQUIRE (f.ssa_form ().value ().phis ().begin () != f.ssa_form ().value ().phis ().end ());
   const Instruction *ret = nullptr;
   for (auto &b : f.blocks ())
     for (auto &i : b.instructions ())
       if (i.opcode () == Opcode::Ret) ret = &i;
-  auto result = SSADeadCodePass ().run (f, a);
-  REQUIRE (result);
-  CHECK (result->transformations >= 4);
+  auto result = ::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a);
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().transformations >= 4);
   CHECK (f.instruction_count () < old);
   CHECK (count (f, Opcode::Add) == 0);
   CHECK (count (f, Opcode::Mul) == 0);
   CHECK (ret->opcode () == Opcode::Ret);
-  for (auto &phi : f.ssa_form ()->phis ()) CHECK_FALSE (phi.alive ());
-  REQUIRE (f.verify ());
+  for (auto &phi : f.ssa_form ().get ()->phis ()) CHECK_FALSE (phi.alive ());
+  REQUIRE ((f.verify ()).has_value ());
   finish (*c);
 }
 TEST_CASE ("SSA dead code retains allocation call and hardware return effects") {
@@ -112,14 +116,14 @@ TEST_CASE ("SSA dead code retains allocation call and hardware return effects") 
   auto &f = entry (*c);
   FunctionAnalysisManager a (f);
   prepare (f, a);
-  auto result = SSADeadCodePass ().run (f, a);
-  REQUIRE (result);
+  auto result = ::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a);
+  REQUIRE ((result).has_value ());
   CHECK (count (f, Opcode::Alloca) == 1);
   CHECK (count (f, Opcode::BStart) == 1);
   CHECK (count (f, Opcode::BEnd) == 1);
   CHECK (count (f, Opcode::Call) == 1);
   CHECK (count (f, Opcode::Add) == 1);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
   finish (*c);
 }
 TEST_CASE ("SSA dead code preserves overflow flags across only the permitted instructions") {
@@ -136,13 +140,14 @@ TEST_CASE ("SSA dead code preserves overflow flags across only the permitted ins
       auto &f = entry (*c);
       FunctionAnalysisManager a (f);
       prepare (f, a);
-      auto result = SSADeadCodePass ().run (f, a);
-      REQUIRE (result);
+      auto result = ::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a);
+      REQUIRE ((result).has_value ());
       bool found = false;
       for (auto &b : f.blocks ())
-        for (auto &i : b.instructions ()) found |= instruction_descriptor (i.opcode ())->name == op;
+        for (auto &i : b.instructions ())
+          found |= instruction_descriptor (i.opcode ()).get ()->name == op;
       CHECK (found);
-      REQUIRE (f.verify ());
+      REQUIRE ((f.verify ()).has_value ());
       finish (*c);
     }
 }
@@ -153,27 +158,28 @@ TEST_CASE ("SSA dead code verifies every public opcode and fails invalid phases 
     auto &f = entry (*c);
     FunctionAnalysisManager a (f);
     prepare (f, a, true);
-    auto result = SSADeadCodePass ().run (f, a);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    REQUIRE (f.verify ());
+    auto result = ::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    REQUIRE ((f.verify ()).has_value ());
     finish (*c);
   }
   auto c = parse (test::memory_fixtures ()[0]), foreign = parse (test::memory_fixtures ()[0]);
   auto &f = entry (*c);
   FunctionAnalysisManager a (f), other (entry (*foreign));
   auto before = dump (f);
-  CHECK_FALSE (SSADeadCodePass ().run (f, a));
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a)).has_value ());
   CHECK (dump (f) == before);
   prepare (f, a);
   before = dump_ssa (f);
-  CHECK_FALSE (SSADeadCodePass ().run (f, other));
+  CHECK_FALSE (
+    (::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, other)).has_value ());
   CHECK (dump_ssa (f) == before);
   FunctionPassManager conventional;
   conventional.add<ConventionalSSAPass> ();
-  REQUIRE (conventional.run (f, a));
+  REQUIRE ((conventional.run (f, a)).has_value ());
   before = dump_ssa (f);
-  CHECK_FALSE (SSADeadCodePass ().run (f, a));
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a)).has_value ());
   CHECK (dump_ssa (f) == before);
 }
 TEST_CASE ("loop motion and pressure relief preserve ownership snapshots and round trips") {
@@ -185,8 +191,8 @@ TEST_CASE ("loop motion and pressure relief preserve ownership snapshots and rou
     auto source = parse (text);
     auto original = dump (*source);
     auto copy = clone (*source);
-    REQUIRE (copy);
-    auto &f = entry (**copy);
+    REQUIRE ((copy).has_value ());
+    auto &f = entry ((copy).value ());
     FunctionAnalysisManager a (f);
     prepare (f, a, true);
     std::set<const Instruction *> live;
@@ -196,7 +202,7 @@ TEST_CASE ("loop motion and pressure relief preserve ownership snapshots and rou
     passes.add<PressureReliefPass> ();
     auto result = passes.run (f, a, [&] (const PassEvent &event) -> Result<void> {
       if (event.phase == PassEvent::Phase::After) {
-        REQUIRE (event.function.verify ());
+        REQUIRE ((event.function.verify ()).has_value ());
         std::set<const Instruction *> current;
         for (auto &b : event.function.blocks ())
           for (auto &i : b.instructions ()) current.insert (&i);
@@ -207,12 +213,12 @@ TEST_CASE ("loop motion and pressure relief preserve ownership snapshots and rou
       }
       return {};
     });
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
     CHECK (dump (*source) == original);
-    CHECK_FALSE (serialization::write_binary (**copy));
+    CHECK_FALSE ((serialization::write_binary ((copy).value ())).has_value ());
     source.reset ();
-    finish (**copy);
+    finish ((copy).value ());
   }
 }
 TEST_CASE ("LICM hoists multiplication but excludes division memory and hardware bindings") {
@@ -225,12 +231,12 @@ TEST_CASE ("LICM hoists multiplication but excludes division memory and hardware
     auto &f = entry (*c);
     FunctionAnalysisManager a (f);
     prepare (f, a);
-    auto loop = &f.find_label ("loop")->block ();
+    auto loop = &f.find_label ("loop").get ()->block ();
     const Instruction *candidate = &*loop->instructions ().begin ();
-    auto result = LICMPass ().run (f, a);
-    REQUIRE (result);
+    auto result = ::mirnext::transforms::detail::run_pass (LICMPass (), f, a);
+    REQUIRE ((result).has_value ());
     CHECK ((&candidate->block () != loop) == (std::string_view (op) == "mul"));
-    REQUIRE (f.verify ());
+    REQUIRE ((f.verify ()).has_value ());
     finish (*c);
   }
 }
@@ -243,12 +249,12 @@ TEST_CASE ("pressure relief places a single-use literal after PHIs near its user
   prepare (f, a);
   const Instruction *literal = &*f.blocks ().begin ()->instructions ().begin ();
   auto old = &literal->block ();
-  auto result = PressureReliefPass ().run (f, a);
-  REQUIRE (result);
-  CHECK (result->transformations == 1);
+  auto result = ::mirnext::transforms::detail::run_pass (PressureReliefPass (), f, a);
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().transformations == 1);
   CHECK (&literal->block () != old);
-  CHECK (&literal->block () == &f.find_label ("yes")->block ());
-  REQUIRE (f.verify ());
+  CHECK (&literal->block () == &f.find_label ("yes").value ().block ());
+  REQUIRE ((f.verify ()).has_value ());
   finish (*c);
 }
 TEST_CASE ("motion rewriter rejects invalid anchors phases and owners before mutation") {
@@ -259,12 +265,13 @@ TEST_CASE ("motion rewriter rejects invalid anchors phases and owners before mut
   auto &f = entry (*c);
   FunctionAnalysisManager a (f), other (entry (*foreign));
   auto before = dump (f);
-  CHECK_FALSE (LICMPass ().run (f, a));
-  CHECK_FALSE (PressureReliefPass ().run (f, a));
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (LICMPass (), f, a)).has_value ());
+  CHECK_FALSE (
+    (::mirnext::transforms::detail::run_pass (PressureReliefPass (), f, a)).has_value ());
   CHECK (dump (f) == before);
   prepare (f, a);
-  auto rewriter = SSARewriter::get (f);
-  REQUIRE (rewriter);
+  auto rewriter = SSAUpdater::get (f);
+  REQUIRE ((rewriter).has_value ());
   before = dump_ssa (f);
   auto blocks = f.blocks ();
   auto nonempty = std::find_if (blocks.begin (), blocks.end (),
@@ -272,8 +279,9 @@ TEST_CASE ("motion rewriter rejects invalid anchors phases and owners before mut
   REQUIRE (nonempty != blocks.end ());
   auto &first = *nonempty;
   auto &i = *first.instructions ().begin ();
-  auto &yes = const_cast<BasicBlock &> (f.find_label ("yes")->block ());
-  CHECK_FALSE (rewriter->move_before (i, *entry (*foreign).blocks ().begin ()));
+  auto &yes = const_cast<BasicBlock &> (f.find_label ("yes").get ()->block ());
+  CHECK_FALSE (
+    (rewriter.value ().move_before (i, *entry (*foreign).blocks ().begin ())).has_value ());
   // Simplify may move the final return out of the labeled block, leaving
   // "yes" as an empty fallthrough. Select a real foreign-block anchor.
   const Instruction *other_anchor = nullptr;
@@ -283,14 +291,17 @@ TEST_CASE ("motion rewriter rejects invalid anchors phases and owners before mut
       break;
     }
   REQUIRE (other_anchor);
-  CHECK_FALSE (rewriter->move_before (i, first, other_anchor));
-  CHECK_FALSE (rewriter->move_before (i, yes, &i));
-  CHECK_FALSE (rewriter->move_before (*const_cast<Instruction *> (first.terminator ()), yes));
-  CHECK_FALSE (rewriter->split_fallthrough (yes, first));
-  CHECK_FALSE (LICMPass ().run (f, other));
-  CHECK_FALSE (PressureReliefPass ().run (f, other));
+  CHECK_FALSE ((rewriter.value ().move_before (i, first, other_anchor)).has_value ());
+  CHECK_FALSE ((rewriter.value ().move_before (i, yes, &i)).has_value ());
+  CHECK_FALSE (
+    (rewriter.value ().move_before (*const_cast<Instruction *> (first.terminator ().get ()), yes))
+      .has_value ());
+  CHECK_FALSE ((rewriter.value ().split_fallthrough (yes, first)).has_value ());
+  CHECK_FALSE ((::mirnext::transforms::detail::run_pass (LICMPass (), f, other)).has_value ());
+  CHECK_FALSE (
+    (::mirnext::transforms::detail::run_pass (PressureReliefPass (), f, other)).has_value ());
   CHECK (dump_ssa (f) == before);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
 }
 TEST_CASE ("SSA inverse use order survives unrelated deletion and chain transfers") {
   auto c = parse (
@@ -299,35 +310,48 @@ TEST_CASE ("SSA inverse use order survives unrelated deletion and chain transfer
   auto &f = entry (*c);
   FunctionAnalysisManager a (f);
   prepare (f, a);
-  auto form = f.ssa_form ();
-  auto rewriter = SSARewriter::get (f);
-  REQUIRE (rewriter);
+  auto form = f.ssa_form ().get ();
+  auto rewriter = SSAUpdater::get (f);
+  REQUIRE ((rewriter).has_value ());
   auto definition = [&] (std::string_view name) -> Instruction & {
     for (auto &block : f.blocks ())
       for (auto &instruction : block.instructions ())
-        for (auto value : form->definitions (instruction))
+        for (auto value :
+             mirnext::ir::detail::ReferenceAccess::pointers (form->definitions (instruction)))
           if (value->origin ().name () == name) return instruction;
     FAIL ("missing named definition");
     return *f.blocks ().begin ()->instructions ().begin ();
   };
   auto &z = definition ("z"), &producer = definition ("a"), &b = definition ("b"),
        &erased = definition ("c");
-  auto value = form->definitions (producer)[0], target = form->definitions (z)[0];
-  std::vector<SSAUse *> original (value->uses ().begin (), value->uses ().end ());
+  auto value = mirnext::ir::detail::ReferenceAccess::pointers (form->definitions (producer))[0],
+       target = mirnext::ir::detail::ReferenceAccess::pointers (form->definitions (z))[0];
+  std::vector<SSAUse *>
+    original (mirnext::ir::detail::ReferenceAccess::pointers (value->uses ()).begin (),
+              mirnext::ir::detail::ReferenceAccess::pointers (value->uses ()).end ());
   std::erase_if (original, [&] (auto use) {
     auto site = std::get_if<SSAInstructionUse> (&use->site ());
-    return site && site->instruction == &erased;
+    return site && mirnext::ir::detail::NodeAccess::instruction (*site) == &erased;
   });
-  REQUIRE (rewriter->erase_instruction (erased));
-  CHECK (std::vector<SSAUse *> (value->uses ().begin (), value->uses ().end ()) == original);
-  auto use = form->inputs (b).front ();
-  REQUIRE (rewriter->retarget (*use, *target));
-  CHECK (target->uses ().front () == use);
-  std::vector<SSAUse *> remainder (value->uses ().begin (), value->uses ().end ());
-  REQUIRE (rewriter->replace_all_uses (*value, *target));
+  REQUIRE ((rewriter.value ().erase_instruction (erased)).has_value ());
+  CHECK (
+    std::vector<SSAUse *> (mirnext::ir::detail::ReferenceAccess::pointers (value->uses ()).begin (),
+                           mirnext::ir::detail::ReferenceAccess::pointers (value->uses ()).end ())
+    == original);
+  auto use = mirnext::ir::detail::ReferenceAccess::pointers (form->inputs (b)).front ();
+  REQUIRE ((rewriter.value ().retarget (*use, *target)).has_value ());
+  CHECK (mirnext::ir::detail::ReferenceAccess::pointers (target->uses ()).front () == use);
+  std::vector<SSAUse *>
+    remainder (mirnext::ir::detail::ReferenceAccess::pointers (value->uses ()).begin (),
+               mirnext::ir::detail::ReferenceAccess::pointers (value->uses ()).end ());
+  REQUIRE ((rewriter.value ().replace_all_uses (*value, *target)).has_value ());
   remainder.insert (remainder.begin (), use);
-  CHECK (std::vector<SSAUse *> (target->uses ().begin (), target->uses ().end ()) == remainder);
-  REQUIRE (f.verify ());
+  CHECK (
+    std::vector<SSAUse *> (mirnext::ir::detail::ReferenceAccess::pointers (target->uses ())
+                             .begin (),
+                           mirnext::ir::detail::ReferenceAccess::pointers (target->uses ()).end ())
+    == remainder);
+  REQUIRE ((f.verify ()).has_value ());
   finish (*c);
 }
 TEST_CASE ("property branches remain control flow during canonical loop motion") {
@@ -348,7 +372,7 @@ TEST_CASE ("property branches remain control flow during canonical loop motion")
           branches.push_back (&i);
           blocks.push_back (&block);
         }
-    REQUIRE (LICMPass ().run (f, a));
+    REQUIRE ((::mirnext::transforms::detail::run_pass (LICMPass (), f, a)).has_value ());
     REQUIRE (branches.size () == 2);
     for (std::size_t p = 0; p < branches.size (); ++p) CHECK (&branches[p]->block () == blocks[p]);
     finish (*c);
@@ -360,19 +384,19 @@ TEST_CASE ("LICM reacquires an independently consumed graph and supports repeate
   FunctionAnalysisManager a (f);
   prepare (f, a);
   auto loops = a.get<LoopAnalysis> ();
-  REQUIRE (loops);
+  REQUIRE ((loops).has_value ());
   auto consumed = a.take_cached<FunctionGraphAnalysis> ();
-  REQUIRE (consumed);
-  REQUIRE (consumed->has_value ());
-  auto result = LICMPass ().run (f, a);
-  REQUIRE (result);
-  CHECK (result->transformations > 0);
+  REQUIRE ((consumed).has_value ());
+  REQUIRE (consumed.value ().has_value ());
+  auto result = ::mirnext::transforms::detail::run_pass (LICMPass (), f, a);
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().transformations > 0);
   auto before = dump_ssa (f);
-  result = LICMPass ().run (f, a);
-  REQUIRE (result);
-  CHECK (result->transformations == 0);
+  result = ::mirnext::transforms::detail::run_pass (LICMPass (), f, a);
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().transformations == 0);
   CHECK (dump_ssa (f) == before);
-  REQUIRE (f.verify ());
+  REQUIRE ((f.verify ()).has_value ());
   finish (*c);
 }
 TEST_CASE ("LICM preheader graphs retain only live edges and valid dominance") {
@@ -381,23 +405,23 @@ TEST_CASE ("LICM preheader graphs retain only live edges and valid dominance") {
   FunctionAnalysisManager a (f);
   prepare (f, a);
   auto blocks = std::ranges::distance (f.blocks ());
-  REQUIRE (LICMPass ().run (f, a));
+  REQUIRE ((::mirnext::transforms::detail::run_pass (LICMPass (), f, a)).has_value ());
   CHECK (std::ranges::distance (f.blocks ()) == blocks + 1);
   auto graph = a.get<FunctionGraphAnalysis> ();
-  REQUIRE (graph);
-  for (std::size_t id = 0; id < (*graph)->edges.size (); ++id) {
-    auto &edge = (*graph)->edges[id];
-    CHECK (std::ranges::count ((*graph)->outgoing[edge.source], id) == 1);
-    CHECK (std::ranges::count ((*graph)->incoming[edge.destination], id) == 1);
+  REQUIRE ((graph).has_value ());
+  for (std::size_t id = 0; id < graph.value ().edges.size (); ++id) {
+    auto &edge = graph.value ().edges[id];
+    CHECK (std::ranges::count (graph.value ().outgoing[edge.source], id) == 1);
+    CHECK (std::ranges::count (graph.value ().incoming[edge.destination], id) == 1);
   }
   FunctionAnalysisManager fresh (f);
   auto expected = fresh.get<DominatorAnalysis> ();
-  REQUIRE (expected);
+  REQUIRE ((expected).has_value ());
   auto actual = a.get<DominatorAnalysis> ();
-  REQUIRE (actual);
-  for (std::size_t from = 0; from < (*graph)->blocks.size (); ++from)
-    for (std::size_t to = 0; to < (*graph)->blocks.size (); ++to)
-      CHECK ((*actual)->dominates (from, to) == (*expected)->dominates (from, to));
+  REQUIRE ((actual).has_value ());
+  for (std::size_t from = 0; from < graph.value ().blocks.size (); ++from)
+    for (std::size_t to = 0; to < graph.value ().blocks.size (); ++to)
+      CHECK (actual.value ().dominates (from, to) == expected.value ().dominates (from, to));
   finish (*c);
 }
 TEST_CASE ("dead SSA removes wide PHIs but retains cyclic PHI uses") {
@@ -410,19 +434,20 @@ TEST_CASE ("dead SSA removes wide PHIs but retains cyclic PHI uses") {
   auto &f = entry (*c);
   FunctionAnalysisManager a (f);
   prepare (f, a);
-  auto rewriter = SSARewriter::get (f);
-  REQUIRE (rewriter);
+  auto rewriter = SSAUpdater::get (f);
+  REQUIRE ((rewriter).has_value ());
   bool wide = false;
-  for (auto &phi : f.ssa_form ()->phis ())
-    if (phi.alive () && phi.inputs ().size () == 12) {
+  for (auto &phi : f.ssa_form ().get ()->phis ())
+    if (phi.alive ()
+        && mirnext::ir::detail::ReferenceAccess::pointers (phi.inputs ()).size () == 12) {
       wide = true;
       auto before = dump_ssa (f);
-      CHECK_FALSE (rewriter->erase_phi (const_cast<SSAPhi &> (phi)));
+      CHECK_FALSE ((rewriter.value ().erase_phi (const_cast<SSAPhi &> (phi))).has_value ());
       CHECK (dump_ssa (f) == before);
     }
   REQUIRE (wide);
-  auto result = SSADeadCodePass ().run (f, a);
-  REQUIRE (result);
+  auto result = ::mirnext::transforms::detail::run_pass (SSADeadCodePass (), f, a);
+  REQUIRE ((result).has_value ());
   CHECK (count (f, Opcode::Add) == 0);
   finish (*c);
   c = parse (
@@ -431,9 +456,9 @@ TEST_CASE ("dead SSA removes wide PHIs but retains cyclic PHI uses") {
   auto &cycle = entry (*c);
   FunctionAnalysisManager ca (cycle);
   prepare (cycle, ca);
-  REQUIRE (SSADeadCodePass ().run (cycle, ca));
+  REQUIRE ((::mirnext::transforms::detail::run_pass (SSADeadCodePass (), cycle, ca)).has_value ());
   bool live_phi = false;
-  for (auto &phi : cycle.ssa_form ()->phis ()) live_phi |= phi.alive ();
+  for (auto &phi : cycle.ssa_form ().get ()->phis ()) live_phi |= phi.alive ();
   CHECK (live_phi);
   CHECK (count (cycle, Opcode::Add) == 1);
   finish (*c);

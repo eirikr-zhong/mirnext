@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Basic block cloning tests. */
+#include "mirnext/Analysis/Access.hpp"
+#include "mirnext/Transforms/Testing.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
@@ -16,20 +18,21 @@ using namespace mirnext::ir;
 using namespace mirnext::analysis;
 using namespace mirnext::transforms;
 namespace {
-std::unique_ptr<Context> parse (std::string_view text) {
+std::unique_ptr<Program> parse (std::string_view text) {
   auto result = serialization::parse_text (text);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<Program> (std::move ((result).value ()));
 }
-Function &entry (Context &context) {
-  return const_cast<Function &> (*context.modules ().begin ()->find_symbol ("entry")->function ());
+Function &entry (Program &context) {
+  return const_cast<Function &> (
+    *context.modules ().begin ()->find_symbol ("entry").get ()->function ().get ());
 }
 void prepare (Function &function, FunctionAnalysisManager &analyses) {
   FunctionPassManager passes;
   passes.add<SimplifyPass> ();
   passes.add<PrepareCFGPass> ();
-  REQUIRE (passes.run (function, analyses));
+  REQUIRE ((passes.run (function, analyses)).has_value ());
 }
 }  // namespace
 TEST_CASE ("block cloning preserves surviving identities and native SSA and format lifecycle") {
@@ -48,25 +51,25 @@ TEST_CASE ("block cloning preserves surviving identities and native SSA and form
     for (auto &block : function.blocks ())
       for (auto &instruction : block.instructions ())
         if (instruction.opcode () != Opcode::Jmp) identities.insert (&instruction);
-    auto result = BlockCloningPass ().run (function, analyses);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
+    auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), function, analyses);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
     for (auto &block : function.blocks ())
       for (auto &instruction : block.instructions ()) identities.erase (&instruction);
     CHECK (identities.empty ());
-    REQUIRE (function.verify ());
+    REQUIRE ((function.verify ()).has_value ());
     auto cloned = clone (*context);
-    REQUIRE (cloned);
-    CHECK (dump (**cloned) == dump (*context));
+    REQUIRE ((cloned).has_value ());
+    CHECK (dump ((cloned).value ()) == dump (*context));
     auto binary = serialization::write_binary (*context);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
     FunctionPassManager ssa;
     ssa.add<BuildSSAPass> ();
     ssa.add<ConventionalSSAPass> ();
     ssa.add<DestroySSAPass> ();
-    REQUIRE (ssa.run (function, analyses));
-    REQUIRE (context->verify ());
+    REQUIRE ((ssa.run (function, analyses)).has_value ());
+    REQUIRE ((context->verify ()).has_value ());
   }
 }
 TEST_CASE ("returns switches and absent return boundaries prohibit cloning") {
@@ -81,11 +84,11 @@ TEST_CASE ("returns switches and absent return boundaries prohibit cloning") {
     FunctionAnalysisManager analyses (f);
     FunctionPassManager cfg;
     cfg.add<PrepareCFGPass> ();
-    REQUIRE (cfg.run (f, analyses));
+    REQUIRE ((cfg.run (f, analyses)).has_value ());
     auto before = dump (f);
-    auto result = BlockCloningPass ().run (f, analyses);
-    REQUIRE (result);
-    CHECK (result->transformations == 0);
+    auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses);
+    REQUIRE ((result).has_value ());
+    CHECK (result.value ().transformations == 0);
     CHECK (dump (f) == before);
   }
   auto context = parse ("m: module\nentry: func\nloop:\njmp loop\nendfunc\nendmodule\n");
@@ -93,9 +96,9 @@ TEST_CASE ("returns switches and absent return boundaries prohibit cloning") {
   FunctionAnalysisManager analyses (f);
   prepare (f, analyses);
   auto before = dump (f);
-  auto result = BlockCloningPass ().run (f, analyses);
-  REQUIRE (result);
-  CHECK (result->transformations == 0);
+  auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses);
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().transformations == 0);
   CHECK (dump (f) == before);
 }
 TEST_CASE ("property and indirect terminators keep valid explicit CFG edges after cloning") {
@@ -104,18 +107,18 @@ TEST_CASE ("property and indirect terminators keep valid explicit CFG edges afte
     auto &f = entry (*context);
     FunctionAnalysisManager analyses (f);
     prepare (f, analyses);
-    auto result = BlockCloningPass ().run (f, analyses);
-    REQUIRE (result);
-    CHECK (result->transformations == 1);
+    auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses);
+    REQUIRE ((result).has_value ());
+    CHECK (result.value ().transformations == 1);
     auto cfg = analyses.get<ControlFlowAnalysis> ();
-    REQUIRE (cfg);
-    REQUIRE (f.verify ());
+    REQUIRE ((cfg).has_value ());
+    REQUIRE ((f.verify ()).has_value ());
     unsigned branches = 0;
     for (auto &block : f.blocks ())
-      if (auto tail = block.terminator ();
+      if (auto tail = block.terminator ().get ();
           tail && (tail->opcode () == Opcode::PrBeq || tail->opcode () == Opcode::PrBne)) {
-        auto b = (*cfg)->indices.at (&block);
-        CHECK ((*cfg)->outgoing[b].size () == 2);
+        auto b = mirnext::analysis::detail::NodeAccess::indices (((cfg)).value ()).at (&block);
+        CHECK (cfg.value ().outgoing[b].size () == 2);
         ++branches;
       }
     CHECK (branches == (text.find ("jmpi") == std::string::npos ? 2 : 0));
@@ -128,15 +131,17 @@ TEST_CASE ("cloning diagnoses wrong owner and active SSA before changing the bod
   FunctionAnalysisManager analyses (f), foreign (entry (*other));
   prepare (f, analyses);
   auto before = dump (f);
-  CHECK_FALSE (BlockCloningPass ().run (f, foreign));
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (BlockCloningPass (), f, foreign)).has_value ());
   CHECK (dump (f) == before);
   FunctionPassManager ssa;
   ssa.add<BuildSSAPass> ();
-  REQUIRE (ssa.run (f, analyses));
+  REQUIRE ((ssa.run (f, analyses)).has_value ());
   before = dump (f);
-  CHECK_FALSE (BlockCloningPass ().run (f, analyses));
+  CHECK_FALSE (
+    (mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses)).has_value ());
   CHECK (dump (f) == before);
-  REQUIRE (f.ssa_form ()->verify ());
+  REQUIRE ((f.ssa_form ().value ().verify ()).has_value ());
 }
 TEST_CASE ("initial DFS back edges are not cloned") {
   auto context = parse (test::cloning_fixtures ().back ());
@@ -144,14 +149,14 @@ TEST_CASE ("initial DFS back edges are not cloned") {
   FunctionAnalysisManager analyses (f);
   prepare (f, analyses);
   auto graph = analyses.get<FunctionGraphAnalysis> ();
-  REQUIRE (graph);
-  auto identity = *graph;
+  REQUIRE ((graph).has_value ());
+  auto identity = &(graph).value ();
   auto before = dump (f);
-  auto result = BlockCloningPass ().run (f, analyses);
-  REQUIRE (result);
-  CHECK (result->transformations == 0);
+  auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses);
+  REQUIRE ((result).has_value ());
+  CHECK (result.value ().transformations == 0);
   CHECK (dump (f) == before);
-  CHECK (*analyses.get<FunctionGraphAnalysis> () == identity);
+  CHECK (&(analyses.get<FunctionGraphAnalysis> ()).value () == identity);
 }
 TEST_CASE (
   "recursive anchor hot checks can self clone without invalidating borrowed instructions") {
@@ -180,19 +185,19 @@ endmodule
     FunctionAnalysisManager analyses (f);
     FunctionPassManager cfg;
     cfg.add<PrepareCFGPass> ();
-    REQUIRE (cfg.run (f, analyses));
-    auto result = BlockCloningPass ().run (f, analyses);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
+    REQUIRE ((cfg.run (f, analyses)).has_value ());
+    auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
     if (extra)
-      CHECK (result->transformations > 1);
+      CHECK (result.value ().transformations > 1);
     else
-      CHECK (result->transformations == 1);
+      CHECK (result.value ().transformations == 1);
     CHECK (f.instruction_count () < 32);
-    REQUIRE (f.verify ());
+    REQUIRE ((f.verify ()).has_value ());
     auto binary = serialization::write_binary (*context);
-    REQUIRE (binary);
-    REQUIRE (serialization::read_binary (*binary));
+    REQUIRE ((binary).has_value ());
+    REQUIRE ((serialization::read_binary ((binary).value ())).has_value ());
   }
 }
 TEST_CASE ("the strict growth threshold permits a second clone at nine but prohibits it at ten") {
@@ -202,9 +207,9 @@ TEST_CASE ("the strict growth threshold permits a second clone at nine but prohi
     auto &f = entry (*context);
     FunctionAnalysisManager analyses (f);
     prepare (f, analyses);
-    auto result = BlockCloningPass ().run (f, analyses);
-    REQUIRE (result);
-    CHECK (result->transformations == (padding == 6 ? 3 : 2));
-    REQUIRE (f.verify ());
+    auto result = mirnext::transforms::detail::run_pass (BlockCloningPass (), f, analyses);
+    REQUIRE ((result).has_value ());
+    CHECK (result.value ().transformations == (padding == 6 ? 3 : 2));
+    REQUIRE ((f.verify ()).has_value ());
   }
 }

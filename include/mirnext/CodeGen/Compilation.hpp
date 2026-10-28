@@ -1,6 +1,7 @@
 /* Licensed under the MIT License. Whole-function compilation on owning IR. */
 #pragma once
 #include "mirnext/CodeGen/CompiledFunction.hpp"
+#include "mirnext/CodeGen/Editor.hpp"
 namespace mirnext::codegen {
 enum class CompilationStage {
   PrepareMachineIR,
@@ -24,7 +25,7 @@ struct CompilationSnapshot {
   CompilationStage stage;
   // All views are valid only during the observer call.
   const MachineFunction &function;
-  const CompiledFunction *compiled = nullptr;
+  OptionalRef<const CompiledFunction> compiled;
   std::string dump () const { return function.dump (); }
   std::size_t instruction_count () const { return function.instruction_count (); }
 };
@@ -53,6 +54,7 @@ class PreparedMachineFunction {
   Result<void> verify () const;
 
  private:
+  friend class MachineCompilation;
   friend Result<PreparedMachineFunction> prepare_machine_function (const ir::Function &,
                                                                    const target::TargetMachine &,
                                                                    CompilationOptions,
@@ -64,6 +66,40 @@ class PreparedMachineFunction {
   MachineFrameResult frame_;
   MachinePreparationKind kind_;
 };
+// One owning compilation state for incremental and whole-function compilation.
+// It retains no source IR. Edits are allowed only before the first lowering stage.
+class MachineCompilation {
+ public:
+  static Result<MachineCompilation> create (const ir::Function &, const target::TargetMachine &,
+                                            CompilationOptions = {},
+                                            MachinePreparationKind
+                                            = MachinePreparationKind::WholeFunction);
+  MachineCompilation (MachineCompilation &&) noexcept;
+  MachineCompilation &operator= (MachineCompilation &&) noexcept;
+  ~MachineCompilation ();
+  MachineCompilation (const MachineCompilation &) = delete;
+  MachineCompilation &operator= (const MachineCompilation &) = delete;
+  const MachineFunction &function () const;
+  CompilationStage stage () const;
+  std::optional<CompilationStage> next_stage () const;
+  OptionalRef<const MachineGraphAnalysis> graph () const;
+  OptionalRef<const MachineLiveness> liveness () const;
+  OptionalRef<const MachineLiveRanges> live_ranges () const;
+  OptionalRef<const MachineAllocation> allocation () const;
+  OptionalRef<const MachineFrameResult> frame () const;
+  Result<MachineEditor> edit ();
+  Result<void> step ();
+  Result<void> run_until (CompilationStage);
+  Result<PreparedMachineFunction> prepare ();
+  Result<CompiledFunction> finish ();
+  Result<void> status () const;
+
+ private:
+  struct Impl;
+  explicit MachineCompilation (std::unique_ptr<Impl>);
+  std::unique_ptr<Impl> impl_;
+};
+
 // Runs the canonical pipeline through frame formation. BBV preserves property
 // operations for subsequent specialization; no code is encoded or published.
 Result<PreparedMachineFunction> prepare_machine_function (const ir::Function &,

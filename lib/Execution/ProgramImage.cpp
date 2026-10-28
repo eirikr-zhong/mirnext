@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Shared symbol and data image for execution engines. */
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/Execution/detail/ProgramImage.hpp"
 #include <algorithm>
 #include <bit>
@@ -16,11 +17,11 @@ Result<std::size_t> data_size (const ir::GlobalData &data, const target::TargetM
     type = initial->type;
     count = initial->values.size ();
   } else if (auto expression = std::get_if<ir::ExpressionData> (&value))
-    type = expression->function->signature ().results[0];
+    type = ir::detail::NodeAccess::function (*(expression))->signature ().results[0];
   auto layout = target.layout (type);
-  if (!layout) return layout.error ();
-  if (count > SIZE_MAX / layout->size) return invalid ("data element size overflow");
-  return count * layout->size;
+  if (!(layout).has_value ()) return layout.error ();
+  if (count > SIZE_MAX / layout.value ().size) return invalid ("data element size overflow");
+  return count * layout.value ().size;
 }
 template <class T>
 void store (std::byte *destination, const T &value) {
@@ -53,10 +54,10 @@ bool compatible_type (ir::Type a, ir::Type b) {
 Result<std::vector<DataSectionLayout>> layout_module_data (const ir::Module &module,
                                                            const target::TargetMachine &target) {
   auto checked = module.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   std::vector<DataSectionLayout> result;
   bool active = false;
-  for (auto &item : module.items ()) {
+  for (auto &item : ir::detail::NodeAccess::items (module)) {
     auto entry = std::get_if<const ir::GlobalData *> (&item);
     if (!entry) {
       active = false;
@@ -64,15 +65,15 @@ Result<std::vector<DataSectionLayout>> layout_module_data (const ir::Module &mod
     }
     auto &data = **entry;
     auto size = data_size (data, target);
-    if (!size) return size.error ();
+    if (!(size).has_value ()) return size.error ();
     if (!active || !data.symbol ().name ().empty ()) {
       result.emplace_back ();
       active = true;
     }
     auto &section = result.back ();
-    if (*size > SIZE_MAX - section.size) return invalid ("data section size overflow");
-    section.items.push_back ({&data, section.size, *size});
-    section.size += *size;
+    if ((size).value () > SIZE_MAX - section.size) return invalid ("data section size overflow");
+    section.items.push_back ({data, section.size, (size).value ()});
+    section.size += (size).value ();
   }
   for (auto &section : result) {
     if (section.size > SIZE_MAX - 7) return invalid ("data section alignment overflow");
@@ -89,8 +90,8 @@ Error ProgramImage::error (const ir::Symbol *symbol, std::string_view phase, Err
   return e;
 }
 Result<std::size_t> ProgramImage::find (std::string_view module, std::string_view name) const {
-  auto m = context.find_module (module);
-  auto s = m ? m->find_symbol (name) : nullptr;
+  auto m = context.find_module (module).get ();
+  auto s = m ? m->find_symbol (name).get () : nullptr;
   if (!s)
     return Error{ErrorCode::UnknownName,
                  std::string (module) + '/' + std::string (name) + ": unknown linked symbol"};
@@ -99,16 +100,16 @@ Result<std::size_t> ProgramImage::find (std::string_view module, std::string_vie
 Result<void> ProgramImage::check_import (std::size_t index) const {
   auto &import = *bindings[index].source;
   auto &definition = binding (index);
-  if (import.signature ()
+  if (import.signature ().get ()
       && (definition.kind != Kind::Function || !definition.signature
-          || *definition.signature != *import.signature ()))
+          || *definition.signature != *import.signature ().get ()))
     return error (&import, "symbols", invalid ("import function signature mismatch"));
-  if (auto variable = import.variable ()) {
+  if (auto variable = import.variable ().get ()) {
     if (definition.kind != Kind::Data || (variable->writable () && !definition.writable))
       return error (&import, "symbols", invalid ("import data kind or write permission mismatch"));
     auto layout = target.layout (variable->type ());
-    if (!layout) return layout.error ();
-    if (definition.size < layout->size)
+    if (!(layout).has_value ()) return layout.error ();
+    if (definition.size < layout.value ().size)
       return error (&import, "symbols", invalid ("imported variable exceeds external storage"));
   }
   return {};
@@ -119,17 +120,17 @@ Result<void> ProgramImage::symbols (const LinkOptions &options, bool native) {
       auto index = bindings.size ();
       identities.emplace (&symbol, index);
       Binding entry{&symbol};
-      if (symbol.signature ()) entry.signature = *symbol.signature ();
-      if (symbol.function ()) {
+      if (symbol.signature ().get ()) entry.signature = *symbol.signature ().get ();
+      if (symbol.function ().get ()) {
         entry.kind = Kind::Function;
-        entry.jump = jump_return (*symbol.function ());
+        entry.jump = jump_return (*symbol.function ().get ());
       }
-      if (symbol.data ()) {
+      if (symbol.data ().get ()) {
         entry.kind = Kind::Data;
-        entry.writable = symbol.data ()->writable ();
-        auto size = data_size (*symbol.data (), target);
-        if (!size) return error (&symbol, "layout", size.error ());
-        entry.size = *size;
+        entry.writable = symbol.data ().get ()->writable ();
+        auto size = data_size (*symbol.data ().get (), target);
+        if (!(size).has_value ()) return error (&symbol, "layout", size.error ());
+        entry.size = (size).value ();
       }
       bindings.push_back (std::move (entry));
       if (symbol.exported ()) exports.emplace (symbol.name (), index);
@@ -148,25 +149,27 @@ Result<void> ProgramImage::symbols (const LinkOptions &options, bool native) {
           return error (&symbol, "symbols", {ErrorCode::UnknownName, "unresolved import"});
         auto resolved = options.resolve (
           {symbol.module ().name (), symbol.name (), symbol.signature (), symbol.variable ()});
-        if (!resolved) return error (&symbol, "symbols", resolved.error ());
+        if (!(resolved).has_value ()) return error (&symbol, "symbols", resolved.error ());
         ++statistics.external_resolutions;
-        if ((!resolved->address && (native || !resolved->interpret || !resolved->signature))
-            || bool (resolved->signature) == bool (resolved->data))
+        if ((!resolved.value ().address
+             && (native || !resolved.value ().interpret || !resolved.value ().signature))
+            || bool (resolved.value ().signature) == bool (resolved.value ().data))
           return error (&symbol, "symbols",
                         invalid (
                           "external binding requires an execution entry and exactly one kind"));
-        if (resolved->signature) {
-          auto valid = resolved->signature->verify ();
-          if (!valid) return error (&symbol, "symbols", valid.error ());
+        if (resolved.value ().signature) {
+          auto valid = resolved.value ().signature->verify ();
+          if (!(valid).has_value ()) return error (&symbol, "symbols", valid.error ());
         }
-        if (resolved->data
-            && (resolved->jump_return || resolved->interpret
-                || (resolved->data->scalar_type
-                    && (!resolved->data->scalar_type->valid ()
-                        || !resolved->data->scalar_type->is_scalar ()))
-                || resolved->data->size > UINTPTR_MAX - resolved->address))
+        if (resolved.value ().data
+            && (resolved.value ().jump_return || resolved.value ().interpret
+                || (resolved.value ().data->scalar_type
+                    && (!resolved.value ().data->scalar_type->valid ()
+                        || !resolved.value ().data->scalar_type->is_scalar ()))
+                || resolved.value ().data->size > UINTPTR_MAX - resolved.value ().address))
           return error (&symbol, "symbols", invalid ("invalid external data binding"));
-        found = externals.emplace (std::string (symbol.name ()), std::move (*resolved)).first;
+        found
+          = externals.emplace (std::string (symbol.name ()), std::move ((resolved).value ())).first;
       }
       auto &external = found->second;
       entry.address = external.address;
@@ -177,13 +180,13 @@ Result<void> ProgramImage::symbols (const LinkOptions &options, bool native) {
       if (external.data) {
         entry.size = external.data->size;
         entry.writable = external.data->writable;
-        if (symbol.variable () && external.data->scalar_type
-            && !compatible_type (symbol.variable ()->type (), *external.data->scalar_type))
+        if (symbol.variable ().get () && external.data->scalar_type
+            && !compatible_type (symbol.variable ().get ()->type (), *external.data->scalar_type))
           return error (&symbol, "symbols", invalid ("external variable type mismatch"));
       }
     }
     auto checked = check_import (n);
-    if (!checked) return checked;
+    if (!(checked).has_value ()) return checked;
   }
   // Untyped imports still have a call-site prototype. Validate the resolved
   // definition and special calling convention before any native code exists.
@@ -191,13 +194,17 @@ Result<void> ProgramImage::symbols (const LinkOptions &options, bool native) {
     for (auto &f : module.functions ())
       for (auto &b : f.blocks ())
         for (auto &i : b.instructions ()) {
-          if (ir::instruction_descriptor (i.opcode ())->count != ir::OperandCount::Call) continue;
-          auto ref = i.operands ()[1].get<ir::SymbolReference> ();
+          if (ir::instruction_descriptor (i.opcode ()).get ()->count != ir::OperandCount::Call)
+            continue;
+          auto ref = ir::detail::operand_access (i.operands ()[1]).get<ir::SymbolReference> ();
           if (!ref) continue;
-          auto &callee = binding (identities.at (ref->symbol));
-          auto prototype = i.operands ()[0].get<ir::SymbolReference> ();
-          if (!prototype || !prototype->symbol->signature () || callee.kind != Kind::Function
-              || !callee.signature || *callee.signature != *prototype->symbol->signature ()
+          auto &callee = binding (identities.at (ir::detail::NodeAccess::symbol (*(ref))));
+          auto prototype
+            = ir::detail::operand_access (i.operands ()[0]).get<ir::SymbolReference> ();
+          if (!prototype || !ir::detail::NodeAccess::symbol (*(prototype))->signature ().get ()
+              || callee.kind != Kind::Function || !callee.signature
+              || *callee.signature
+                   != *ir::detail::NodeAccess::symbol (*(prototype))->signature ().get ()
               || callee.jump != (i.opcode () == ir::Opcode::JCall))
             return error (&f.symbol (), "symbols",
                           invalid ("resolved call signature, symbol kind or convention mismatch"));
@@ -207,8 +214,8 @@ Result<void> ProgramImage::symbols (const LinkOptions &options, bool native) {
 Result<void> ProgramImage::data () {
   for (auto &module : context.modules ()) {
     auto layouts = layout_module_data (module, target);
-    if (!layouts) return error (nullptr, "layout", layouts.error ());
-    for (auto &layout : *layouts) {
+    if (!(layouts).has_value ()) return error (nullptr, "layout", layouts.error ());
+    for (auto &layout : (layouts).value ()) {
       auto size = std::max (std::size_t{8}, layout.size);
       auto data = std::unique_ptr<std::byte[]> (new (std::nothrow) std::byte[size]{});
       if (!data) return error (nullptr, "data", invalid ("unable to allocate data section"));
@@ -216,24 +223,24 @@ Result<void> ProgramImage::data () {
       sections.push_back ({std::move (data), size});
       ++statistics.sections;
       for (auto &item : layout.items) {
-        auto &entry = bindings[identities.at (&item.data->symbol ())];
+        auto &entry = bindings[identities.at (&item.data ().symbol ())];
         entry.address = reinterpret_cast<std::uintptr_t> (base + item.offset);
-        if (auto initial = std::get_if<ir::InitializedData> (&item.data->initializer ())) {
+        if (auto initial = std::get_if<ir::InitializedData> (&item.data ().initializer ())) {
           auto width = target.layout (initial->type);
-          if (!width) return width.error ();
+          if (!(width).has_value ()) return width.error ();
           auto at = base + item.offset;
           for (auto &v : initial->values) {
-            if (auto value = v.get<std::int64_t> ())
+            if (auto value = ir::detail::operand_access (v).get<std::int64_t> ())
               store_integer (at, initial->type, std::bit_cast<std::uint64_t> (*value));
-            else if (auto value = v.get<std::uint64_t> ())
+            else if (auto value = ir::detail::operand_access (v).get<std::uint64_t> ())
               store_integer (at, initial->type, *value);
-            else if (auto value = v.get<float> ())
+            else if (auto value = ir::detail::operand_access (v).get<float> ())
               store (at, *value);
-            else if (auto value = v.get<double> ())
+            else if (auto value = ir::detail::operand_access (v).get<double> ())
               store (at, *value);
             else
-              store (at, *v.get<long double> ());
-            at += width->size;
+              store (at, *ir::detail::operand_access (v).get<long double> ());
+            at += width.value ().size;
           }
         }
       }
@@ -244,24 +251,26 @@ Result<void> ProgramImage::data () {
 Result<void> ProgramImage::references (
   const std::function<Result<std::uint64_t> (const ir::Label &)> &label_address) {
   for (auto &module : context.modules ())
-    for (auto &item : module.items ())
+    for (auto &item : ir::detail::NodeAccess::items (module))
       if (auto data = std::get_if<const ir::GlobalData *> (&item)) {
         auto destination
           = reinterpret_cast<std::byte *> (bindings[identities.at (&(*data)->symbol ())].address);
         if (auto ref = std::get_if<ir::SymbolReference> (&(*data)->initializer ())) {
-          auto &entry = binding (identities.at (ref->symbol));
+          auto &entry = binding (identities.at (ir::detail::NodeAccess::symbol (*(ref))));
           if (!entry.address)
             return error (&(*data)->symbol (), "relocate", invalid ("unresolved data reference"));
           store (destination, entry.address + std::bit_cast<std::uint64_t> (ref->displacement));
         } else if (auto ref = std::get_if<ir::LabelReference> (&(*data)->initializer ())) {
-          auto address = label_address (*ref->label);
-          if (!address) return error (&(*data)->symbol (), "relocate", address.error ());
-          if (ref->base) {
-            auto base = label_address (*ref->base);
-            if (!base) return base.error ();
-            *address -= *base;
+          auto address = label_address (*ir::detail::NodeAccess::label (*(ref)));
+          if (!(address).has_value ())
+            return error (&(*data)->symbol (), "relocate", address.error ());
+          if (ir::detail::NodeAccess::base (*(ref))) {
+            auto base = label_address (*ir::detail::NodeAccess::base (*(ref)));
+            if (!(base).has_value ()) return base.error ();
+            (address).value () -= (base).value ();
           }
-          store (destination, *address + std::bit_cast<std::uint64_t> (ref->displacement));
+          store (destination,
+                 (address).value () + std::bit_cast<std::uint64_t> (ref->displacement));
         }
       }
   return {};

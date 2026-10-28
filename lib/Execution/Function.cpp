@@ -71,8 +71,9 @@ Result<void> FunctionHandle::compile () const {
   auto index = owner_->binding (index_).function;
   return index ? owner_->compile_native (*index) : Result<void> ();
 }
-const codegen::CompiledFunction *FunctionHandle::artifact () const {
-  return owner_->artifact (index_);
+OptionalRef<const codegen::CompiledFunction> FunctionHandle::artifact () const {
+  return owner_ ? ::mirnext::detail::borrow_optional (owner_->artifact (index_))
+                : OptionalRef<const codegen::CompiledFunction>{};
 }
 std::optional<BlockCompilationStatistics> FunctionHandle::block_statistics () const {
   if (owner_)
@@ -86,7 +87,8 @@ Result<std::vector<ScalarValue>> FunctionHandle::call (
   if (is_jump_return ())
     return diagnostic (*this, invalid ("host calls require the ordinary calling convention"));
   auto result = owner_->invoke (index_, args);
-  if (!result && mode () == ExecutionMode::JIT) return diagnostic (*this, result.error ());
+  if (!(result).has_value () && mode () == ExecutionMode::JIT)
+    return diagnostic (*this, result.error ());
   return result;
 }
 Result<NativeEntry> FunctionHandle::native_entry () const {
@@ -101,34 +103,34 @@ Result<T> FunctionHandle::scalar_call (std::span<const T> args) const {
   if (!owner_) return invalid ("moved-from function handle");
   auto &f = *this;
   auto checked = check_signature (f, args);
-  if (!checked) return diagnostic (f, checked.error ());
+  if (!checked.has_value ()) return diagnostic (f, checked.error ());
   if (mode () == ExecutionMode::Interpreter
       || (owner_->has_interpreted && !owner_->hardware.empty ())) {
     std::vector<ExecutionArgument> values;
     values.reserve (args.size ());
     for (auto value : args) values.emplace_back (value);
     auto result = call (values);
-    if (!result) return result.error ();
+    if (!(result).has_value ()) return result.error ();
     if constexpr (std::is_same_v<T, double>)
-      return (*result)[0].as_double ();
+      return ((result).value ())[0].as_double ();
     else if constexpr (std::is_same_v<T, std::uint64_t>)
-      return (*result)[0].as_u64 ();
+      return ((result).value ())[0].as_u64 ();
     else
-      return (*result)[0].as_i64 ();
+      return ((result).value ())[0].as_i64 ();
   }
   auto entry = owner_->native_calls->scalar_entry (owner_->binding (index_).address, signature ());
-  if (!entry) return diagnostic (f, entry.error ());
+  if (!(entry).has_value ()) return diagnostic (f, entry.error ());
   if (owner_->native_boundary) {
-    auto value
-      = owner_->native_boundary->recovery ().invoke<T> (*entry, reinterpret_cast<std::uintptr_t> (
-                                                                  args.data ()));
-    if (!value) return diagnostic (f, value.error ());
+    auto value = owner_->native_boundary->recovery ().invoke<T> ((entry).value (),
+                                                                 reinterpret_cast<std::uintptr_t> (
+                                                                   args.data ()));
+    if (!value.has_value ()) return diagnostic (f, value.error ());
     return value;
   }
   ExecutionInvocation invocation;
-  auto value = reinterpret_cast<T (*) (const T *)> (*entry) (args.data ());
+  auto value = reinterpret_cast<T (*) (const T *)> ((entry).value ()) (args.data ());
   auto result = invocation.status ();
-  if (!result) return diagnostic (f, result.error ());
+  if (!(result).has_value ()) return diagnostic (f, result.error ());
   return value;
 }
 Result<std::int64_t> FunctionHandle::call_i64 (std::span<const std::int64_t> args) const {
@@ -139,5 +141,11 @@ Result<std::uint64_t> FunctionHandle::call_u64 (std::span<const std::uint64_t> a
 }
 Result<double> FunctionHandle::call_double (std::span<const double> args) const {
   return scalar_call (args);
+}
+}  // namespace mirnext::execution
+
+namespace mirnext::execution {
+std::uintptr_t FunctionHandle::address () const {
+  return owner_ ? owner_->binding (index_).address : 0;
 }
 }  // namespace mirnext::execution

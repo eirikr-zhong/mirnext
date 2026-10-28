@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. One function registry, symbol image and load pipeline. */
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/Execution/detail/LoadedProgram.hpp"
 #include "mirnext/CodeGen/BlockEntry.hpp"
 #include <algorithm>
@@ -39,8 +40,8 @@ Result<void> LoadedProgram::register_functions (const EngineSelector &select) {
     for (auto &f : module.functions ()) {
       Result<ExecutionEngine> selected
         = select ? select (f) : Result<ExecutionEngine> (default_engine);
-      if (!selected) return error (&f.symbol (), "engine", selected.error ());
-      switch (*selected) {
+      if (!(selected).has_value ()) return error (&f.symbol (), "engine", selected.error ());
+      switch ((selected).value ()) {
       case ExecutionEngine::Interpreter: has_interpreted = true; break;
       case ExecutionEngine::EagerJIT:
       case ExecutionEngine::LazyJIT:
@@ -49,7 +50,7 @@ Result<void> LoadedProgram::register_functions (const EngineSelector &select) {
       }
       auto record = std::make_unique<Code> ();
       record->source = &f;
-      record->engine = *selected;
+      record->engine = (selected).value ();
       functions.push_back (std::move (record));
       ++statistics.functions;
     }
@@ -64,12 +65,13 @@ Result<void> LoadedProgram::prepare_hardware () {
     for (auto &r : record->source->registers ())
       if (!r.hardware_binding ().empty ()) {
         auto reg = target.find_register (r.hardware_binding ());
-        if (!reg) return error (&record->source->symbol (), "hardware", reg.error ());
-        if (!target.accepts (*reg, r.type ()))
+        if (!(reg).has_value ())
+          return error (&record->source->symbol (), "hardware", reg.error ());
+        if (!target.accepts ((reg).value (), r.type ()))
           return error (&record->source->symbol (), "hardware",
                         invalid ("invalid hardware binding type"));
-        if (hardware_indices.try_emplace (reg->encoding (), hardware.size ()).second) {
-          auto info = target.register_info (*reg);
+        if (hardware_indices.try_emplace (reg.value ().encoding (), hardware.size ()).second) {
+          auto info = target.register_info ((reg).value ()).get ();
           auto type = info->bank == target::RegisterBank::Integer ? ir::Type::i64 ()
                                                                   : ir::Type (ir::Type::Kind::F64);
           hardware_bindings.emplace_back (type, info->name);
@@ -99,18 +101,24 @@ Result<void> LoadedProgram::index_callees () {
 }
 Result<void> LoadedProgram::initialize () {
   for (auto &m : context.modules ())
-    for (auto &item : m.items ())
+    for (auto &item : ir::detail::NodeAccess::items (m))
       if (auto data = std::get_if<const ir::GlobalData *> (&item))
         if (auto expression = std::get_if<ir::ExpressionData> (&(*data)->initializer ())) {
-          auto values = invoke (identities.at (&expression->function->symbol ()), {});
-          if (!values) return error (&(*data)->symbol (), "initialize", values.error ());
-          if (values->size () != 1)
+          auto values
+            = invoke (identities.at (&ir::detail::NodeAccess::function (*(expression))->symbol ()),
+                      {});
+          if (!(values).has_value ())
+            return error (&(*data)->symbol (), "initialize", values.error ());
+          if (values.value ().size () != 1)
             return error (&(*data)->symbol (), "initialize",
                           invalid ("invalid expression result count"));
           auto &entry = binding (identities.at (&(*data)->symbol ()));
-          auto stored = store_scalar (expression->function->signature ().results[0], entry.address,
-                                      values->front ());
-          if (!stored) return error (&(*data)->symbol (), "initialize", stored.error ());
+          auto stored = store_scalar (ir::detail::NodeAccess::function (*(expression))
+                                        ->signature ()
+                                        .results[0],
+                                      entry.address, values.value ().front ());
+          if (!(stored).has_value ())
+            return error (&(*data)->symbol (), "initialize", stored.error ());
           ++statistics.expressions;
         }
   return {};
@@ -131,9 +139,10 @@ Result<void> LoadedProgram::protect_native_entries () {
     indices.push_back (n);
   }
   auto entries = native_boundary->add_entries (targets);
-  if (!entries) return error (nullptr, "native-boundary", entries.error ());
-  for (std::size_t n = 0; n < entries->size (); ++n)
-    bindings[identities.at (&functions[indices[n]]->source->symbol ())].address = (*entries)[n];
+  if (!(entries).has_value ()) return error (nullptr, "native-boundary", entries.error ());
+  for (std::size_t n = 0; n < entries.value ().size (); ++n)
+    bindings[identities.at (&functions[indices[n]]->source->symbol ())].address
+      = ((entries).value ())[n];
   return {};
 }
 Result<void> LoadedProgram::publish_jump_guards () {
@@ -149,51 +158,51 @@ Result<void> LoadedProgram::publish_jump_guards () {
   auto resolver
     = codegen::make_block_resolver (target, reinterpret_cast<std::uintptr_t> (&reject_jump),
                                     native_boundary->recovery ().recovery_address ());
-  if (!resolver) return error (nullptr, "engine-jump", resolver.error ());
+  if (!(resolver).has_value ()) return error (nullptr, "engine-jump", resolver.error ());
   std::vector<std::size_t> sizes (jump_descriptors.size () + 1, codegen::block_entry_bytes);
-  sizes[0] = resolver->size ();
+  sizes[0] = resolver.value ().size ();
   auto reservation = CodeMemory (options.link.memory_provider).reserve (sizes);
-  if (!reservation) return reservation.error ();
-  auto address = reservation->address (0);
-  if (!address) return address.error ();
+  if (!(reservation).has_value ()) return reservation.error ();
+  auto address = reservation.value ().address (0);
+  if (!(address).has_value ()) return address.error ();
   std::vector<std::vector<std::uint8_t>> buffers;
-  buffers.push_back (std::move (*resolver));
+  buffers.push_back (std::move ((resolver).value ()));
   for (std::size_t n = 0; n < jump_descriptors.size (); ++n) {
     auto &descriptor = jump_descriptors[n];
-    auto gate = reservation->address (n + 1);
-    if (!gate) return gate.error ();
-    descriptor->destination = *gate + codegen::block_entry_cold_offset;
+    auto gate = reservation.value ().address (n + 1);
+    if (!(gate).has_value ()) return gate.error ();
+    descriptor->destination = (gate).value () + codegen::block_entry_cold_offset;
     auto bytes
       = codegen::make_block_entry (target,
                                    {reinterpret_cast<std::uintptr_t> (&descriptor->destination),
                                     reinterpret_cast<std::uintptr_t> (descriptor.get ()),
-                                    *address});
-    if (!bytes) return bytes.error ();
-    buffers.push_back (std::move (*bytes));
+                                    (address).value ()});
+    if (!(bytes).has_value ()) return bytes.error ();
+    buffers.push_back (std::move ((bytes).value ()));
   }
   std::vector<std::span<const std::uint8_t>> views;
   for (auto &b : buffers) views.emplace_back (b);
-  auto published = reservation->publish (views);
-  if (!published) return published.error ();
+  auto published = reservation.value ().publish (views);
+  if (!(published).has_value ()) return published.error ();
   for (std::size_t n = 0; n < jump_descriptors.size (); ++n) {
-    auto entry = (*published)[n + 1].address ();
+    auto entry = ((published).value ())[n + 1].address ();
     bindings[jump_descriptors[n]->binding].address = entry;
     virtual_functions.insert (entry);
   }
   for (auto size : sizes) statistics.code_bytes += size;
   ++statistics.code_batches;
-  jump_entries = std::move (*published);
+  jump_entries = std::move ((published).value ());
   return {};
 }
 Result<void> LoadedProgram::load (EngineSelector select) {
   auto policy = jit_engine (options.link.compilation);
-  if (!policy) return policy.error ();
+  if (!(policy).has_value ()) return policy.error ();
   if (!select && interpreted (default_engine) && options.link.compilation != JITCompilation::Eager)
     return invalid ("JIT compilation policy requires JIT mode");
   auto registered = register_functions (select);
-  if (!registered) return registered;
+  if (!(registered).has_value ()) return registered;
   auto bound = symbols (options.link, has_native && !has_interpreted);
-  if (!bound) return bound;
+  if (!(bound).has_value ()) return bound;
   for (std::size_t n = 0; n < functions.size (); ++n)
     bindings[identities.at (&functions[n]->source->symbol ())].function = n;
   if (has_native && has_interpreted)
@@ -201,8 +210,9 @@ Result<void> LoadedProgram::load (EngineSelector select) {
       for (auto &block : record->source->blocks ())
         for (auto &i : block.instructions ())
           if (i.opcode () == ir::Opcode::JCall)
-            if (auto ref = i.operands ()[1].get<ir::SymbolReference> ()) {
-              auto &callee = binding (identities.at (ref->symbol));
+            if (auto ref
+                = ir::detail::operand_access (i.operands ()[1]).get<ir::SymbolReference> ()) {
+              auto &callee = binding (identities.at (ir::detail::NodeAccess::symbol (*(ref))));
               if (callee.function
                   && interpreted (record->engine)
                        != interpreted (functions[*callee.function]->engine))
@@ -211,7 +221,7 @@ Result<void> LoadedProgram::load (EngineSelector select) {
                                        "domains"));
             }
   auto allocated = data ();
-  if (!allocated) return allocated;
+  if (!(allocated).has_value ()) return allocated;
   for (auto &entry : bindings)
     if (entry.kind == Kind::Data && !entry.alias && !entry.writable && entry.size)
       readonly.emplace_back (entry.address, entry.address + entry.size);
@@ -225,59 +235,59 @@ Result<void> LoadedProgram::load (EngineSelector select) {
   }
   readonly.resize (count);
   auto bank = prepare_hardware ();
-  if (!bank) return bank;
+  if (!(bank).has_value ()) return bank;
   bool foreign = false;
   if (options.native_calls)
     for (auto &entry : bindings)
-      foreign |= entry.kind == Kind::Function && !entry.source->function () && entry.address
+      foreign |= entry.kind == Kind::Function && !entry.source->function ().get () && entry.address
                  && !entry.interpret;
   if (has_native || foreign)
     native_calls = std::make_unique<NativeCalls> (options.link, hardware_bindings);
   if (has_native && has_interpreted) options.native_entries = true;
   auto prepared = prepare ();
-  if (!prepared) return prepared;
+  if (!(prepared).has_value ()) return prepared;
   bool blocks = std::any_of (functions.begin (), functions.end (), [] (auto &f) {
     return f->engine == ExecutionEngine::BlockVersioning;
   });
   if (blocks || (has_native && has_interpreted)) {
     auto boundary = NativeBoundary::create (options.link.memory_provider);
-    if (!boundary) return boundary.error ();
-    native_boundary.emplace (std::move (*boundary));
+    if (!(boundary).has_value ()) return boundary.error ();
+    native_boundary.emplace (std::move ((boundary).value ()));
   }
   if (blocks) {
     auto bbv = prepare_block_versioning ();
-    if (!bbv) return bbv;
+    if (!(bbv).has_value ()) return bbv;
   }
   auto lazy = publish_lazy_entries ();
-  if (!lazy) return lazy;
+  if (!(lazy).has_value ()) return lazy;
   auto eager = prepare_eager ();
-  if (!eager) return eager.error ();
+  if (!(eager).has_value ()) return eager.error ();
   if (options.native_entries) {
     auto entries = publish_entries ();
-    if (!entries) return entries;
+    if (!(entries).has_value ()) return entries;
   }
   auto guards = publish_jump_guards ();
-  if (!guards) return guards;
+  if (!(guards).has_value ()) return guards;
   auto protect = protect_native_entries ();
-  if (!protect) return protect;
-  if (*eager) {
-    auto publish = publish_eager (**eager);
-    if (!publish) return publish;
+  if (!(protect).has_value ()) return protect;
+  if ((eager).value ()) {
+    auto publish = publish_eager (*(eager).value ());
+    if (!(publish).has_value ()) return publish;
   }
   auto roots = prepare_lazy_roots ();
-  if (!roots) return roots;
+  if (!(roots).has_value ()) return roots;
   auto callees = index_callees ();
-  if (!callees) return callees;
+  if (!(callees).has_value ()) return callees;
   auto refs = references ([&] (const ir::Label &l) -> Result<std::uint64_t> {
     if (engine (identities.at (&l.function ().symbol ())) != ExecutionEngine::Interpreter)
       return native_label_address (l);
     auto address = label_address (l);
-    if (!address) return address.error ();
-    return std::uint64_t (*address);
+    if (!(address).has_value ()) return address.error ();
+    return std::uint64_t ((address).value ());
   });
-  if (!refs) return refs;
+  if (!(refs).has_value ()) return refs;
   auto initialized = initialize ();
-  if (!initialized) return initialized;
+  if (!(initialized).has_value ()) return initialized;
   options.link.resolve = {};
   // An otherwise interpreted program can receive its first foreign function
   // pointer after loading. Retain the services for that cold ABI adapter.
@@ -290,8 +300,8 @@ Result<void> LoadedProgram::load (EngineSelector select) {
 Result<std::size_t> LoadedProgram::find_function (std::string_view module,
                                                   std::string_view name) const {
   auto index = find_native (module, name);
-  if (!index) return index.error ();
-  if (binding (*index).kind != Kind::Function)
+  if (!(index).has_value ()) return index.error ();
+  if (binding ((index).value ()).kind != Kind::Function)
     return Error{ErrorCode::InvalidOperand, "symbol is not a loaded function"};
   return index;
 }
@@ -309,12 +319,12 @@ Result<std::vector<ScalarValue>> LoadedProgram::invoke (std::size_t index,
   }
   if (auto active = InvocationActivation::find (*this)) {
     auto result = active->invoke (index, args);
-    if (!result) return result.error ();
-    return std::move (result->values);
+    if (!(result).has_value ()) return result.error ();
+    return std::move (result.value ().values);
   }
   InterpreterInvocation invocation{*this};
   auto result = invocation.invoke (index, args);
-  if (!result) return result.error ();
-  return std::move (result->values);
+  if (!(result).has_value ()) return result.error ();
+  return std::move (result.value ().values);
 }
 }  // namespace mirnext::execution::detail

@@ -29,6 +29,7 @@ jobs:
     - name: Build and test native C++ core
       run: |
         cmake -S . -B build ${{ matrix.cmake_args }} -DBUILD_TESTING=ON -DMIRNEXT_ENABLE_NATIVE_EVIDENCE=ON -DBUILD_SHARED_LIBS=${{ matrix.linkage == 'shared' && 'ON' || 'OFF' }} -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DMIRNEXT_TEST_EXPECTED_TARGET=${{ matrix.target }}
+        cmake --build build --config ${{ matrix.build_type }} --parallel 2 --target mirnext_public_api_test
         cmake --build build --config ${{ matrix.build_type }} --parallel 2
         ctest --test-dir build -C ${{ matrix.build_type }} --output-on-failure --parallel 4 --output-junit "${{ github.workspace }}/build/native-tests.xml"
         python3 tests/Platform/AuditAcceptance.py --source . --platform native --linkage ${{ matrix.linkage }} --configuration ${{ matrix.build_type }} --output build/native-evidence-${{ matrix.build_type }}.json build

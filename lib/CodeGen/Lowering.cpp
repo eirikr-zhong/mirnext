@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Owning target lowering dispatch. */
+#include "mirnext/CodeGen/Stages.hpp"
 #include "mirnext/CodeGen/Lowering.hpp"
 #include "mirnext/CodeGen/Detail/TargetLowering.hpp"
 namespace mirnext::codegen {

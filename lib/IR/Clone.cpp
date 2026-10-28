@@ -1,23 +1,25 @@
 /* Licensed under the MIT License. Two-pass typed remapping; no runtime objects. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #include "mirnext/IR/IR.hpp"
 #include <unordered_map>
 
 namespace mirnext::ir {
 class IRCloner {
  public:
-  static Result<std::unique_ptr<Context>> run (std::span<const Module *const> input) {
+  static Result<Program> run (std::span<const Module *const> input) {
     auto sources = input | std::views::transform ([] (const Module *module) -> const Module & {
                      return *module;
                    });
     for (auto &module : sources) {
       for (auto &function : module.functions ()) {
         auto phase = function.require_register_ir ();
-        if (!phase) return phase.error ();
+        if (!(phase).has_value ()) return phase.error ();
       }
       auto valid = module.verify ();
-      if (!valid) return valid.error ();
+      if (!(valid).has_value ()) return valid.error ();
     }
-    auto result = std::make_unique<Context> ();
+    Program result;
     std::unordered_map<const Module *, Module *> modules;
     std::unordered_map<const Symbol *, Symbol *> symbols;
     std::unordered_map<const Function *, Function *> functions;
@@ -28,92 +30,110 @@ class IRCloner {
     std::unordered_map<const GlobalData *, const GlobalData *> data;
     std::unordered_map<const MemoryLocation *, const MemoryLocation *> locations;
     for (auto &old_module : sources) {
-      auto created = result->create_module (old_module.name ());
-      if (!created) return created.error ();
-      auto &module = **created;
+      auto created = detail::access (result).create_module (old_module.name ());
+      if (!(created).has_value ()) return created.error ();
+      auto &module = (created).value ();
       modules.emplace (&old_module, &module);
       for (auto &symbol : old_module.symbols ()) {
         if (symbol.kind () == Symbol::Kind::Data && symbol.name ().empty ()) continue;
-        Result<Symbol *> copied
+        Result<Symbol &> copied
           = symbol.kind () == Symbol::Kind::Prototype
-              ? module.prototype (symbol.name (), *symbol.signature ())
+              ? detail::access (module).prototype (symbol.name (), *symbol.signature ().get ())
             : symbol.kind () == Symbol::Kind::Import
-              ? module.import (symbol.name (), symbol.signature ()
-                                                 ? std::optional (*symbol.signature ())
-                                                 : std::nullopt)
+              ? detail::access (module).import (symbol.name (),
+                                                symbol.signature ().get ()
+                                                  ? std::optional (*symbol.signature ().get ())
+                                                  : std::nullopt)
             : symbol.kind () == Symbol::Kind::Function
-              ? module.declare_function (symbol.name (), *symbol.signature ())
-              : module.forward (symbol.name ());
-        if (!copied) return copied.error ();
-        symbols.emplace (&symbol, *copied);
+              ? detail::access (module).declare_function (symbol.name (),
+                                                          *symbol.signature ().get ())
+              : detail::access (module).forward (symbol.name ());
+        if (!(copied).has_value ()) return copied.error ();
+        symbols.emplace (&symbol, &(copied).value ());
       }
       for (auto &old : old_module.functions ()) {
         std::vector<std::string_view> names;
         bool all_named = true;
-        for (auto reg : old.arguments ()) {
+        for (auto reg : detail::ReferenceAccess::pointers (old.arguments ())) {
           names.push_back (reg->name ());
           all_named &= !reg->name ().empty ();
         }
-        auto copied = module.define_function (*symbols.at (&old.symbol ()),
-                                              all_named ? std::span<const std::string_view> (names)
-                                                        : std::span<const std::string_view>{});
-        if (!copied) return copied.error ();
-        auto &function = **copied;
+        auto copied
+          = detail::access (module).define_function (*symbols.at (&old.symbol ()),
+                                                     all_named
+                                                       ? std::span<const std::string_view> (names)
+                                                       : std::span<const std::string_view>{});
+        if (!(copied).has_value ()) return copied.error ();
+        auto &function = (copied).value ();
         functions.emplace (&old, &function);
-        for (std::size_t n = 0; n < old.arguments ().size (); ++n)
-          registers.emplace (old.arguments ()[n], function.arguments ()[n]);
+        for (std::size_t n = 0; n < detail::ReferenceAccess::pointers (old.arguments ()).size ();
+             ++n)
+          registers.emplace (detail::ReferenceAccess::pointers (old.arguments ())[n],
+                             detail::ReferenceAccess::pointers (function.arguments ())[n]);
         for (auto &reg : old.registers ())
           if (!reg.is_argument ()) {
-            auto mapped
-              = function.create_register (reg.type (), reg.name (), reg.hardware_binding ());
-            if (!mapped) return mapped.error ();
-            registers.emplace (&reg, *mapped);
+            auto mapped = detail::access (function).create_register (reg.type (), reg.name (),
+                                                                     reg.hardware_binding ());
+            if (!(mapped).has_value ()) return mapped.error ();
+            registers.emplace (&reg, &(mapped).value ());
           }
         for (auto &reg : old.registers ())
           const_cast<Register *> (registers.at (&reg))->memory_backed_ = reg.is_memory_backed ();
         // Preserve aliases of an interned hardware register without declaring a second binding.
         for (auto &[name, reg] : old.register_names_)
-          function.register_names_.insert_or_assign (module.context ().intern_string (name),
+          function.register_names_.insert_or_assign (module.program ().intern_string (name),
                                                      const_cast<Register *> (registers.at (reg)));
         for (auto &scope : old.stack_scopes ()) {
           auto copied_scope
-            = function.create_stack_scope (scope.parent () ? scopes.at (scope.parent ()) : nullptr,
-                                           scope.name ());
-          if (!copied_scope) return copied_scope.error ();
-          scopes.emplace (&scope, *copied_scope);
+            = detail::access (function).create_stack_scope (scope.parent ().get ()
+                                                              ? scopes.at (scope.parent ().get ())
+                                                              : nullptr,
+                                                            scope.name ());
+          if (!(copied_scope).has_value ()) return copied_scope.error ();
+          scopes.emplace (&scope, &(copied_scope).value ());
         }
         for (auto &block : old.blocks ()) {
-          auto mapped = function.create_block (block.name (), block.stack_scope ()
-                                                                ? scopes.at (block.stack_scope ())
-                                                                : nullptr);
-          if (!mapped) return mapped.error ();
-          blocks.emplace (&block, *mapped);
+          auto mapped
+            = detail::access (function).create_block (block.name (),
+                                                      block.stack_scope ().get ()
+                                                        ? scopes.at (block.stack_scope ().get ())
+                                                        : nullptr);
+          if (!(mapped).has_value ()) return mapped.error ();
+          blocks.emplace (&block, &(mapped).value ());
         }
         for (auto &scope : old.stack_scopes ())
           scopes.at (&scope)->materialized_ = scope.materialized ();
         for (auto &label : old.labels ()) {
-          auto mapped = function.create_label (*blocks.at (&label.block ()), label.name ());
-          if (!mapped) return mapped.error ();
-          labels.emplace (&label, *mapped);
+          auto mapped
+            = detail::access (function).create_label (*blocks.at (&label.block ()), label.name ());
+          if (!(mapped).has_value ()) return mapped.error ();
+          labels.emplace (&label, &(mapped).value ());
         }
       }
     }
     auto operand = [&] (const Operand &old) -> Operand {
-      if (auto reg = old.get<const Register *> ()) return Operand (*registers.at (*reg));
-      if (auto label = old.get<const Label *> ()) return Operand (*labels.at (*label));
-      if (auto symbol = old.get<SymbolReference> ())
-        return Operand (SymbolReference{symbols.at (symbol->symbol), symbol->displacement});
-      if (auto address = old.get<Memory> ()) {
+      if (auto reg = detail::operand_access (old).get<const Register *> ())
+        return Operand (*registers.at (*reg));
+      if (auto label = detail::operand_access (old).get<const Label *> ())
+        return Operand (*labels.at (*label));
+      if (auto symbol = detail::operand_access (old).get<SymbolReference> ())
+        return Operand (
+          detail::NodeAccess::make_SymbolReference (symbols.at (
+                                                      detail::NodeAccess::symbol (*(symbol))),
+                                                    symbol->displacement));
+      if (auto address = detail::operand_access (old).get<Memory> ()) {
         auto memory = *address;
-        if (memory.base) memory.base = registers.at (memory.base);
-        if (memory.index) memory.index = registers.at (memory.index);
+        if (detail::NodeAccess::base (memory))
+          detail::NodeAccess::base (memory) = registers.at (detail::NodeAccess::base (memory));
+        if (detail::NodeAccess::index (memory))
+          detail::NodeAccess::index (memory) = registers.at (detail::NodeAccess::index (memory));
         if (memory.literal_source_) memory.literal_source_ = data.at (memory.literal_source_);
         if (memory.location_) {
           // Clone only referenced analysis identities. Copying dead classes from
           // earlier optimization runs makes repeated optimize grow without bound.
           auto [at, fresh] = locations.try_emplace (memory.location_);
           if (fresh)
-            at->second = &IRRewriter (*functions.at (&memory.location_->function ()))
+            at->second = &InstructionRewriter (*functions.at (&memory.location_->function ()))
                             .create_memory_location ();
           memory.location_ = at->second;
         }
@@ -126,25 +146,32 @@ class IRCloner {
         [&] (const auto &value) -> DataInitializer {
           using T = std::decay_t<decltype (value)>;
           if constexpr (std::is_same_v<T, SymbolReference>)
-            return SymbolReference{symbols.at (value.symbol), value.displacement};
+            return detail::NodeAccess::make_SymbolReference (symbols.at (
+                                                               detail::NodeAccess::symbol (value)),
+                                                             value.displacement);
           else if constexpr (std::is_same_v<T, LabelReference>)
-            return LabelReference{labels.at (value.label),
-                                  value.base ? labels.at (value.base) : nullptr,
-                                  value.displacement};
+            return detail::NodeAccess::make_LabelReference (labels.at (
+                                                              detail::NodeAccess::label (value)),
+                                                            detail::NodeAccess::base (value)
+                                                              ? labels.at (
+                                                                  detail::NodeAccess::base (value))
+                                                              : nullptr,
+                                                            value.displacement);
           else if constexpr (std::is_same_v<T, ExpressionData>)
-            return ExpressionData{functions.at (value.function)};
+            return detail::NodeAccess::make_ExpressionData (
+              functions.at (detail::NodeAccess::function (value)));
           else
             return value;
         },
         old.initializer ());
       auto mapped
-        = modules.at (&old_module)
-            ->create_data (old.symbol ().name (), std::move (initializer), old.writable ());
-      if (!mapped) return mapped.error ();
-      (*mapped)->literal_pool_ = old.literal_pool_;
-      data.emplace (&old, *mapped);
+        = detail::access (*(modules.at (&old_module)))
+            .create_data (old.symbol ().name (), std::move (initializer), old.writable ());
+      if (!(mapped).has_value ()) return mapped.error ();
+      mapped.value ().literal_pool_ = old.literal_pool_;
+      data.emplace (&old, &(mapped).value ());
       if (old.symbol ().name ().empty ())
-        symbols.emplace (&old.symbol (), const_cast<Symbol *> (&(*mapped)->symbol ()));
+        symbols.emplace (&old.symbol (), const_cast<Symbol *> (&mapped.value ().symbol ()));
       return {};
     };
     // Literal provenance is remapped when cloning bodies, before expression data is verified.
@@ -152,73 +179,77 @@ class IRCloner {
       for (auto &old : old_module.data ())
         if (!std::holds_alternative<ExpressionData> (old.initializer ())) {
           auto copied = copy_data (old_module, old);
-          if (!copied) return copied.error ();
+          if (!(copied).has_value ()) return copied.error ();
         }
     for (auto &old_module : sources) {
       auto &module = *modules.at (&old_module);
       for (auto &old_function : old_module.functions ())
         for (auto &old_block : old_function.blocks ()) {
-          IRBuilder builder (*blocks.at (&old_block));
+          InstructionBuilder builder (*blocks.at (&old_block));
           for (auto &old : old_block.instructions ()) {
             std::vector<Operand> operands;
             operands.reserve (old.operands ().size ());
             for (auto &value : old.operands ()) operands.push_back (operand (value));
             auto copied = builder.emit (old.opcode (), operands);
-            if (!copied) return copied.error ();
+            if (!(copied).has_value ()) return copied.error ();
           }
         }
       for (auto &old : old_module.data ())
         if (std::holds_alternative<ExpressionData> (old.initializer ())) {
           auto copied = copy_data (old_module, old);
-          if (!copied) return copied.error ();
+          if (!(copied).has_value ()) return copied.error ();
         }
       for (auto &symbol : old_module.symbols ())
         if (symbol.exported ()) {
-          auto exported = module.export_symbol (*symbols.at (&symbol));
-          if (!exported) return exported.error ();
+          auto exported = detail::access (module).export_symbol (*symbols.at (&symbol));
+          if (!(exported).has_value ()) return exported.error ();
         }
       for (auto &symbol : old_module.symbols ())
-        if (auto variable = symbol.variable ()) {
-          auto bound = module.bind_variable (*symbols.at (&symbol), variable->type (),
-                                             variable->writable ());
-          if (!bound) return bound.error ();
+        if (auto variable = symbol.variable ().get ()) {
+          auto bound
+            = detail::access (module).bind_variable (*symbols.at (&symbol), variable->type (),
+                                                     variable->writable ());
+          if (!(bound).has_value ()) return bound.error ();
         }
       module.items_.clear ();
-      for (auto &item : old_module.items ())
+      for (auto &item : detail::NodeAccess::items (old_module))
         module.items_.push_back (std::visit (
           [&] (auto value) -> ModuleItem {
             using T = decltype (value);
             if constexpr (std::is_same_v<T, const Function *>)
-              return static_cast<const Function *> (functions.at (value));
+              return *functions.at (value);
             else if constexpr (std::is_same_v<T, const GlobalData *>)
-              return data.at (value);
+              return *data.at (value);
             else if constexpr (std::is_same_v<T, const Symbol *>)
-              return static_cast<const Symbol *> (symbols.at (value));
+              return *symbols.at (value);
             else if constexpr (std::is_same_v<T, ForwardDeclaration>)
-              return ForwardDeclaration{symbols.at (value.symbol)};
+              return detail::NodeAccess::make_ForwardDeclaration (
+                symbols.at (detail::NodeAccess::symbol (value)));
             else if constexpr (std::is_same_v<T, DataDeclaration>)
-              return DataDeclaration{symbols.at (value.symbol)};
+              return detail::NodeAccess::make_DataDeclaration (
+                symbols.at (detail::NodeAccess::symbol (value)));
             else
-              return ExportDeclaration{symbols.at (value.symbol)};
+              return detail::NodeAccess::make_ExportDeclaration (
+                symbols.at (detail::NodeAccess::symbol (value)));
           },
           item));
       for (auto &symbol : old_module.symbols ())
         symbols.at (&symbol)->forward_declared_ = symbol.forward_declared_;
       module.next_literal_ = old_module.next_literal_;
     }
-    auto valid = result->verify ();
-    if (!valid) return valid.error ();
-    return result;
+    auto valid = result.verify ();
+    if (!(valid).has_value ()) return valid.error ();
+    return std::move (result);
   }
 };
-Result<std::unique_ptr<Context>> clone (const Context &source) {
+Result<Program> clone (const Program &source) {
   auto valid = source.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   std::vector<const Module *> modules;
   for (auto &module : source.modules ()) modules.push_back (&module);
   return IRCloner::run (modules);
 }
-Result<std::unique_ptr<Context>> clone (const Module &source) {
+Result<Program> clone (const Module &source) {
   const Module *modules[]{&source};
   return IRCloner::run (modules);
 }

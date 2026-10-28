@@ -1,3 +1,4 @@
+#include "mirnext/CodeGen/Access.hpp"
 /* Licensed under the MIT License. MIR register-liveness transfer functions.
    Reference algorithms Copyright (C) 2018-2024 Vladimir Makarov. */
 #include "mirnext/CodeGen/Analysis.hpp"
@@ -16,9 +17,12 @@ Error invalid (const MachineFunction &f, std::string why) {
 using detail::is_call;
 using detail::visit_registers;
 bool integer (const target::TargetMachine &target, MachineRegister reg) {
-  if (auto v = std::get_if<const MachineVirtualRegister *> (&reg))
+  if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&reg)))
     return (*v)->type ().is_integer ();
-  return target.register_info (std::get<target::PhysicalRegister> (reg))->bank
+  return target
+           .register_info (std::get<target::PhysicalRegister> (detail::NodeAccess::storage (reg)))
+           .get ()
+           ->bank
          == target::RegisterBank::Integer;
 }
 }  // namespace
@@ -79,24 +83,24 @@ std::array<std::optional<target::PhysicalRegister>, 2> early_clobbers (
 }
 Result<std::size_t> MachineLiveness::index (MachineRegister reg) const {
   if (!current (*owner_)) return invalid (*owner_, "stale analysis");
-  if (auto v = std::get_if<const MachineVirtualRegister *> (&reg)) {
+  if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&reg))) {
     if (auto at = virtuals_.find (*v); at != virtuals_.end ()) return at->second;
   } else {
-    auto p = std::get<target::PhysicalRegister> (reg);
-    if (owner_->target ().register_info (p))
+    auto p = std::get<target::PhysicalRegister> (detail::NodeAccess::storage (reg));
+    if (owner_->target ().register_info (p).get ())
       if (auto at = physicals_.find (p.encoding ()); at != physicals_.end ()) return at->second;
   }
   return invalid (*owner_, "register is foreign or outside the selected scan");
 }
 Result<bool> MachineLiveness::contains (const SparseBitSet &set, MachineRegister reg) const {
   auto p = index (reg);
-  if (!p) return p.error ();
-  return set.contains (*p);
+  if (!(p).has_value ()) return p.error ();
+  return set.contains ((p).value ());
 }
 Result<long> MachineLiveness::frequency (MachineRegister reg) const {
   auto p = index (reg);
-  if (!p) return p.error ();
-  return frequencies_[*p];
+  if (!(p).has_value ()) return p.error ();
+  return frequencies_[(p).value ()];
 }
 Result<std::span<const MachineRegister>> MachineLiveness::deaths (
   const MachineInstruction &i) const {
@@ -124,15 +128,15 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
   result.has_frequencies_ = options.calculate_frequencies;
   std::vector<MachineRegister> all;
   for (auto &r : f.target ().registers ()) all.emplace_back (r.reg);
-  for (auto &r : f.registers ()) all.emplace_back (&r);
+  for (auto &r : f.registers ()) all.emplace_back (r);
   auto add = [&] (MachineRegister r) -> Result<void> {
     auto p = result.registers_.size ();
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+    if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r))) {
       if (!*v || &(*v)->function () != &f || !result.virtuals_.emplace (*v, p).second)
         return invalid (f, "foreign or repeated scan register");
     } else {
-      auto physical = std::get<target::PhysicalRegister> (r);
-      if (!f.target ().register_info (physical)
+      auto physical = std::get<target::PhysicalRegister> (detail::NodeAccess::storage (r));
+      if (!f.target ().register_info (physical).get ()
           || !result.physicals_.emplace (physical.encoding (), p).second)
         return invalid (f, "foreign or repeated physical scan register");
     }
@@ -142,33 +146,36 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
   for (auto r : options.scan_registers.empty () ? std::span<const MachineRegister> (all)
                                                 : options.scan_registers) {
     auto added = add (r);
-    if (!added) return added.error ();
+    if (!(added).has_value ()) return added.error ();
   }
   const bool compact = !options.scan_registers.empty (), advanced = options.optimization_level != 0;
   result.has_dead_info_ = advanced;
   const auto &cfg = graph.cfg ();
-  result.blocks_.resize (cfg.blocks.size ());
+  result.blocks_.resize (detail::NodeAccess::blocks (cfg).size ());
   result.frequencies_.resize (result.registers_.size ());
   SparseBitSet clobbered, globals;
   for (auto r : f.global_registers ())
-    if (!compact) globals.insert (*result.index (r));
+    if (!compact) globals.insert ((result.index (r)).value ());
   for (auto r : options.global_registers) {
-    if (!f.target ().register_info (r)) return invalid (f, "foreign global hardware register");
-    if (!compact) globals.insert (*result.index (r));
+    if (!f.target ().register_info (r).get ())
+      return invalid (f, "foreign global hardware register");
+    if (!compact) globals.insert ((result.index (r)).value ());
   }
   globals.for_each ([&] (auto r) {
-    result.globals_.push_back (std::get<target::PhysicalRegister> (result.registers_[r]));
+    result.globals_.push_back (
+      std::get<target::PhysicalRegister> (detail::NodeAccess::storage (result.registers_[r])));
   });
   if (!compact)
     for (auto &r : f.target ().registers ())
       if (f.target ().call_clobbers (r.reg, ir::Type (ir::Type::Kind::Undef)))
-        clobbered.insert (*result.index (r.reg));
+        clobbered.insert ((result.index (r.reg)).value ());
   auto bit = [&] (MachineRegister r) -> std::optional<std::size_t> {
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+    if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r))) {
       auto at = result.virtuals_.find (*v);
       if (at != result.virtuals_.end ()) return at->second;
     } else {
-      auto at = result.physicals_.find (std::get<target::PhysicalRegister> (r).encoding ());
+      auto at = result.physicals_.find (
+        std::get<target::PhysicalRegister> (detail::NodeAccess::storage (r)).encoding ());
       if (at != result.physicals_.end ()) return at->second;
     }
     return std::nullopt;
@@ -179,7 +186,7 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
     else
       bb.max_floating_pressure = std::max (bb.max_floating_pressure, ++fps);
   };
-  for (std::size_t b = 2; b < cfg.blocks.size (); ++b) {
+  for (std::size_t b = 2; b < detail::NodeAccess::blocks (cfg).size (); ++b) {
     auto &bb = result.blocks_[b];
     long weight = 1;
     if (advanced && options.calculate_frequencies)
@@ -187,13 +194,14 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
         weight *= 5;
     auto reference = [&] (MachineRegister r, std::size_t p) {
       if (options.calculate_frequencies
-          && std::holds_alternative<const MachineVirtualRegister *> (r)) {
+          && std::holds_alternative<const MachineVirtualRegister *> (
+            detail::NodeAccess::storage (r))) {
         auto &frequency = result.frequencies_[p];
         frequency = frequency < LONG_MAX - weight ? frequency + weight : LONG_MAX;
       }
     };
     int ints = 0, fps = 0;
-    auto body = cfg.blocks[b]->instructions ();
+    auto body = detail::NodeAccess::blocks (cfg)[b]->instructions ();
     for (auto at = body.end (); at != body.begin ();) {
       const auto &i = *--at;
       if (is_call (i.opcode ()) && !compact) {
@@ -219,20 +227,20 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
       if (compact) continue;
       for (auto r : early_clobbers (f.target (), i.opcode ()))
         if (r) {
-          auto p = *result.index (*r);
+          auto p = (result.index (*r)).value ();
           if (advanced) increase (bb, *r, ints, fps);
           bb.gen.erase (p);
           bb.kill.insert (p);
           if (advanced) (integer (f.target (), *r) ? --ints : --fps);
         }
       if (is_call (i.opcode ()))
-        for (auto r : i.call_arguments ()) bb.gen.insert (*result.index (r));
+        for (auto r : i.call_arguments ()) bb.gen.insert ((result.index (r)).value ());
     }
   }
   if (!compact) result.blocks_[1].out = globals;
-  std::vector<std::size_t> work (cfg.blocks.size ()), pending;
+  std::vector<std::size_t> work (detail::NodeAccess::blocks (cfg).size ()), pending;
   std::iota (work.begin (), work.end (), 0);
-  std::vector<std::size_t> scheduled (cfg.blocks.size ());
+  std::vector<std::size_t> scheduled (detail::NodeAccess::blocks (cfg).size ());
   std::size_t epoch = 0;
   bool first = true;
   while (!work.empty ()) {
@@ -271,9 +279,9 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
       bb.out.for_each ([&] (auto p) { increase (bb, all[p], ints, fps); });
     }
   if (advanced)
-    for (std::size_t b = 2; b < cfg.blocks.size (); ++b) {
+    for (std::size_t b = 2; b < detail::NodeAccess::blocks (cfg).size (); ++b) {
       auto live = result.blocks_[b].out;
-      auto body = cfg.blocks[b]->instructions ();
+      auto body = detail::NodeAccess::blocks (cfg)[b]->instructions ();
       for (auto at = body.end (); at != body.begin ();) {
         auto &i = *--at;
         std::vector<MachineRegister> dead;
@@ -293,9 +301,9 @@ Result<MachineLiveness> MachineLiveness::analyze_retained_topology (
         if (!dead.empty ()) result.deaths_.emplace (&i, std::move (dead));
         if (compact) continue;
         for (auto r : early_clobbers (f.target (), i.opcode ()))
-          if (r) live.erase (*result.index (*r));
+          if (r) live.erase ((result.index (*r)).value ());
         if (is_call (i.opcode ()))
-          for (auto r : i.call_arguments ()) live.insert (*result.index (r));
+          for (auto r : i.call_arguments ()) live.insert ((result.index (r)).value ());
       }
     }
   return result;

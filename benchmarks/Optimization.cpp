@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Complete owning-pipeline costs and allocations. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #include "mirnext/Transforms/Optimization.hpp"
 #include <algorithm>
 #include <chrono>
@@ -24,22 +26,33 @@ int main () {
   constexpr unsigned repetitions = 7;
   for (unsigned count : {64, 512})
     for (auto level : {OptimizationLevel::O0, OptimizationLevel::O2}) {
-      Context source;
-      auto module = source.create_module (std::string (80, 'm'));
-      if (!module) return 1;
+      Program source;
+      auto module = mirnext::ir::detail::access (source).create_module (std::string (80, 'm'));
+      if (!(module).has_value ()) return 1;
       for (unsigned n = 0; n < count; ++n) {
-        auto f = (*module)->create_function (std::string (80, 'f') + std::to_string (n),
-                                             {{Type::i64 ()}, {Type::i64 ()}});
-        if (!f) return 1;
-        auto a = (*f)->create_block (), b = (*f)->create_block (), c = (*f)->create_block (),
-             d = (*f)->create_block ();
-        if (!a || !b || !c || !d) return 1;
-        auto yes = (*f)->create_label (**c), done = (*f)->create_label (**d);
-        auto r = (*f)->create_register (Type::i64 ());
-        if (!yes || !done || !r) return 1;
-        if (!IRBuilder (**a).emit (Opcode::Bt, {Operand (**yes), Operand (*(*f)->arguments ()[0])})
-            || !IRBuilder (**b).assign (**r, 20) || !IRBuilder (**b).jump (**done)
-            || !IRBuilder (**c).assign (**r, 22) || !IRBuilder (**d).ret (Operand (**r)))
+        auto f = mirnext::ir::detail::access (((module)).value ())
+                   .create_function (std::string (80, 'f') + std::to_string (n),
+                                     {{Type::i64 ()}, {Type::i64 ()}});
+        if (!(f).has_value ()) return 1;
+        auto a = mirnext::ir::detail::access (((f)).value ()).create_block (),
+             b = mirnext::ir::detail::access (((f)).value ()).create_block (),
+             c = mirnext::ir::detail::access (((f)).value ()).create_block (),
+             d = mirnext::ir::detail::access (((f)).value ()).create_block ();
+        if (!(a).has_value () || !(b).has_value () || !(c).has_value () || !(d).has_value ())
+          return 1;
+        auto yes = mirnext::ir::detail::access (((f)).value ()).create_label ((c).value ()),
+             done = mirnext::ir::detail::access (((f)).value ()).create_label ((d).value ());
+        auto r = mirnext::ir::detail::access (((f)).value ()).create_register (Type::i64 ());
+        if (!(yes).has_value () || !(done).has_value () || !(r).has_value ()) return 1;
+        if (!(InstructionBuilder ((a).value ())
+                .emit (Opcode::Bt, {Operand ((yes).value ()),
+                                    Operand (*mirnext::ir::detail::ReferenceAccess::pointers (
+                                      f.value ().arguments ())[0])}))
+               .has_value ()
+            || !(InstructionBuilder ((b).value ()).assign ((r).value (), 20)).has_value ()
+            || !(InstructionBuilder ((b).value ()).jump ((done).value ())).has_value ()
+            || !(InstructionBuilder ((c).value ()).assign ((r).value (), 22)).has_value ()
+            || !(InstructionBuilder ((d).value ()).ret (Operand ((r).value ()))).has_value ())
           return 1;
       }
       std::vector<double> times;
@@ -55,16 +68,16 @@ int main () {
         auto result = optimize (source, options);
         auto end = std::chrono::steady_clock::now ();
         measuring = false;
-        if (!result) {
+        if (!(result).has_value ()) {
           std::cerr << result.error ().message << '\n';
           return 1;
         }
-        if (!result->verify ()) return 1;
+        if (!(result.value ().verify ()).has_value ()) return 1;
         std::uint64_t hash = 14695981039346656037ULL;
         auto word = [&] (std::size_t value) { hash = (hash ^ value) * 1099511628211ULL; };
-        for (unsigned char c : result->dump ()) word (c);
+        for (unsigned char c : result.value ().dump ()) word (c);
         std::size_t transformed = 0;
-        for (auto &stage : result->statistics ()) {
+        for (auto &stage : result.value ().statistics ()) {
           word (static_cast<unsigned> (stage.pass));
           word (stage.instructions_before);
           word (stage.instructions_after);
@@ -73,11 +86,11 @@ int main () {
         }
         if (rep
             && (hash != fingerprint || changes != transformed
-                || stages != result->statistics ().size ()))
+                || stages != result.value ().statistics ().size ()))
           return 2;
         fingerprint = hash;
         changes = transformed;
-        stages = result->statistics ().size ();
+        stages = result.value ().statistics ().size ();
         times.push_back (std::chrono::duration<double, std::milli> (end - start).count ());
         counts.push_back (allocations);
       }

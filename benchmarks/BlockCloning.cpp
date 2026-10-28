@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Informational timings without performance thresholds. */
+#include "mirnext/Transforms/Testing.hpp"
 #include "mirnext/Transforms/BlockCloning.hpp"
 #include "mirnext/Transforms/PrepareCFG.hpp"
 #include "mirnext/Serialization/Format.hpp"
@@ -39,22 +40,24 @@ int main () {
     std::size_t pass_allocations = 0;
     for (unsigned n = 0; n < repeats; ++n) {
       auto parsed = serialization::parse_text (text);
-      if (!parsed) return 1;
-      auto &function = *(*parsed)->modules ().begin ()->functions ().begin ();
+      if (!(parsed).has_value ()) return 1;
+      auto &function = *parsed.value ().modules ().begin ()->functions ().begin ();
       FunctionAnalysisManager analyses (function);
       FunctionPassManager prepare;
       prepare.add<PrepareCFGPass> ();
-      if (!prepare.run (function, analyses)) return 1;
+      if (!(prepare.run (function, analyses)).has_value ()) return 1;
       auto before = function.instruction_count ();
       allocations = 0;
       measuring = true;
       auto start = std::chrono::steady_clock::now ();
-      auto result = BlockCloningPass ().run (function, analyses);
+      auto result
+        = ::mirnext::transforms::detail::run_pass (BlockCloningPass (), function, analyses);
       auto end = std::chrono::steady_clock::now ();
       measuring = false;
       if (n && pass_allocations != allocations) return 1;
       pass_allocations = allocations;
-      if (!result || result->transformations != count || !function.verify ()
+      if (!(result).has_value () || result.value ().transformations != count
+          || !(function.verify ()).has_value ()
           || function.instruction_count () != before + count * (width + 1))
         return 1;
       times.push_back (std::chrono::duration<double, std::milli> (end - start).count ());

@@ -122,12 +122,12 @@ Result<ExecutionOptions> execution_options () {
 Result<int> run_program (std::span<const std::byte> bytes, int argc, char **argv,
                          char **environment) {
   auto context = serialization::read_binary (bytes);
-  if (!context) return context.error ();
+  if (!(context).has_value ()) return context.error ();
   const ir::Function *main = nullptr;
   // Derive typed bindings from direct call prototypes. Never guess an unknown
   // symbol's kind or call contract from its address or a host name convention.
   std::unordered_map<std::string, ir::Signature> signatures;
-  for (auto &m : (*context)->modules ())
+  for (auto &m : context.value ().modules ())
     for (auto &f : m.functions ()) {
       if (f.symbol ().name () == "main") {
         if (main) return invalid ("multiple main definitions");
@@ -135,15 +135,17 @@ Result<int> run_program (std::span<const std::byte> bytes, int argc, char **argv
       }
       for (auto &b : f.blocks ())
         for (auto &i : b.instructions ()) {
-          if (ir::instruction_descriptor (i.opcode ())->count != ir::OperandCount::Call) continue;
+          if (ir::instruction_descriptor (i.opcode ()).get ()->count != ir::OperandCount::Call)
+            continue;
           auto ref = i.operands ()[1].get<ir::SymbolReference> ();
-          if (!ref || ref->symbol->kind () != ir::Symbol::Kind::Import) continue;
+          if (!(ref).has_value () || ref.value ().symbol ().kind () != ir::Symbol::Kind::Import)
+            continue;
           auto prototype = i.operands ()[0].get<ir::SymbolReference> ();
-          auto signature = *prototype->symbol->signature ();
-          auto [at, inserted] = signatures.emplace (ref->symbol->name (), signature);
+          auto signature = *prototype.value ().symbol ().signature ().get ();
+          auto [at, inserted] = signatures.emplace (ref.value ().symbol ().name (), signature);
           if (!inserted && at->second != signature)
             return invalid ("inconsistent call prototypes for import '"
-                            + std::string (ref->symbol->name ()) + "'");
+                            + std::string (ref.value ().symbol ().name ()) + "'");
         }
     }
   if (!main) return invalid ("cannot execute program without main function");
@@ -162,41 +164,41 @@ Result<int> run_program (std::span<const std::byte> bytes, int argc, char **argv
       "main requires one integer result and (), (argc, argv) or (argc, argv, envp) scalar "
       "parameters");
   auto options = execution_options ();
-  if (!options) return options.error ();
+  if (!(options).has_value ()) return options.error ();
   Libraries libraries;
   auto loaded = libraries.load ();
-  if (!loaded) return loaded.error ();
+  if (!(loaded).has_value ()) return loaded.error ();
   auto target = target::TargetMachine::native ();
-  if (!target) return target.error ();
-  options->link.resolve = [&] (const ImportRequest &request) -> Result<ExternalSymbol> {
+  if (!(target).has_value ()) return target.error ();
+  options.value ().link.resolve = [&] (const ImportRequest &request) -> Result<ExternalSymbol> {
     auto address = libraries.find (request.name);
-    if (!address) return address.error ();
+    if (!(address).has_value ()) return address.error ();
     ExternalSymbol symbol;
-    symbol.address = *address;
-    if (request.signature)
-      symbol.signature = *request.signature;
+    symbol.address = (address).value ();
+    if ((request.signature ()).has_value ())
+      symbol.signature = (request.signature ()).value ();
     else if (auto at = signatures.find (std::string (request.name)); at != signatures.end ())
       symbol.signature = at->second;
-    else if (request.variable) {
-      auto layout = target->layout (request.variable->type ());
-      if (!layout) return layout.error ();
-      symbol.data
-        = ExternalData{layout->size, request.variable->writable (), request.variable->type ()};
+    else if ((request.variable ()).has_value ()) {
+      auto layout = target.value ().layout (request.variable ().value ().type ());
+      if (!(layout).has_value ()) return layout.error ();
+      symbol.data = ExternalData{layout.value ().size, request.variable ().value ().writable (),
+                                 request.variable ().value ().type ()};
     } else
       return invalid ("import '" + std::string (request.name)
                       + "' requires a typed declaration or direct call prototype");
     return symbol;
   };
-  auto session = ExecutionSession::create (**context, std::move (*options));
-  if (!session) return session.error ();
-  auto function = session->find_function (main->module ().name (), main->symbol ().name ());
-  if (!function) return function.error ();
+  auto session = ExecutionSession::create ((context).value (), std::move ((options).value ()));
+  if (!(session).has_value ()) return session.error ();
+  auto function = session.value ().find_function (main->module ().name (), main->symbol ().name ());
+  if (!(function).has_value ()) return function.error ();
   std::array<std::int64_t, 3> arguments{argc,
                                         std::int64_t (reinterpret_cast<std::uintptr_t> (argv)),
                                         std::int64_t (
                                           reinterpret_cast<std::uintptr_t> (environment))};
-  auto result = function->call_i64 (std::span (arguments).first (sig.parameters.size ()));
-  if (!result) return result.error ();
-  return static_cast<int> (*result);
+  auto result = function.value ().call_i64 (std::span (arguments).first (sig.parameters.size ()));
+  if (!(result).has_value ()) return result.error ();
+  return static_cast<int> ((result).value ());
 }
 }  // namespace mirnext::tools

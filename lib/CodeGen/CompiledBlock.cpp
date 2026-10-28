@@ -35,7 +35,7 @@ Result<std::int64_t> difference (std::uint64_t target, std::uint64_t origin, std
 }  // namespace
 Result<void> CompiledBlock::verify () const {
   auto valid = code_.verify ();
-  if (!valid) return valid;
+  if (!(valid).has_value ()) return valid;
   const bool arm = code_.architecture () == target::Architecture::AArch64;
   std::vector<std::pair<std::size_t, std::size_t>> occupied;
   for (auto &r : code_.relocations ())
@@ -92,9 +92,9 @@ Result<std::vector<std::uint8_t>> CompiledBlock::relocate (
   std::uint64_t base, const BlockAddressResolver &resolve,
   const CodeSymbolResolver &symbols) const {
   auto valid = verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   auto bytes = code_.relocate (base, symbols);
-  if (!bytes) return bytes.error ();
+  if (!(bytes).has_value ()) return bytes.error ();
   // All successors have already been checked against this program identity.
   // Cache by its typed ordinal so large switches remain linear rather than
   // repeatedly scanning the already resolved targets.
@@ -107,47 +107,48 @@ Result<std::vector<std::uint8_t>> CompiledBlock::relocate (
       address = cached->second;
     else {
       auto value = resolve (r.target);
-      if (!value) {
+      if (!(value).has_value ()) {
         auto e = invalid (*this, value.error ().message);
         e.code = value.error ().code;
         return e;
       }
-      address = *value;
+      address = (value).value ();
       addresses.emplace (r.target.index (), address);
     }
     using K = BlockRelocation::Kind;
     if (code_.architecture () == target::Architecture::AArch64 && address % 4)
       return invalid (*this, "unaligned block successor");
     if (r.kind == K::AbsoluteAddress) {
-      write (*bytes, r.offset, address, 8);
+      write ((bytes).value (), r.offset, address, 8);
       continue;
     }
     auto origin = base + (r.kind == K::X86Relative32 ? r.next_instruction : r.offset);
     auto range = r.kind == K::AArch64Address21 ? 20u : r.kind == K::X86Relative32 ? 31u : 27u;
     auto delta
       = difference (address, origin, -(std::int64_t{1} << range), (std::int64_t{1} << range) - 1);
-    if (!delta) return invalid (*this, delta.error ().message);
+    if (!(delta).has_value ()) return invalid (*this, delta.error ().message);
     if (r.kind == K::X86Relative32) {
-      write (*bytes, r.offset, static_cast<std::uint64_t> (*delta), 4);
+      write ((bytes).value (), r.offset, static_cast<std::uint64_t> ((delta).value ()), 4);
       continue;
     }
-    auto word = read (*bytes, r.offset, 4);
+    auto word = read ((bytes).value (), r.offset, 4);
     if (r.kind == K::AArch64Address21) {
-      auto value = static_cast<std::uint32_t> (*delta) & 0x1fffff;
-      write (*bytes, r.offset, word | ((value & 3) << 29) | ((value >> 2) << 5), 4);
+      auto value = static_cast<std::uint32_t> ((delta).value ()) & 0x1fffff;
+      write ((bytes).value (), r.offset, word | ((value & 3) << 29) | ((value >> 2) << 5), 4);
       continue;
     }
-    if (r.kind == K::AArch64Branch19 && (*delta < -(1 << 20) || *delta >= (1 << 20))) {
+    if (r.kind == K::AArch64Branch19
+        && ((delta).value () < -(1 << 20) || (delta).value () >= (1 << 20))) {
       // Same layout as MIR: conditional skips the fallthrough jump and lands
       // on the reserved NOP, replaced by a full-range branch to its successor.
-      auto branch = aarch64_branch_displacement (*delta - 8, false);
-      if (!branch) return invalid (*this, branch.error ().message);
-      write (*bytes, r.offset, word | (2 << 5), 4);
-      write (*bytes, r.offset + 8, 0x14000000 | *branch, 4);
+      auto branch = aarch64_branch_displacement ((delta).value () - 8, false);
+      if (!(branch).has_value ()) return invalid (*this, branch.error ().message);
+      write ((bytes).value (), r.offset, word | (2 << 5), 4);
+      write ((bytes).value (), r.offset + 8, 0x14000000 | (branch).value (), 4);
     } else {
-      auto bits = aarch64_branch_displacement (*delta, r.kind == K::AArch64Branch19);
-      if (!bits) return invalid (*this, bits.error ().message);
-      write (*bytes, r.offset, word | *bits, 4);
+      auto bits = aarch64_branch_displacement ((delta).value (), r.kind == K::AArch64Branch19);
+      if (!(bits).has_value ()) return invalid (*this, bits.error ().message);
+      write ((bytes).value (), r.offset, word | (bits).value (), 4);
     }
   }
   return bytes;
@@ -155,7 +156,7 @@ Result<std::vector<std::uint8_t>> CompiledBlock::relocate (
 Result<CompiledBlock> encode_bbv (BBVProgram &program, const BBVVersion &version,
                                   MachineEncodingOptions options) {
   auto plan = program.specialize (version);
-  if (!plan) return plan.error ();
+  if (!(plan).has_value ()) return plan.error ();
   // Preparation owns an immutable, already verified body. Check its phase in
   // constant time instead of rewalking an entire function for each tiny block.
   const auto &prepared = program.preparation ().prepared ();

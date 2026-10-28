@@ -31,17 +31,17 @@ std::uintptr_t address (T &value) {
 template <class T>
 T function (codegen::Builtin id) {
   auto p = builtin_address (id);
-  REQUIRE (p);
-  return reinterpret_cast<T> (*p);
+  REQUIRE ((p).has_value ());
+  return reinterpret_cast<T> ((p).value ());
 }
 }  // namespace
 TEST_CASE ("typed native builtin identities resolve by builtin kind") {
   for (unsigned n = 0; n <= static_cast<unsigned> (codegen::Builtin::LongDoubleGe); ++n) {
     auto p = builtin_address (static_cast<codegen::Builtin> (n));
-    REQUIRE (p);
-    CHECK (*p != 0);
+    REQUIRE ((p).has_value ());
+    CHECK ((p).value () != 0);
   }
-  CHECK_FALSE (builtin_address (static_cast<codegen::Builtin> (999)));
+  CHECK_FALSE ((builtin_address (static_cast<codegen::Builtin> (999))).has_value ());
 }
 TEST_CASE (
   "typed long double helpers preserve arithmetic comparisons NaN and conversion boundaries") {
@@ -97,20 +97,20 @@ TEST_CASE ("typed block helpers retain forward word copying and first-error nest
   ExecutionInvocation outer;
   copy (nullptr, nullptr, 1);
   auto first = outer.status ();
-  REQUIRE_FALSE (first);
+  REQUIRE_FALSE ((first).has_value ());
   {
     ExecutionInvocation inner;
     auto scalar
       = function<std::byte *(*) (std::byte *, std::uint64_t)> (codegen::Builtin::VariadicScalar);
     CHECK (scalar (nullptr, 999) == nullptr);
-    CHECK_FALSE (inner.status ());
+    CHECK_FALSE ((inner.status ()).has_value ());
   }
   {
     ExecutionInvocation inner;
     auto scalar
       = function<std::byte *(*) (std::byte *, std::uint64_t)> (codegen::Builtin::VariadicScalar);
     CHECK (scalar (nullptr, 0) == nullptr);
-    REQUIRE_FALSE (inner.status ());
+    REQUIRE_FALSE ((inner.status ()).has_value ());
     CHECK (inner.status ().error ().message.find ("state or ABI") != std::string::npos);
   }
   {
@@ -118,7 +118,7 @@ TEST_CASE ("typed block helpers retain forward word copying and first-error nest
     auto block = function<void (*) (std::byte *, std::byte *, std::size_t, std::uint64_t)> (
       codegen::Builtin::VariadicBlock);
     block (nullptr, nullptr, 8, 0);
-    REQUIRE_FALSE (inner.status ());
+    REQUIRE_FALSE ((inner.status ()).has_value ());
     CHECK (inner.status ().error ().message.find ("state or ABI") != std::string::npos);
   }
   argument (nullptr, nullptr, 1);
@@ -130,22 +130,22 @@ TEST_CASE (
   alignas (16) std::array<std::byte, 64> stack{};
   SysV state{40, 160, address (stack) + 1, address (registers)};
   auto a = advance_variadic_scalar (target::ABI::X86SysV, bytes (state), ir::Type::i64 ());
-  REQUIRE (a);
-  CHECK (*a == address (registers) + 40);
+  REQUIRE ((a).has_value ());
+  CHECK ((a).value () == address (registers) + 40);
   CHECK (state.gp == 48);
   auto b
     = advance_variadic_scalar (target::ABI::X86SysV, bytes (state), ir::Type (ir::Type::Kind::F64));
-  REQUIRE (b);
-  CHECK (*b == address (registers) + 160);
+  REQUIRE ((b).has_value ());
+  CHECK ((b).value () == address (registers) + 160);
   CHECK (state.fp == 176);
   auto c = advance_variadic_scalar (target::ABI::X86SysV, bytes (state),
                                     ir::Type (ir::Type::Kind::LongDouble), 16);
-  REQUIRE (c);
-  CHECK (*c == address (stack) + 16);
+  REQUIRE ((c).has_value ());
+  CHECK ((c).value () == address (stack) + 16);
   CHECK (state.stack == address (stack) + 32);
   auto d = advance_variadic_scalar (target::ABI::X86SysV, bytes (state), ir::Type::i64 ());
-  REQUIRE (d);
-  CHECK (*d == address (stack) + 32);
+  REQUIRE ((d).has_value ());
+  CHECK ((d).value () == address (stack) + 32);
   CHECK (state.stack == address (stack) + 40);
 }
 TEST_CASE ("typed AArch64 scalar cursors preserve saved register offsets and stack alignment") {
@@ -153,18 +153,18 @@ TEST_CASE ("typed AArch64 scalar cursors preserve saved register offsets and sta
   alignas (16) std::array<std::byte, 64> stack{};
   Arm state{address (stack) + 1, address (registers) + 64, address (registers) + 128, -8, -16};
   auto a = advance_variadic_scalar (target::ABI::AArch64Linux, bytes (state), ir::Type::i64 ());
-  REQUIRE (a);
-  CHECK (*a == address (registers) + 56);
+  REQUIRE ((a).has_value ());
+  CHECK ((a).value () == address (registers) + 56);
   CHECK (state.go == 0);
   auto b = advance_variadic_scalar (target::ABI::AArch64Linux, bytes (state),
                                     ir::Type (ir::Type::Kind::LongDouble), 16);
-  REQUIRE (b);
-  CHECK (*b == address (registers) + 112);
+  REQUIRE ((b).has_value ());
+  CHECK ((b).value () == address (registers) + 112);
   CHECK (state.vo == 0);
   auto c = advance_variadic_scalar (target::ABI::AArch64Linux, bytes (state),
                                     ir::Type (ir::Type::Kind::LongDouble), 16);
-  REQUIRE (c);
-  CHECK (*c == address (stack) + 16);
+  REQUIRE ((c).has_value ());
+  CHECK ((c).value () == address (stack) + 16);
   CHECK (state.stack == address (stack) + 32);
 }
 TEST_CASE ("typed pointer variadic ABIs retain distinct long double increments") {
@@ -173,8 +173,8 @@ TEST_CASE ("typed pointer variadic ABIs retain distinct long double increments")
       Pointer state{0x1000};
       auto a
         = advance_variadic_scalar (abi, bytes (state), ir::Type (ir::Type::Kind::LongDouble), size);
-      REQUIRE (a);
-      CHECK (*a == 0x1000);
+      REQUIRE ((a).has_value ());
+      CHECK ((a).value () == 0x1000);
       CHECK (state.stack == 0x1000 + (abi == target::ABI::AArch64MacOS ? size : 8));
     }
 }
@@ -193,7 +193,7 @@ TEST_CASE (
       std::array<std::uint64_t, 2> destination{};
       auto r = advance_variadic_block (target::ABI::X86SysV, bytes (state), bytes (destination), 16,
                                        static_cast<ir::Type::BlockClass> (classification));
-      REQUIRE (r);
+      REQUIRE ((r).has_value ());
       auto expected = exhausted || !classification ? stack
                       : classification == 1        ? std::array<std::uint64_t, 2>{11, 22}
                       : classification == 2        ? std::array<std::uint64_t, 2>{33, 44}
@@ -211,7 +211,8 @@ TEST_CASE ("typed AArch64 blocks preserve register boundary fallback and indirec
   for (std::int32_t offset : {-16, -8, 0}) {
     Arm state{address (stack), address (registers) + 32, 0, offset, 0};
     std::array<std::uint64_t, 2> result{};
-    REQUIRE (advance_variadic_block (target::ABI::AArch64Linux, bytes (state), bytes (result), 16));
+    REQUIRE ((advance_variadic_block (target::ABI::AArch64Linux, bytes (state), bytes (result), 16))
+               .has_value ());
     CHECK (result
            == (offset == -16 ? std::array<std::uint64_t, 2>{33, 44}
                              : std::array<std::uint64_t, 2>{55, 66}));
@@ -219,7 +220,8 @@ TEST_CASE ("typed AArch64 blocks preserve register boundary fallback and indirec
   std::uintptr_t pointer = address (stack);
   Arm state{0, address (pointer) + 8, 0, -8, 0};
   std::array<std::uint64_t, 3> result{};
-  REQUIRE (advance_variadic_block (target::ABI::AArch64Linux, bytes (state), bytes (result), 24));
+  REQUIRE ((advance_variadic_block (target::ABI::AArch64Linux, bytes (state), bytes (result), 24))
+             .has_value ());
   CHECK (result == std::array<std::uint64_t, 3>{55, 66, 77});
   CHECK (state.go == 0);
 }
@@ -232,7 +234,7 @@ TEST_CASE ("typed pointer ABI blocks use the original direct and indirect size t
       Pointer state{indirect ? address (pointer) : address (source)};
       auto start = state.stack;
       std::array<std::uint64_t, 3> result{};
-      REQUIRE (advance_variadic_block (abi, bytes (state), bytes (result), size));
+      REQUIRE ((advance_variadic_block (abi, bytes (state), bytes (result), size)).has_value ());
       CHECK (std::memcmp (result.data (), source.data (), size) == 0);
       CHECK (state.stack == start + (indirect ? 8 : size));
     }
@@ -241,26 +243,31 @@ TEST_CASE (
   "typed variadic validation reports overflow invalid metadata and atomic cursor failures") {
   Pointer state{UINTPTR_MAX - 3};
   auto before = state;
-  CHECK_FALSE (advance_variadic_scalar (target::ABI::X86Windows, bytes (state), ir::Type::i64 ()));
+  CHECK_FALSE ((advance_variadic_scalar (target::ABI::X86Windows, bytes (state), ir::Type::i64 ()))
+                 .has_value ());
   CHECK (state.stack == before.stack);
   std::array<std::byte, 64> storage{}, output{};
   for (auto abi : {target::ABI::X86SysV, target::ABI::X86Windows, target::ABI::AArch64Linux,
                    target::ABI::AArch64MacOS}) {
-    CHECK_FALSE (advance_variadic_scalar (abi, {}, ir::Type::i64 ()));
-    CHECK_FALSE (advance_variadic_scalar (abi, storage, ir::Type::block (8)));
-    CHECK_FALSE (advance_variadic_scalar (abi, storage, ir::Type::i64 (), 7));
-    CHECK_FALSE (advance_variadic_block (abi, storage, output, SIZE_MAX));
+    CHECK_FALSE ((advance_variadic_scalar (abi, {}, ir::Type::i64 ())).has_value ());
+    CHECK_FALSE ((advance_variadic_scalar (abi, storage, ir::Type::block (8))).has_value ());
+    CHECK_FALSE ((advance_variadic_scalar (abi, storage, ir::Type::i64 (), 7)).has_value ());
+    CHECK_FALSE ((advance_variadic_block (abi, storage, output, SIZE_MAX)).has_value ());
     CHECK_FALSE (
-      advance_variadic_block (abi, storage, output, 8, static_cast<ir::Type::BlockClass> (5)));
-    CHECK_FALSE (advance_variadic_block (abi, storage, std::span (output).first (7), 8));
-    CHECK_FALSE (initialize_variadic_state (abi, {}, storage));
-    CHECK_FALSE (initialize_variadic_state (abi, storage, {}));
+      (advance_variadic_block (abi, storage, output, 8, static_cast<ir::Type::BlockClass> (5)))
+        .has_value ());
+    CHECK_FALSE (
+      (advance_variadic_block (abi, storage, std::span (output).first (7), 8)).has_value ());
+    CHECK_FALSE ((initialize_variadic_state (abi, {}, storage)).has_value ());
+    CHECK_FALSE ((initialize_variadic_state (abi, storage, {})).has_value ());
   }
   CHECK (variadic_state_size (static_cast<target::ABI> (999)) == 0);
-  CHECK_FALSE (advance_variadic_scalar (static_cast<target::ABI> (999), storage, ir::Type::i64 ()));
+  CHECK_FALSE ((advance_variadic_scalar (static_cast<target::ABI> (999), storage, ir::Type::i64 ()))
+                 .has_value ());
   SysV sysv{0, 48, 0, 0};
   auto copy = sysv;
-  CHECK_FALSE (advance_variadic_scalar (target::ABI::X86SysV, bytes (sysv), ir::Type::i64 ()));
+  CHECK_FALSE (
+    (advance_variadic_scalar (target::ABI::X86SysV, bytes (sysv), ir::Type::i64 ())).has_value ());
   CHECK (std::memcmp (&sysv, &copy, sizeof sysv) == 0);
 }
 TEST_CASE ("typed variadic state initialization copies exactly the selected ABI representation") {
@@ -269,7 +276,7 @@ TEST_CASE ("typed variadic state initialization copies exactly the selected ABI 
   for (auto abi : {target::ABI::X86SysV, target::ABI::X86Windows, target::ABI::AArch64Linux,
                    target::ABI::AArch64MacOS}) {
     destination.fill (std::byte{});
-    REQUIRE (initialize_variadic_state (abi, destination, source));
+    REQUIRE ((initialize_variadic_state (abi, destination, source)).has_value ());
     auto size = variadic_state_size (abi);
     CHECK (std::equal (source.begin (), source.begin () + size, destination.begin ()));
     CHECK (destination[size] == std::byte{});

@@ -1,3 +1,4 @@
+#include "mirnext/CodeGen/Access.hpp"
 /* Licensed under the MIT License. MIR traversal and loop-tree algorithms.
    Reference algorithms Copyright (C) 2018-2024 Vladimir Makarov. */
 #include "mirnext/CodeGen/Analysis.hpp"
@@ -7,20 +8,20 @@
 namespace mirnext::codegen {
 Result<MachineGraphAnalysis> MachineGraphAnalysis::build (const MachineFunction &function) {
   auto cfg = MachineControlFlow::build (function);
-  if (!cfg) return cfg.error ();
-  return analyze (std::move (*cfg));
+  if (!(cfg).has_value ()) return cfg.error ();
+  return analyze (std::move ((cfg).value ()));
 }
 Result<MachineGraphAnalysis> MachineGraphAnalysis::build (const MachineFunction &function,
                                                           const MachineControlFlow &cfg) {
   auto valid = cfg.verify (function);
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   return analyze (cfg);
 }
 MachineGraphAnalysis MachineGraphAnalysis::analyze (MachineControlFlow cfg) {
   MachineGraphAnalysis result;
   result.cfg_ = std::move (cfg);
   auto &g = result.cfg_;
-  const auto count = g.blocks.size ();
+  const auto count = detail::NodeAccess::blocks (g).size ();
   result.preorder_.resize (count);
   result.rpost_.resize (count);
   result.back_.resize (g.edges.size ());

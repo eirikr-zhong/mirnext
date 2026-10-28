@@ -1,5 +1,5 @@
 /* Licensed under the MIT License. Canonical interpreter preparation and dispatch. */
-#include "mirnext/Execution/Interpreter.hpp"
+#include "mirnext/Execution/Session.hpp"
 #include "mirnext/Execution/Invocation.hpp"
 #include "mirnext/Serialization/Format.hpp"
 #include <algorithm>
@@ -18,47 +18,48 @@ Result<void> measure (std::int64_t count, bool native_entry = false) {
     "benchmark:module\nsum:func i64,i64:n\nlocal i64:r,i64:index\nmov r,0\nmov index,0\nbeq "
     "done,n,0\nloop:add r,r,index\nadd index,index,1\nblt loop,index,n\ndone:ret "
     "r\nendfunc\nendmodule\n");
-  if (!source) return source.error ();
+  if (!(source).has_value ()) return source.error ();
   constexpr unsigned iterations = 500;
   std::array<double, 7> preparation, calls;
   std::array arguments{count};
   auto expected = count * (count - 1) / 2;
   for (unsigned trial = 0; trial < calls.size (); ++trial) {
     auto start = Clock::now ();
-    auto p = InterpretedProgram::create (**source, {.native_entries = native_entry});
+    auto p = ExecutionSession::create ((source).value (), {.mode = ExecutionMode::Interpreter,
+                                                           .native_entries = native_entry});
     preparation[trial] = elapsed (start);
-    if (!p) return p.error ();
-    auto f = p->find_function ("benchmark", "sum");
-    if (!f) return f.error ();
+    if (!(p).has_value ()) return p.error ();
+    auto f = p.value ().find_function ("benchmark", "sum");
+    if (!(f).has_value ()) return f.error ();
     std::optional<NativeEntry> entry;
     if (native_entry) {
-      auto e = p->native_entry (*f);
-      if (!e) return e.error ();
-      entry.emplace (std::move (*e));
+      auto e = p.value ().native_entry ((f).value ());
+      if (!(e).has_value ()) return e.error ();
+      entry.emplace (std::move ((e).value ()));
     }
     auto call = [&] () -> Result<std::int64_t> {
-      if (!entry) return p->call_i64 (*f, arguments);
+      if (!entry) return p.value ().call_i64 ((f).value (), arguments);
       ExecutionInvocation invocation;
       auto value = reinterpret_cast<std::int64_t (*) (std::int64_t)> (entry->address ()) (count);
       auto status = invocation.status ();
-      if (!status) return status.error ();
+      if (!(status).has_value ()) return status.error ();
       return value;
     };
     auto first = call ();
-    if (!first) return first.error ();
-    if (*first != expected)
+    if (!(first).has_value ()) return first.error ();
+    if ((first).value () != expected)
       return Error{ErrorCode::InvalidOperand, "wrong first interpreter result"};
     std::int64_t total = 0;
     start = Clock::now ();
     for (unsigned n = 0; n < iterations; ++n) {
       auto value = call ();
-      if (!value) return value.error ();
-      total += *value;
+      if (!(value).has_value ()) return value.error ();
+      total += (value).value ();
     }
     calls[trial] = elapsed (start) / iterations;
     if (total != expected * iterations)
       return Error{ErrorCode::InvalidOperand, "wrong repeated interpreter results"};
-    if (p->native_entry_count () != (native_entry ? 1u : 0u))
+    if (p.value ().host_entry_count () != (native_entry ? 1u : 0u))
       return Error{ErrorCode::InvalidOperand, "unexpected interpreter entry regeneration"};
   }
   auto median = [] (auto values) {
@@ -74,17 +75,17 @@ Result<void> measure (std::int64_t count, bool native_entry = false) {
 int main () {
   for (auto count : {0, 64, 1024}) {
     auto result = measure (count);
-    if (!result) {
+    if (!(result).has_value ()) {
       std::cerr << result.error ().message << '\n';
       return 1;
     }
   }
   auto target = target::TargetMachine::native ();
-  if (!target) return 1;
-  if (target->architecture () == target::Architecture::AArch64)
+  if (!(target).has_value ()) return 1;
+  if (target.value ().architecture () == target::Architecture::AArch64)
     for (auto count : {0, 64, 1024}) {
       auto result = measure (count, true);
-      if (!result) {
+      if (!(result).has_value ()) {
         std::cerr << result.error ().message << '\n';
         return 1;
       }

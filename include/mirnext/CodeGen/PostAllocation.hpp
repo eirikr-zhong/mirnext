@@ -59,6 +59,5 @@ class MachinePostResult {
 // O0 strips properties for whole-function codegen; O1 additionally combines and
 // removes dead definitions. O2/O3 remove properties during combine, then DCE.
 // Operates directly on allocated machine instructions.
-Result<MachinePostResult> optimize_allocated_machine (MachineFunction &, MachineSpillResult,
-                                                      MachinePostOptions = {});
+
 }  // namespace mirnext::codegen

@@ -1,3 +1,5 @@
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/IR/Access.hpp"
 /* MIR encoding rules, Copyright (C) 2018-2024 Vladimir Makarov. MIT License. */
 #include "mirnext/CodeGen/Detail/CompiledFunction.hpp"
 #include "mirnext/CodeGen/Detail/AArch64Patterns.hpp"
@@ -19,8 +21,9 @@ namespace {
 using ir::Opcode;
 using ir::Type;
 std::optional<std::uint64_t> integer (const MachineOperand &o) {
-  if (auto v = o.get<std::uint64_t> ()) return *v;
-  if (auto v = o.get<std::int64_t> ()) return std::bit_cast<std::uint64_t> (*v);
+  if (auto v = detail::operand_access (o).get<std::uint64_t> ()) return *v;
+  if (auto v = detail::operand_access (o).get<std::int64_t> ())
+    return std::bit_cast<std::uint64_t> (*v);
   return {};
 }
 unsigned scale (Type t) {
@@ -81,22 +84,24 @@ struct EncodingEngine {
     for (unsigned n = 0; n < size; ++n, v >>= 8) result.bytes_[at + n] = v & 255;
   }
   Result<std::uint64_t> resolve (const MachineOperand &o) {
-    auto symbol = o.get<MachineSymbolReference> ();
-    auto builtin = o.get<BuiltinReference> ();
+    auto symbol = detail::operand_access (o).get<MachineSymbolReference> ();
+    auto builtin = detail::operand_access (o).get<BuiltinReference> ();
     if (!symbol && !builtin) return invalid ("not a symbol operand");
     for (auto &v : known)
       if ((symbol ? v.symbol == *symbol : !v.symbol)
           && (builtin ? v.builtin == builtin->builtin : !v.builtin))
         return v.value;
-    auto value
-      = options.known_addresses ({symbol ? symbol->symbol : nullptr,
-                                  builtin ? std::optional (builtin->builtin) : std::nullopt});
-    if (!value) {
+    auto value = options.known_addresses (
+      CodeSymbolRequest (::mirnext::detail::borrow_optional (
+                           symbol ? detail::NodeAccess::symbol (*(symbol)) : nullptr),
+                         builtin ? std::optional (builtin->builtin) : std::nullopt));
+    if (!(value).has_value ()) {
       auto error = invalid (value.error ().message);
       error.code = value.error ().code;
       return error;
     }
-    auto address = *value + (symbol ? std::bit_cast<std::uint64_t> (symbol->displacement) : 0);
+    auto address
+      = (value).value () + (symbol ? std::bit_cast<std::uint64_t> (symbol->displacement) : 0);
     known.push_back ({symbol ? std::optional (*symbol) : std::nullopt,
                       builtin ? std::optional (builtin->builtin) : std::nullopt, address});
     return address;
@@ -114,17 +119,18 @@ struct EncodingEngine {
       if (auto size = integer (ops[1])) {
         if (*size > std::uint64_t (INT64_MAX) - 15)
           return invalid ("invalid stack allocation size");
-        change (1, MachineOperand ((*size + 15) & ~std::uint64_t{15}));
+        change (1, detail::NodeAccess::make_MachineOperand ((*size + 15) & ~std::uint64_t{15}));
       }
     if (options.known_addresses)
       for (std::size_t n = 0; n < ops.size (); ++n) {
-        if (auto s = ops[n].get<MachineSymbolReference> ();
-            s && s->symbol->signature && n == 0 && lowered_call)
+        if (auto s = detail::operand_access (ops[n]).get<MachineSymbolReference> ();
+            s && detail::NodeAccess::symbol (*(s))->signature && n == 0 && lowered_call)
           continue;
-        if (ops[n].get<MachineSymbolReference> () || ops[n].get<BuiltinReference> ()) {
+        if (detail::operand_access (ops[n]).get<MachineSymbolReference> ()
+            || detail::operand_access (ops[n]).get<BuiltinReference> ()) {
           auto value = resolve (ops[n]);
-          if (!value) return value.error ();
-          change (n, MachineOperand (*value));
+          if (!(value).has_value ()) return value.error ();
+          change (n, detail::NodeAccess::make_MachineOperand ((value).value ()));
         }
       }
     auto recipe = aarch64_encoding_recipe (opcode, ops, overflow);
@@ -155,7 +161,7 @@ struct EncodingEngine {
           unsigned r = spec.parameter;
           if (spec.flags != 1) {
             if (r >= ops.size ()) return invalid ("missing register operand");
-            auto p = ops[r].get<target::PhysicalRegister> ();
+            auto p = detail::operand_access (ops[r]).get<target::PhysicalRegister> ();
             if (!p) return invalid ("unallocated encoding register");
             r = p->encoding ();
             if (spec.flags == 2) {
@@ -168,21 +174,27 @@ struct EncodingEngine {
         }
         case K::IndexedMemory:
         case K::DisplacedMemory: {
-          auto m = ops[0].get<MachineMemory> ();
-          if (!m && ops.size () > 1) m = ops[1].get<MachineMemory> ();
-          if (!m || !m->base || !std::holds_alternative<target::PhysicalRegister> (*m->base))
+          auto m = detail::operand_access (ops[0]).get<MachineMemory> ();
+          if (!m && ops.size () > 1) m = detail::operand_access (ops[1]).get<MachineMemory> ();
+          if (!m || !m->base
+              || !std::holds_alternative<target::PhysicalRegister> (
+                detail::NodeAccess::storage (*m->base)))
             return invalid ("invalid encoded memory base");
-          status = set_field (std::get<target::PhysicalRegister> (*m->base).encoding (), 5, 5);
-          if (!status) break;
+          status
+            = set_field (std::get<target::PhysicalRegister> (detail::NodeAccess::storage (*m->base))
+                           .encoding (),
+                         5, 5);
+          if (!(status).has_value ()) break;
           if (spec.kind == K::IndexedMemory) {
             unsigned index = 31;
             if (m->index) {
-              auto p = std::get_if<target::PhysicalRegister> (&*m->index);
+              auto p
+                = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&*m->index));
               if (!p) return invalid ("unallocated memory index");
               index = p->encoding ();
             }
             status = set_field (index, 5, 16);
-            if (status) status = set_field (m->scale == 1 ? 6 : 7, 4, 12);
+            if ((status).has_value ()) status = set_field (m->scale == 1 ? 6 : 7, 4, 12);
           } else {
             auto unit = scale (m->type);
             if (m->displacement < 0 || m->displacement % unit)
@@ -197,22 +209,23 @@ struct EncodingEngine {
           auto bits = spec.kind == K::RightShift ? 64u : unsigned (spec.parameter);
           if (!v || *v >= bits) return invalid ("invalid shift immediate");
           status = set_field (spec.kind == K::RightShift ? *v : (bits - *v) & (bits - 1), 6, 16);
-          if (status && spec.kind == K::LeftShift) status = set_field (bits - 1 - *v, 6, 10);
+          if ((status).has_value () && spec.kind == K::LeftShift)
+            status = set_field (bits - 1 - *v, 6, 10);
           break;
         }
         case K::WideImmediate: {
           auto value = integer (ops[1]);
           if (!value) {
-            auto s = ops[1].get<MachineSymbolReference> ();
-            auto b = ops[1].get<BuiltinReference> ();
+            auto s = detail::operand_access (ops[1]).get<MachineSymbolReference> ();
+            auto b = detail::operand_access (ops[1]).get<BuiltinReference> ();
             if ((!s && !b) || spec.flags) return invalid ("invalid symbolic immediate");
             auto shift = unsigned (spec.parameter) * 16;
-            result.relocations_.push_back ({CodeRelocation::Kind::AArch64WideMove, at, shift,
-                                            s ? std::optional (*s->symbol) : std::nullopt,
-                                            b ? std::optional (b->builtin) : std::nullopt,
-                                            s ? s->displacement : 0});
+            result.relocations_.push_back (
+              {CodeRelocation::Kind::AArch64WideMove, at, shift,
+               s ? std::optional (*detail::NodeAccess::symbol (*(s))) : std::nullopt,
+               b ? std::optional (b->builtin) : std::nullopt, s ? s->displacement : 0});
             status = set_field (0, 16, 5);
-            if (status) status = set_field (spec.parameter, 2, 21);
+            if ((status).has_value ()) status = set_field (spec.parameter, 2, 21);
             break;
           }
           std::array<std::pair<unsigned, unsigned>, 4> chunks{};
@@ -226,7 +239,7 @@ struct EncodingEngine {
             }
           if (spec.parameter >= count) return invalid ("invalid wide immediate index");
           status = set_field (chunks[spec.parameter].first, 16, 5);
-          if (status) status = set_field (chunks[spec.parameter].second, 2, 21);
+          if ((status).has_value ()) status = set_field (chunks[spec.parameter].second, 2, 21);
           break;
         }
         case K::ArithmeticImmediate: {
@@ -241,7 +254,7 @@ struct EncodingEngine {
           if (shift && ((v & 4095) || (v >> 12) >= 4096))
             return invalid ("arithmetic immediate out of range");
           status = set_field (shift ? v >> 12 : v, 12, 10);
-          if (status) status = set_field (shift, 2, 22);
+          if ((status).has_value ()) status = set_field (shift, 2, 22);
           break;
         }
         case K::ImmediateR: status = set_field (spec.parameter, 6, 16); break;
@@ -249,7 +262,7 @@ struct EncodingEngine {
         case K::ShortLabel:
         case K::Label: {
           auto n = opcode == MachineOpcode (Opcode::LAddr) ? 1u : 0u;
-          auto l = ops[n].get<const MachineLabel *> ();
+          auto l = detail::operand_access (ops[n]).get<const MachineLabel *> ();
           if (!l) return invalid ("nonlabel branch relocation");
           fixups.push_back ({*l, at, false, spec.kind == K::ShortLabel, n,
                              opcode == MachineOpcode (Opcode::LAddr)});
@@ -260,7 +273,7 @@ struct EncodingEngine {
           switch_start = at;
           break;
         }
-        if (!status) return status.error ();
+        if (!(status).has_value ()) return status.error ();
       }
       put (code, 4);
     }
@@ -270,7 +283,7 @@ struct EncodingEngine {
       if (displacement >= (1u << 19)) return invalid ("switch table offset out of range");
       set (*switch_start, word (*switch_start) | static_cast<std::uint32_t> (displacement << 5), 4);
       for (std::size_t n = 1; n < ops.size (); ++n) {
-        auto l = ops[n].get<const MachineLabel *> ();
+        auto l = detail::operand_access (ops[n]).get<const MachineLabel *> ();
         if (!l) return invalid ("nonlabel switch target");
         fixups.push_back ({*l, result.bytes_.size (), true, false, n});
         put (0, 8);
@@ -281,13 +294,15 @@ struct EncodingEngine {
   Result<CompiledFunction> run () {
     AArch64Overflow overflow = AArch64Overflow::Default;
     for (auto &b : f.blocks ()) {
-      if (!b.labels ().empty ()) overflow = AArch64Overflow::Default;
-      for (auto label : b.labels ()) labels.emplace (label, result.bytes_.size ());
+      if (!ir::detail::ReferenceAccess::pointers (b.labels ()).empty ())
+        overflow = AArch64Overflow::Default;
+      for (auto label : ir::detail::ReferenceAccess::pointers (b.labels ()))
+        labels.emplace (label, result.bytes_.size ());
       for (auto &i : b.instructions ()) {
         if (i.opcode () == MachineOpcode (MachinePseudoOpcode::Use)) continue;
         auto r = instruction (i.opcode (), i.operands (), overflow, i.has_lowered_call (),
                               i.creation_order ());
-        if (!r) return r.error ();
+        if (!(r).has_value ()) return r.error ();
         auto code = i.opcode ();
         if (code == MachineOpcode (Opcode::Subo) || code == MachineOpcode (Opcode::Subos))
           overflow = AArch64Overflow::Subtract;
@@ -297,7 +312,7 @@ struct EncodingEngine {
         else if (code == MachineOpcode (Opcode::Addo) || code == MachineOpcode (Opcode::Addos))
           overflow = AArch64Overflow::Default;
         else if (auto op = std::get_if<Opcode> (&code);
-                 op && ir::instruction_descriptor (*op)->flow == ir::ControlFlow::Branch)
+                 op && ir::instruction_descriptor (*op).get ()->flow == ir::ControlFlow::Branch)
           overflow = AArch64Overflow::Default;
       }
     }
@@ -319,8 +334,8 @@ struct EncodingEngine {
           set (ref.offset, word (ref.offset) | ((value & 3) << 29) | ((value >> 2) << 5), 4);
         } else {
           auto value = aarch64_branch_displacement (difference, ref.short_branch);
-          if (!value) return invalid (value.error ().message);
-          set (ref.offset, word (ref.offset) | *value, 4);
+          if (!(value).has_value ()) return invalid (value.error ().message);
+          set (ref.offset, word (ref.offset) | (value).value (), 4);
         }
       }
     }
@@ -330,29 +345,29 @@ struct EncodingEngine {
     return ArtifactBuilder::finish (std::move (result));
   }
   Result<CompiledBlock> run_block (const BBVVersion &version) {
-    const auto &plan = *version.specialization ();
+    const auto &plan = *version.specialization ().get ();
     BlockTargets targets (plan);
     std::vector<BlockRelocation> successors;
     AArch64Overflow overflow = AArch64Overflow::Default;
     bool conditional = false;
     for (auto &emission : plan.emissions ()) {
-      auto &i = *emission.instruction;
+      auto &i = *detail::NodeAccess::instruction (emission);
       auto ops = i.operands ();
       if (emission.opcode != i.opcode ()) ops = ops.first (1);  // folded property branch
       auto start = fixups.size ();
       auto status
         = instruction (emission.opcode, ops, overflow, i.has_lowered_call (), i.creation_order ());
-      if (!status) return status.error ();
+      if (!(status).has_value ()) return status.error ();
       for (std::size_t n = start; n < fixups.size (); ++n) {
         auto &r = fixups[n];
         auto target = targets.find (&i, r.operand);
-        if (!target) return target.error ();
+        if (!(target).has_value ()) return target.error ();
         using K = BlockRelocation::Kind;
         successors.push_back ({r.absolute       ? K::AbsoluteAddress
                                : r.address      ? K::AArch64Address21
                                : r.short_branch ? K::AArch64Branch19
                                                 : K::AArch64Branch26,
-                               r.offset, 0, *target});
+                               r.offset, 0, (target).value ()});
       }
       auto code = emission.opcode;
       if (code == MachineOpcode (Opcode::Subo) || code == MachineOpcode (Opcode::Subos))
@@ -363,24 +378,25 @@ struct EncodingEngine {
       else if (code == MachineOpcode (Opcode::Addo) || code == MachineOpcode (Opcode::Addos))
         overflow = AArch64Overflow::Default;
       else if (auto op = std::get_if<Opcode> (&code);
-               op && ir::instruction_descriptor (*op)->flow == ir::ControlFlow::Branch) {
+               op && ir::instruction_descriptor (*op).get ()->flow == ir::ControlFlow::Branch) {
         overflow = AArch64Overflow::Default;
         conditional = true;
       }
     }
     for (auto &edge : plan.successors ())
       if (edge.kind == BBVSuccessor::Kind::Fallthrough) {
-        successors.push_back (
-          {BlockRelocation::Kind::AArch64Branch26, result.bytes_.size (), 0, edge.version->id ()});
+        successors.push_back ({BlockRelocation::Kind::AArch64Branch26, result.bytes_.size (), 0,
+                               detail::NodeAccess::version (edge)->id ()});
         put (0x14000000, 4);
       }
     if (conditional) put (0xd503201f, 4);  // original far-conditional expansion slot
     while (result.bytes_.size () % 16) put (0, 1);
-    for (auto label : version.block ().labels ())
+    for (auto label : ir::detail::ReferenceAccess::pointers (version.block ().labels ()))
       result.labels_.push_back ({std::string (label->name ()), 0, label->source_ordinal ()});
     auto code = ArtifactBuilder::finish (std::move (result));
-    if (!code) return code.error ();
-    return BlockArtifactBuilder::finish (version.id (), std::move (*code), std::move (successors));
+    if (!(code).has_value ()) return code.error ();
+    return BlockArtifactBuilder::finish (version.id (), std::move ((code).value ()),
+                                         std::move (successors));
   }
 };
 Result<CompiledFunction> encode_aarch64 (const MachineFunction &f, const MachineFrameResult &frame,

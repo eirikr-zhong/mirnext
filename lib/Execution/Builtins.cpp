@@ -39,8 +39,8 @@ Result<std::uintptr_t> add (std::uintptr_t a, std::size_t n) {
 }
 Result<std::uintptr_t> align (std::uintptr_t a, unsigned n) {
   auto v = add (a, n - 1);
-  if (!v) return v.error ();
-  return *v & ~std::uintptr_t (n - 1);
+  if (!(v).has_value ()) return v.error ();
+  return (v).value () & ~std::uintptr_t (n - 1);
 }
 Result<std::uintptr_t> saved (std::uintptr_t a, std::int32_t offset) {
   if (offset >= 0) return add (a, offset);
@@ -52,7 +52,7 @@ Result<void> copy (std::span<std::byte> destination, std::uintptr_t source, std:
   if (!n || destination.empty ()) return {};
   if (destination.size () < n || !source) return invalid ("invalid variadic copy range");
   auto end = add (source, n);
-  if (!end) return end.error ();
+  if (!(end).has_value ()) return end.error ();
   std::memcpy (destination.data (), reinterpret_cast<const std::byte *> (source), n);
   return {};
 }
@@ -82,18 +82,18 @@ Result<ir::Type> scalar_tag (std::uint64_t n) {
 }
 std::byte *va_argument (std::byte *state, std::uint64_t tag) {
   auto type = scalar_tag (tag);
-  if (!type) {
+  if (!(type).has_value ()) {
     report (type.error ());
     return nullptr;
   }
-  auto address
-    = advance_variadic_scalar (native_abi (),
-                               {state, state ? variadic_state_size (native_abi ()) : 0}, *type);
-  if (!address) {
+  auto address = advance_variadic_scalar (native_abi (),
+                                          {state, state ? variadic_state_size (native_abi ()) : 0},
+                                          (type).value ());
+  if (!(address).has_value ()) {
     report (address.error ());
     return nullptr;
   }
-  return reinterpret_cast<std::byte *> (*address);
+  return reinterpret_cast<std::byte *> ((address).value ());
 }
 void va_block (std::byte *destination, std::byte *state, std::size_t size,
                std::uint64_t classification) {
@@ -105,7 +105,7 @@ void va_block (std::byte *destination, std::byte *state, std::size_t size,
                                         {state, state ? variadic_state_size (native_abi ()) : 0},
                                         {destination, destination ? size : 0}, size,
                                         static_cast<ir::Type::BlockClass> (classification));
-  if (!result) report (result.error ());
+  if (!(result).has_value ()) report (result.error ());
 }
 void block_move (std::byte *destination, const std::byte *source, std::uint64_t words) {
   if (words > SIZE_MAX / 8 || (words && (!destination || !source))) {
@@ -174,7 +174,7 @@ std::size_t variadic_state_size (target::ABI abi) {
 Result<std::uintptr_t> advance_variadic_scalar (target::ABI abi, std::span<std::byte> state,
                                                 ir::Type type, unsigned ld_size) {
   auto valid = validate (abi, state);
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   if (!type.valid () || !type.is_scalar () || (ld_size != 8 && ld_size != 16))
     return invalid ("invalid scalar variadic type");
   using K = ir::Type::Kind;
@@ -186,21 +186,21 @@ Result<std::uintptr_t> advance_variadic_scalar (target::ABI abi, std::span<std::
       if (!va.registers) return invalid ("null variadic register save area");
     if (fp && va.fp_offset <= 160) {
       auto p = add (va.registers, va.fp_offset);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       va.fp_offset += 16;
     } else if (!fp && !ld && va.gp_offset <= 40) {
       auto p = add (va.registers, va.gp_offset);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       va.gp_offset += 8;
     } else {
       auto p = ld && ld_size == 16 ? align (va.stack, 16) : Result<std::uintptr_t> (va.stack);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       auto next = add (address, ld ? ld_size : 8);
-      if (!next) return next.error ();
-      va.stack = *next;
+      if (!(next).has_value ()) return next.error ();
+      va.stack = (next).value ();
     }
     if (!address) return invalid ("null variadic argument address");
     write (state.data (), va);
@@ -209,21 +209,21 @@ Result<std::uintptr_t> advance_variadic_scalar (target::ABI abi, std::span<std::
     fp |= ld;
     if (fp && va.vr_offset < 0) {
       auto p = saved (va.vr_top, va.vr_offset);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       va.vr_offset += 16;
     } else if (!fp && va.gr_offset < 0) {
       auto p = saved (va.gr_top, va.gr_offset);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       va.gr_offset += 8;
     } else {
       auto p = ld && ld_size == 16 ? align (va.stack, 16) : Result<std::uintptr_t> (va.stack);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       auto next = add (address, ld ? ld_size : 8);
-      if (!next) return next.error ();
-      va.stack = *next;
+      if (!(next).has_value ()) return next.error ();
+      va.stack = (next).value ();
     }
     if (!address) return invalid ("null variadic argument address");
     write (state.data (), va);
@@ -232,8 +232,8 @@ Result<std::uintptr_t> advance_variadic_scalar (target::ABI abi, std::span<std::
     address = va.arguments;
     if (!address) return invalid ("null variadic argument address");
     auto next = add (address, abi == target::ABI::AArch64MacOS && ld ? ld_size : 8);
-    if (!next) return next.error ();
-    va.arguments = *next;
+    if (!(next).has_value ()) return next.error ();
+    va.arguments = (next).value ();
     write (state.data (), va);
   }
   return address;
@@ -242,7 +242,7 @@ Result<void> advance_variadic_block (target::ABI abi, std::span<std::byte> state
                                      std::span<std::byte> destination, std::size_t size,
                                      ir::Type::BlockClass category) {
   auto valid = validate (abi, state);
-  if (!valid) return valid;
+  if (!(valid).has_value ()) return valid;
   auto classification = static_cast<unsigned> (category);
   if (classification > 4 || size > SIZE_MAX - 7
       || (!destination.empty () && destination.size () < size))
@@ -269,9 +269,9 @@ Result<void> advance_variadic_block (target::ABI abi, std::span<std::byte> state
         bool floating = classification == 2 || (classification == 3 && word == 1)
                         || (classification == 4 && word == 0);
         auto p = add (va.registers, floating ? va.fp_offset : va.gp_offset);
-        if (!p) return p.error ();
-        if (!*p) return invalid ("null variadic save area");
-        words[word] = read<std::uint64_t> (reinterpret_cast<const std::byte *> (*p));
+        if (!(p).has_value ()) return p.error ();
+        if (!(p).value ()) return invalid ("null variadic save area");
+        words[word] = read<std::uint64_t> (reinterpret_cast<const std::byte *> ((p).value ()));
         if (floating)
           va.fp_offset += 16;
         else
@@ -280,10 +280,10 @@ Result<void> advance_variadic_block (target::ABI abi, std::span<std::byte> state
       if (!destination.empty ()) std::memcpy (destination.data (), words.data (), size);
     } else {
       auto next = add (va.stack, rounded);
-      if (!next) return next.error ();
+      if (!(next).has_value ()) return next.error ();
       auto copied = copy (destination, va.stack, size);
-      if (!copied) return copied;
-      va.stack = *next;
+      if (!(copied).has_value ()) return copied;
+      va.stack = (next).value ();
     }
     write (state.data (), va);
     return {};
@@ -298,26 +298,26 @@ Result<void> advance_variadic_block (target::ABI abi, std::span<std::byte> state
         return invalid ("variadic register offset overflow");
       address = va.stack;
       auto next = add (address, consumed);
-      if (!next) return next.error ();
-      va.stack = *next;
+      if (!(next).has_value ()) return next.error ();
+      va.stack = (next).value ();
       va.gr_offset += static_cast<std::int32_t> (consumed);
     } else if (va.gr_offset < 0) {
       auto p = saved (va.gr_top, va.gr_offset);
-      if (!p) return p.error ();
-      address = *p;
+      if (!(p).has_value ()) return p.error ();
+      address = (p).value ();
       va.gr_offset += static_cast<std::int32_t> (consumed);
     } else {
       address = va.stack;
       auto next = add (address, consumed);
-      if (!next) return next.error ();
-      va.stack = *next;
+      if (!(next).has_value ()) return next.error ();
+      va.stack = (next).value ();
     }
     if (size > 16) {
       if (!address) return invalid ("null indirect variadic block");
       address = read<std::uintptr_t> (reinterpret_cast<const std::byte *> (address));
     }
     auto copied = copy (destination, address, size);
-    if (!copied) return copied;
+    if (!(copied).has_value ()) return copied;
     write (state.data (), va);
     return {};
   }
@@ -325,21 +325,21 @@ Result<void> advance_variadic_block (target::ABI abi, std::span<std::byte> state
   auto address = va.arguments;
   bool indirect = size > (abi == target::ABI::AArch64MacOS ? 16u : 8u);
   auto next = add (address, indirect ? 8 : rounded);
-  if (!next) return next.error ();
+  if (!(next).has_value ()) return next.error ();
   if (indirect) {
     if (!address) return invalid ("null indirect variadic block");
     address = read<std::uintptr_t> (reinterpret_cast<const std::byte *> (address));
   }
   auto copied = copy (destination, address, size);
-  if (!copied) return copied;
-  va.arguments = *next;
+  if (!(copied).has_value ()) return copied;
+  va.arguments = (next).value ();
   write (state.data (), va);
   return {};
 }
 Result<void> initialize_variadic_state (target::ABI abi, std::span<std::byte> destination,
                                         std::span<const std::byte> source) {
   auto valid = validate (abi, destination);
-  if (!valid) return valid;
+  if (!(valid).has_value ()) return valid;
   auto size = variadic_state_size (abi);
   if (!source.data () || source.size () < size) return invalid ("invalid variadic source");
   std::memmove (destination.data (), source.data (), size);

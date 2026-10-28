@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Native lazy block publication. */
+#include "mirnext/CodeGen/Access.hpp"
 #include "mirnext/Execution/detail/BBVRuntime.hpp"
 #include "mirnext/CodeGen/BlockEntry.hpp"
 #include "mirnext/Execution/Invocation.hpp"
@@ -36,12 +37,12 @@ struct BBVRuntime::State {
                     + "]: " + std::move (error.message);
     return error;
   }
-  Result<Block *> lookup (const codegen::BlockVersionId &id) {
+  Result<Block &> lookup (const codegen::BlockVersionId &id) {
     if (!entry || !id.same_program (entry->id ()) || id.index () >= blocks.size ()
         || !blocks[id.index ()].version)
       return diagnostic ({ErrorCode::InvalidOperand, "foreign or unselected block version"},
                          "lookup");
-    return &blocks[id.index ()];
+    return *(&blocks[id.index ()]);
   }
   Result<void> remember (const codegen::BBVVersion &v) {
     if (!v.id ().same_program (entry->id ()) || v.id ().index () >= blocks.size ())
@@ -55,7 +56,7 @@ struct BBVRuntime::State {
   }
   static std::uintptr_t resolve (Block *block) {
     auto result = block->owner.compile (*block);
-    if (!result) {
+    if (!(result).has_value ()) {
       report_execution_error (result.error ());
       return 0;
     }
@@ -68,41 +69,42 @@ struct BBVRuntime::State {
     if (blocks.empty ())
       return diagnostic ({ErrorCode::InvalidOperand, "empty block layout"}, "prepare");
     auto properties = codegen::BBVProperties::create (prepared.function ());
-    if (!properties) return diagnostic (properties.error (), "prepare");
-    auto version = program.request_version (*prepared.blocks ().begin (), *properties, true);
-    if (!version) return diagnostic (version.error (), "prepare");
-    entry = version->version;
+    if (!(properties).has_value ()) return diagnostic (properties.error (), "prepare");
+    auto version
+      = program.request_version (*prepared.blocks ().begin (), (properties).value (), true);
+    if (!(version).has_value ()) return diagnostic (version.error (), "prepare");
+    entry = codegen::detail::NodeAccess::version (((version)).value ());
     auto saved = remember (*entry);
-    if (!saved) return saved;
+    if (!(saved).has_value ()) return saved;
     auto &target = prepared.function ().target ();
     std::vector<std::size_t> sizes (blocks.size () + 1, codegen::block_entry_bytes);
     sizes[0] = resolver.size ();
     auto slots = arena.reserve (sizes);
-    if (!slots) return diagnostic (slots.error (), "reserve");
-    auto resolver_address = slots->address (0);
-    if (!resolver_address) return diagnostic (resolver_address.error (), "reserve");
+    if (!(slots).has_value ()) return diagnostic (slots.error (), "reserve");
+    auto resolver_address = slots.value ().address (0);
+    if (!(resolver_address).has_value ()) return diagnostic (resolver_address.error (), "reserve");
     std::vector<std::vector<std::uint8_t>> bytes;
     bytes.reserve (sizes.size ());
     bytes.push_back (std::move (resolver));
     for (std::size_t n = 0; n < blocks.size (); ++n) {
       auto &b = blocks[n];
-      auto address = slots->address (n + 1);
-      if (!address) return diagnostic (address.error (), "reserve", n);
-      b.gate = *address;
+      auto address = slots.value ().address (n + 1);
+      if (!(address).has_value ()) return diagnostic (address.error (), "reserve", n);
+      b.gate = (address).value ();
       b.destination = b.gate + codegen::block_entry_cold_offset;
       auto gate
-        = codegen::make_block_entry (target,
-                                     {reinterpret_cast<std::uintptr_t> (&b.destination),
-                                      reinterpret_cast<std::uintptr_t> (&b), *resolver_address});
-      if (!gate) return diagnostic (gate.error (), "prepare", n);
-      bytes.push_back (std::move (*gate));
+        = codegen::make_block_entry (target, {reinterpret_cast<std::uintptr_t> (&b.destination),
+                                              reinterpret_cast<std::uintptr_t> (&b),
+                                              (resolver_address).value ()});
+      if (!(gate).has_value ()) return diagnostic (gate.error (), "prepare", n);
+      bytes.push_back (std::move ((gate).value ()));
     }
     std::vector<std::span<const std::uint8_t>> views;
     views.reserve (bytes.size ());
     for (auto &b : bytes) views.push_back (b);
-    auto published = slots->publish (views);
-    if (!published) return diagnostic (published.error (), "publish");
-    entries = std::move (*published);
+    auto published = slots.value ().publish (views);
+    if (!(published).has_value ()) return diagnostic (published.error (), "publish");
+    entries = std::move ((published).value ());
     statistics.blocks = blocks.size ();
     statistics.code_batches = 1;
     for (auto &code : entries) statistics.code_bytes += code.bytes ().size ();
@@ -124,38 +126,38 @@ struct BBVRuntime::State {
     if (!b.artifact) {
       auto artifact
         = codegen::encode_bbv (program, *b.version, {.known_addresses = options.resolve});
-      if (!artifact) return diagnostic (artifact.error (), "encode", b.index);
-      for (auto &edge : b.version->specialization ()->successors ()) {
-        auto saved = remember (*edge.version);
-        if (!saved) return saved;
+      if (!(artifact).has_value ()) return diagnostic (artifact.error (), "encode", b.index);
+      for (auto &edge : b.version->specialization ().get ()->successors ()) {
+        auto saved = remember (*codegen::detail::NodeAccess::version (edge));
+        if (!(saved).has_value ()) return saved;
       }
-      b.artifact.emplace (std::move (*artifact));
+      b.artifact.emplace (std::move ((artifact).value ()));
     }
     if (options.observe) {
       auto observed = options.observe (*b.version, *b.artifact);
-      if (!observed) return diagnostic (observed.error (), "observe", b.index);
+      if (!(observed).has_value ()) return diagnostic (observed.error (), "observe", b.index);
     }
     if (!b.reservation) {
       const auto size = b.artifact->bytes ().size ();
       auto slots = arena.reserve ({&size, 1});
-      if (!slots) return diagnostic (slots.error (), "reserve", b.index);
-      b.reservation.emplace (std::move (*slots));
+      if (!(slots).has_value ()) return diagnostic (slots.error (), "reserve", b.index);
+      b.reservation.emplace (std::move ((slots).value ()));
     }
     auto address = b.reservation->address (0);
-    if (!address) return diagnostic (address.error (), "reserve", b.index);
-    auto bytes = b.artifact->relocate (
-      *address,
-      [&] (const codegen::BlockVersionId &id) -> Result<std::uint64_t> {
-        auto target = lookup (id);
-        if (!target) return target.error ();
-        return (*target)->gate;
-      },
-      options.resolve);
-    if (!bytes) return diagnostic (bytes.error (), "relocate", b.index);
-    std::span<const std::uint8_t> view = *bytes;
+    if (!(address).has_value ()) return diagnostic (address.error (), "reserve", b.index);
+    auto bytes
+      = b.artifact->relocate ((address).value (),
+                              [&] (const codegen::BlockVersionId &id) -> Result<std::uint64_t> {
+                                auto target = lookup (id);
+                                if (!(target).has_value ()) return target.error ();
+                                return target.value ().gate;
+                              },
+                              options.resolve);
+    if (!(bytes).has_value ()) return diagnostic (bytes.error (), "relocate", b.index);
+    std::span<const std::uint8_t> view = (bytes).value ();
     auto published = b.reservation->publish ({&view, 1});
-    if (!published) return diagnostic (published.error (), "publish", b.index);
-    b.code.emplace (std::move (published->front ()));
+    if (!(published).has_value ()) return diagnostic (published.error (), "publish", b.index);
+    b.code.emplace (std::move (published.value ().front ()));
     b.reservation.reset ();
     // Only a successfully published target becomes visible through the gate.
     b.destination = b.code->address ();
@@ -176,7 +178,7 @@ bool BBVRuntime::compiling () const {
 Result<std::unique_ptr<BBVRuntime>> BBVRuntime::create (codegen::BBVProgram program,
                                                         BBVRuntimeOptions options) {
   auto valid = program.verify ();
-  if (!valid) return valid.error ();
+  if (!(valid).has_value ()) return valid.error ();
   auto &f = program.preparation ().function ();
   auto diagnostic = [&] (Error error) {
     error.message = std::string (f.module_name ()) + '/' + std::string (f.name ()) + " ["
@@ -187,13 +189,13 @@ Result<std::unique_ptr<BBVRuntime>> BBVRuntime::create (codegen::BBVProgram prog
   auto resolver
     = codegen::make_block_resolver (f.target (), reinterpret_cast<std::uintptr_t> (&State::resolve),
                                     options.failure_continuation);
-  if (!resolver) return diagnostic (resolver.error ());
+  if (!(resolver).has_value ()) return diagnostic (resolver.error ());
   auto arena = CodeArena::create (options.code_capacity, options.memory_provider);
-  if (!arena) return diagnostic (arena.error ());
-  auto state
-    = std::make_unique<State> (std::move (program), std::move (options), std::move (*arena));
-  auto initialized = state->initialize (std::move (*resolver));
-  if (!initialized) return initialized.error ();
+  if (!(arena).has_value ()) return diagnostic (arena.error ());
+  auto state = std::make_unique<State> (std::move (program), std::move (options),
+                                        std::move ((arena).value ()));
+  auto initialized = state->initialize (std::move ((resolver).value ()));
+  if (!(initialized).has_value ()) return initialized.error ();
   return std::unique_ptr<BBVRuntime> (new BBVRuntime (std::move (state)));
 }
 const codegen::BBVProgram &BBVRuntime::program () const { return state_->program; }
@@ -203,28 +205,29 @@ std::uintptr_t BBVRuntime::entry_address () const {
 }
 Result<std::uintptr_t> BBVRuntime::address (const codegen::BlockVersionId &id) const {
   auto b = state_->lookup (id);
-  if (!b) return b.error ();
-  return (*b)->gate;
+  if (!(b).has_value ()) return b.error ();
+  return b.value ().gate;
 }
 Result<void> BBVRuntime::compile (const codegen::BlockVersionId &id) {
   auto b = state_->lookup (id);
-  if (!b) return b.error ();
-  return state_->compile (**b);
+  if (!(b).has_value ()) return b.error ();
+  return state_->compile ((b).value ());
 }
 const codegen::CompiledBlock *BBVRuntime::artifact (const codegen::BlockVersionId &id) const {
   auto b = state_->lookup (id);
-  return b && (*b)->phase == State::Phase::Compiled ? &*(*b)->artifact : nullptr;
+  return (b).has_value () && b.value ().phase == State::Phase::Compiled ? &*b.value ().artifact
+                                                                        : nullptr;
 }
 Result<std::uintptr_t> BBVRuntime::label_address (const codegen::MachineLabel &label) {
   auto block = state_->program.preparation ().block_for (label);
-  if (!block) return state_->diagnostic (block.error (), "label");
+  if (!(block).has_value ()) return state_->diagnostic (block.error (), "label");
   auto properties = codegen::BBVProperties::create (state_->program.preparation ().function ());
-  if (!properties) return properties.error ();
-  auto version = state_->program.request_version (**block, *properties);
-  if (!version) return state_->diagnostic (version.error (), "label");
-  auto saved = state_->remember (*version->version);
-  if (!saved) return saved.error ();
-  return address (version->version->id ());
+  if (!(properties).has_value ()) return properties.error ();
+  auto version = state_->program.request_version ((block).value (), (properties).value ());
+  if (!(version).has_value ()) return state_->diagnostic (version.error (), "label");
+  auto saved = state_->remember (*codegen::detail::NodeAccess::version (((version)).value ()));
+  if (!(saved).has_value ()) return saved.error ();
+  return address (codegen::detail::NodeAccess::version (((version)).value ())->id ());
 }
 const BBVRuntimeStatistics &BBVRuntime::statistics () const { return state_->statistics; }
 std::size_t BBVRuntime::remaining_code_bytes () const { return state_->arena.remaining (); }

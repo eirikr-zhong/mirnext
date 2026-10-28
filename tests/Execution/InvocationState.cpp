@@ -87,8 +87,8 @@ std::vector<std::uint8_t> x86_probe (const target::TargetMachine &target, Probe 
                                      unsigned extra, bool raw = false,
                                      std::size_t *target_offset = nullptr) {
   auto layout = codegen::detail::x86_invocation_frame (target.abi ());
-  REQUIRE (layout);
-  auto &f = *layout;
+  REQUIRE ((layout).has_value ());
+  auto &f = (layout).value ();
   struct Code {
     std::vector<std::uint8_t> bytes;
     void emit (std::initializer_list<std::uint8_t> v) { bytes.insert (bytes.end (), v); }
@@ -175,16 +175,18 @@ TEST_CASE (
   "native checkpoint recovery restores host stack nonvolatile registers vectors and floating state "
   "bit for bit") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  auto bytes = make_invocation_entries (*target, reinterpret_cast<std::uintptr_t> (&checkpoint));
-  REQUIRE (bytes);
-  auto reservation
-    = CodeMemory ().reserve (std::array{bytes->invoke.size (), bytes->recover.size ()});
-  REQUIRE (reservation);
-  const std::array<std::span<const std::uint8_t>, 2> entries{bytes->invoke, bytes->recover};
-  auto code = reservation->publish (entries);
-  REQUIRE (code);
-  bool arm = target->architecture () == target::Architecture::AArch64;
+  REQUIRE ((target).has_value ());
+  auto bytes
+    = make_invocation_entries ((target).value (), reinterpret_cast<std::uintptr_t> (&checkpoint));
+  REQUIRE ((bytes).has_value ());
+  auto reservation = CodeMemory ().reserve (
+    std::array{bytes.value ().invoke.size (), bytes.value ().recover.size ()});
+  REQUIRE ((reservation).has_value ());
+  const std::array<std::span<const std::uint8_t>, 2> entries{bytes.value ().invoke,
+                                                             bytes.value ().recover};
+  auto code = reservation.value ().publish (entries);
+  REQUIRE ((code).has_value ());
+  bool arm = target.value ().architecture () == target::Architecture::AArch64;
   const auto extras
     = arm ? std::array<unsigned, 4>{0, 16, 512, 528} : std::array<unsigned, 4>{0, 8, 512, 520};
   for (bool fail : {false, true})
@@ -195,15 +197,16 @@ TEST_CASE (
       for (unsigned n = 0; n < 16; ++n)
         probe.before.vectors[n] = {0x123456789abcdef0ull + n, 0xfedcba9876543210ull - n};
       active = &probe.checkpoint;
-      auto body = arm ? arm_probe (probe, (*code)[0].address (), (*code)[1].address (), fail, extra)
-                      : x86_probe (*target, probe, (*code)[0].address (), (*code)[1].address (),
-                                   fail, extra);
+      auto body = arm ? arm_probe (probe, ((code).value ())[0].address (),
+                                   ((code).value ())[1].address (), fail, extra)
+                      : x86_probe ((target).value (), probe, ((code).value ())[0].address (),
+                                   ((code).value ())[1].address (), fail, extra);
       auto slot = CodeMemory ().reserve (std::array{body.size ()});
-      REQUIRE (slot);
+      REQUIRE ((slot).has_value ());
       const std::array<std::span<const std::uint8_t>, 1> data{body};
-      auto executable = slot->publish (data);
-      REQUIRE (executable);
-      reinterpret_cast<void (*) ()> ((*executable)[0].address ()) ();
+      auto executable = slot.value ().publish (data);
+      REQUIRE ((executable).has_value ());
+      reinterpret_cast<void (*) ()> (((executable).value ())[0].address ()) ();
       active = nullptr;
       CHECK (probe.result == (fail ? 0 : 42));
       CHECK (probe.after.original_sp == probe.before.original_sp);
@@ -214,17 +217,17 @@ TEST_CASE (
         CHECK (probe.after.fpcr == probe.before.fpcr);
         CHECK (probe.after.fpsr == probe.before.fpsr);
       } else {
-        auto f = codegen::detail::x86_invocation_frame (target->abi ());
-        REQUIRE (f);
-        for (unsigned n = 0; n < f->preserved_count; ++n)
-          CHECK (probe.after.general[unsigned (f->preserved[n])]
-                 == probe.before.general[unsigned (f->preserved[n])]);
-        if (target->abi () == target::ABI::X86Windows)
+        auto f = codegen::detail::x86_invocation_frame (target.value ().abi ());
+        REQUIRE ((f).has_value ());
+        for (unsigned n = 0; n < f.value ().preserved_count; ++n)
+          CHECK (probe.after.general[unsigned (f.value ().preserved[n])]
+                 == probe.before.general[unsigned (f.value ().preserved[n])]);
+        if (target.value ().abi () == target::ABI::X86Windows)
           for (unsigned n = 6; n < 16; ++n)
             CHECK (probe.after.vectors[n] == probe.before.vectors[n]);
         for (auto n : {0, 1, 2, 3, 4, 24, 25, 26, 27})
           CHECK (probe.after.extended[n] == probe.before.extended[n]);
-        if (target->abi () == target::ABI::X86SysV)
+        if (target.value ().abi () == target::ABI::X86SysV)
           for (unsigned n = 32; n < 64; ++n)
             if ((n - 32) % 16 < 10) CHECK (probe.after.extended[n] == probe.before.extended[n]);
       }
@@ -234,10 +237,10 @@ TEST_CASE (
   "raw native boundaries retain successful hardware register effects and restore them only on "
   "failure") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   auto boundary = execution::detail::NativeBoundary::create ();
-  REQUIRE (boundary);
-  bool arm = target->architecture () == target::Architecture::AArch64;
+  REQUIRE ((boundary).has_value ());
+  bool arm = target.value ().architecture () == target::Architecture::AArch64;
   const auto extras
     = arm ? std::array<unsigned, 4>{0, 16, 512, 528} : std::array<unsigned, 4>{0, 8, 512, 520};
   for (bool fail : {false, true})
@@ -249,25 +252,26 @@ TEST_CASE (
       for (unsigned n = 0; n < 16; ++n)
         probe.before.vectors[n] = {0x123456789abcdef0ull + n, 0xfedcba9876543210ull - n};
       auto emit = [&] (std::uintptr_t entry) {
-        return arm ? arm_probe (probe, entry, boundary->recovery ().recovery_address (), fail,
-                                extra, true, &target_offset)
-                   : x86_probe (*target, probe, entry, boundary->recovery ().recovery_address (),
-                                fail, extra, true, &target_offset);
+        return arm ? arm_probe (probe, entry, boundary.value ().recovery ().recovery_address (),
+                                fail, extra, true, &target_offset)
+                   : x86_probe ((target).value (), probe, entry,
+                                boundary.value ().recovery ().recovery_address (), fail, extra,
+                                true, &target_offset);
       };
       auto body = emit (0);
       auto slot = CodeMemory ().reserve (std::array{body.size ()});
-      REQUIRE (slot);
-      auto base = slot->address (0);
-      REQUIRE (base);
+      REQUIRE ((slot).has_value ());
+      auto base = slot.value ().address (0);
+      REQUIRE ((base).has_value ());
       const std::array destinations{
-        execution::detail::NativeBoundaryTarget{*base + target_offset, 0}};
-      auto entries = boundary->add_entries (destinations);
-      REQUIRE (entries);
-      body = emit ((*entries)[0]);
+        execution::detail::NativeBoundaryTarget{(base).value () + target_offset, 0}};
+      auto entries = boundary.value ().add_entries (destinations);
+      REQUIRE ((entries).has_value ());
+      body = emit (((entries).value ())[0]);
       const std::array<std::span<const std::uint8_t>, 1> data{body};
-      auto executable = slot->publish (data);
-      REQUIRE (executable);
-      reinterpret_cast<void (*) ()> ((*executable)[0].address ()) ();
+      auto executable = slot.value ().publish (data);
+      REQUIRE ((executable).has_value ());
+      reinterpret_cast<void (*) ()> (((executable).value ())[0].address ()) ();
       CHECK (probe.result == (fail ? 0 : 42));
       CHECK (execution::detail::native_boundary_state_statistics ().depth == 0);
       CHECK (probe.after.original_sp == probe.before.original_sp);
@@ -282,22 +286,22 @@ TEST_CASE (
         CHECK (probe.after.fpcr == probe.before.fpcr);
         CHECK (probe.after.fpsr == probe.before.fpsr);
       } else {
-        auto f = codegen::detail::x86_invocation_frame (target->abi ());
-        REQUIRE (f);
-        for (unsigned n = 0; n < f->preserved_count; ++n) {
-          auto reg = f->preserved[n];
+        auto f = codegen::detail::x86_invocation_frame (target.value ().abi ());
+        REQUIRE ((f).has_value ());
+        for (unsigned n = 0; n < f.value ().preserved_count; ++n) {
+          auto reg = f.value ().preserved[n];
           CHECK (probe.after.general[unsigned (reg)]
                  == (fail || reg == target::X86Register::BP
                        ? probe.before.general[unsigned (reg)]
                        : 0xdeadbeef00000000ull + unsigned (reg)));
         }
-        if (target->abi () == target::ABI::X86Windows)
+        if (target.value ().abi () == target::ABI::X86Windows)
           for (unsigned n = 6; n < 16; ++n)
             CHECK (probe.after.vectors[n]
                    == (fail ? probe.before.vectors[n] : std::array<std::uint64_t, 2>{0, 0}));
         for (auto n : {0, 1, 2, 3, 4, 24, 25, 26, 27})
           CHECK (probe.after.extended[n] == probe.before.extended[n]);
-        if (target->abi () == target::ABI::X86SysV)
+        if (target.value ().abi () == target::ABI::X86SysV)
           for (unsigned n = 32; n < 64; ++n)
             if ((n - 32) % 16 < 10) CHECK (probe.after.extended[n] == probe.before.extended[n]);
       }

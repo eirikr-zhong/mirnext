@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Utility program semantics. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/Execution/Session.hpp"
@@ -15,20 +17,20 @@ using namespace mirnext::execution;
 namespace {
 auto parse (std::string_view text) {
   auto c = serialization::parse_text (text);
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
-  return std::move (*c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
+  return std::make_unique<Program> (std::move ((c).value ()));
 }
-auto make (const Context &c, ExecutionOptions options) {
+auto make (const Program &c, ExecutionOptions options) {
   auto s = ExecutionSession::create (c, std::move (options));
-  INFO ((s ? "" : s.error ().message));
-  REQUIRE (s);
-  return std::move (*s);
+  INFO (((s).has_value () ? "" : s.error ().message));
+  REQUIRE ((s).has_value ());
+  return std::move ((s).value ());
 }
 auto find (const ExecutionSession &s, std::string_view module, std::string_view name) {
   auto f = s.find_function (module, name);
-  REQUIRE (f);
-  return *f;
+  REQUIRE ((f).has_value ());
+  return (f).value ();
 }
 ExecutionOptions options (unsigned engine, unsigned level) {
   ExecutionOptions o;
@@ -43,22 +45,22 @@ ExecutionOptions options (unsigned engine, unsigned level) {
   if (engine == 4) o.link.compilation = JITCompilation::BlockVersioning;
   return o;
 }
-void roundtrip (const Context &source) {
+void roundtrip (const Program &source) {
   auto text = serialization::write_text (source);
-  REQUIRE (text);
-  auto parsed = parse (*text);
+  REQUIRE ((text).has_value ());
+  auto parsed = parse ((text).value ());
   auto second = serialization::write_text (*parsed);
-  REQUIRE (second);
-  CHECK (*second == *text);
+  REQUIRE ((second).has_value ());
+  CHECK ((second).value () == (text).value ());
   for (auto encoding :
        {serialization::BinaryEncoding::Raw, serialization::BinaryEncoding::Compressed}) {
     auto bytes = serialization::write_binary (source, encoding);
-    REQUIRE (bytes);
-    auto read = serialization::read_binary (*bytes, {.encoding = encoding});
-    REQUIRE (read);
-    auto written = serialization::write_binary (**read, encoding);
-    REQUIRE (written);
-    CHECK (*written == *bytes);
+    REQUIRE ((bytes).has_value ());
+    auto read = serialization::read_binary ((bytes).value (), {.encoding = encoding});
+    REQUIRE ((read).has_value ());
+    auto written = serialization::write_binary ((read).value (), encoding);
+    REQUIRE ((written).has_value ());
+    CHECK ((written).value () == (bytes).value ());
   }
 }
 thread_local std::vector<std::string> *messages = nullptr;
@@ -112,13 +114,13 @@ TEST_CASE (
   input.clear ();
   input.shrink_to_fit ();
   auto text = serialization::write_text (*scanned);
-  REQUIRE (text);
-  CHECK (text->find ("# a comment") == text->npos);
-  CHECK (text->find ("noalias1") != text->npos);
-  CHECK (text->find ("noalias2") != text->npos);
+  REQUIRE ((text).has_value ());
+  CHECK (text.value ().find ("# a comment") == text.value ().npos);
+  CHECK (text.value ().find ("noalias1") != text.value ().npos);
+  CHECK (text.value ().find ("noalias2") != text.value ().npos);
   roundtrip (*scanned);
   auto unterminated = serialization::parse_text (test::utility_unterminated_memory_text ());
-  REQUIRE_FALSE (unterminated);
+  REQUIRE_FALSE ((unterminated).has_value ());
   CHECK (unterminated.error ().message.find ("non-void function falls through")
          != std::string::npos);
   auto memory = parse (test::utility_memory_text);
@@ -128,10 +130,12 @@ TEST_CASE (
     for (auto &i : b.instructions ()) {
       unsigned count = 0;
       for (auto &o : i.operands ())
-        if (auto m = o.get<Memory> ()) {
+        if (auto m = mirnext::ir::detail::operand_access (o).get<Memory> ()) {
           ++count;
-          absolute |= !m->base && !m->index;
-          index_only |= !m->base && m->index;
+          absolute |= !mirnext::ir::detail::NodeAccess::base (*(m))
+                      && !mirnext::ir::detail::NodeAccess::index (*(m));
+          index_only |= !mirnext::ir::detail::NodeAccess::base (*(m))
+                        && mirnext::ir::detail::NodeAccess::index (*(m));
         }
       multi_memory |= count == 3;
     }
@@ -144,78 +148,78 @@ TEST_CASE (
   for (auto source : {scanned.get (), memory.get ()}) {
     auto original = dump (*source);
     auto copied = clone (*source);
-    REQUIRE (copied);
+    REQUIRE ((copied).has_value ());
     transforms::FunctionPassManager passes;
     passes.add<transforms::SimplifyPass> ();
-    auto result = passes.run (**copied);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    REQUIRE ((*copied)->verify ());
-    roundtrip (**copied);
+    auto result = passes.run ((copied).value ());
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    REQUIRE ((copied.value ().verify ()).has_value ());
+    roundtrip ((copied).value ());
     CHECK (dump (*source) == original);
   }
 }
 TEST_CASE ("utility API sieve has equivalent owning text binary and executable results at O0-O3") {
-  auto source = std::make_unique<Context> ();
+  auto source = std::make_unique<Program> ();
   auto built = test::append_api_sieve (*source, "api", 127, 2);
-  INFO ((built ? "" : built.error ().message));
-  REQUIRE (built);
-  REQUIRE (source->verify ());
+  INFO (((built).has_value () ? "" : built.error ().message));
+  REQUIRE ((built).has_value ());
+  REQUIRE ((source->verify ()).has_value ());
   roundtrip (*source);
   auto bytes = serialization::write_binary (*source);
-  REQUIRE (bytes);
-  auto read = serialization::read_binary (*bytes);
-  REQUIRE (read);
+  REQUIRE ((bytes).has_value ());
+  auto read = serialization::read_binary ((bytes).value ());
+  REQUIRE ((read).has_value ());
   for (unsigned level = 0; level < 4; ++level)
     for (unsigned engine = 0; engine < 5; ++engine) {
       if (!engine && level) continue;
       CAPTURE (level);
       CAPTURE (engine);
-      for (auto context : {source.get (), read->get ()}) {
+      for (auto context : {source.get (), &(read).value ()}) {
         auto s = make (*context, options (engine, level));
         auto f = find (s, "api", "sieve");
         auto value = f.call_i64 ();
-        REQUIRE (value);
-        CHECK (*value == 31);
+        REQUIRE ((value).has_value ());
+        CHECK ((value).value () == 31);
       }
     }
 }
 TEST_CASE ("utility hello callback and embedded strings use checked DSL and real host ABI calls") {
   using Callback = std::int32_t (*) (const char *);
   auto source = test::utility_hello ();
-  REQUIRE (source);
-  auto original = dump (**source);
-  roundtrip (**source);
+  REQUIRE ((source).has_value ());
+  auto original = dump ((source).value ());
+  roundtrip ((source).value ());
   for (unsigned level = 0; level < 4; ++level)
     for (unsigned engine = 0; engine < 5; ++engine) {
       if (!engine && level) continue;
       CAPTURE (level);
       CAPTURE (engine);
       Capture capture;
-      auto s = make (**source, options (engine, level));
+      auto s = make ((source).value (), options (engine, level));
       auto f = find (s, "hello", "hello");
       auto entry = f.native_entry ();
-      REQUIRE (entry);
+      REQUIRE ((entry).has_value ());
       for (std::int32_t id : {0, 1}) {
         auto text = id ? "goodbye" : "hello";
         std::array<ExecutionArgument, 3>
           args{std::uint64_t (reinterpret_cast<std::uintptr_t> (text)),
                std::uint64_t (reinterpret_cast<std::uintptr_t> (&capture_message)), id};
         auto result = f.call (args);
-        INFO ((result ? "" : result.error ().message));
-        REQUIRE (result);
-        REQUIRE (result->size () == 1);
-        CHECK (*(*result)[0].as_i64 () == 10);
+        INFO (((result).has_value () ? "" : result.error ().message));
+        REQUIRE ((result).has_value ());
+        REQUIRE (result.value ().size () == 1);
+        CHECK ((((result).value ())[0].as_i64 ()).value () == 10);
         ExecutionInvocation invocation;
         CHECK (reinterpret_cast<std::int32_t (*) (const char *, Callback, std::int32_t)> (
-                 entry->address ()) (text, &capture_message, id)
+                 entry.value ().address ()) (text, &capture_message, id)
                == 10);
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
         CHECK (capture.values
                == std::vector<std::string>{text, id ? "all" : "world", text, id ? "all" : "world"});
         capture.values.clear ();
       }
-      CHECK (dump (**source) == original);
+      CHECK (dump ((source).value ()) == original);
     }
 }
 TEST_CASE (
@@ -229,24 +233,30 @@ TEST_CASE (
       auto context = parse (test::utility_add_text);
       auto first = make (*context, options (engine, level));
       auto add = find (first, "m_add", "add");
-      auto definition = context->find_module ("m_add")->find_symbol ("add")->function ();
-      auto module = context->create_module ("m_1p1");
-      REQUIRE (module);
-      auto imported = (*module)->import ("add", definition->signature ());
-      REQUIRE (imported);
-      auto f = (*module)->create_function ("p2", {{Type (Type::Kind::I32)}, {}});
-      REQUIRE (f);
-      REQUIRE ((*module)->export_symbol ((*f)->symbol ()));
-      auto block = (*f)->create_block ();
-      REQUIRE (block);
-      IRBuilder b (**block);
-      auto called = b.inline_call (**imported, {1, 1});
-      REQUIRE (called);
-      auto value = called->value ();
-      REQUIRE (value);
-      REQUIRE (b.ret (Operand (**value)));
-      CHECK (context->find_module ("m_add")->find_symbol ("add")->function () == definition);
-      REQUIRE (context->verify ());
+      auto definition
+        = context->find_module ("m_add").get ()->find_symbol ("add").get ()->function ().get ();
+      auto module = mirnext::ir::detail::access (*(context)).create_module ("m_1p1");
+      REQUIRE ((module).has_value ());
+      auto imported = mirnext::ir::detail::access (((module)).value ())
+                        .import ("add", definition->signature ());
+      REQUIRE ((imported).has_value ());
+      auto f = mirnext::ir::detail::access (((module)).value ())
+                 .create_function ("p2", {{Type (Type::Kind::I32)}, {}});
+      REQUIRE ((f).has_value ());
+      REQUIRE (
+        (mirnext::ir::detail::access (((module)).value ()).export_symbol (f.value ().symbol ()))
+          .has_value ());
+      auto block = mirnext::ir::detail::access (((f)).value ()).create_block ();
+      REQUIRE ((block).has_value ());
+      InstructionBuilder b ((block).value ());
+      auto called = b.inline_call ((imported).value (), {1, 1});
+      REQUIRE ((called).has_value ());
+      auto value = called.value ().value ();
+      REQUIRE ((value).has_value ());
+      REQUIRE ((b.ret (Operand ((value).value ()))).has_value ());
+      CHECK (context->find_module ("m_add").get ()->find_symbol ("add").get ()->function ().get ()
+             == definition);
+      REQUIRE ((context->verify ()).has_value ());
       auto original = dump (*context);
       auto combined = make (*context, options (engine, level));
       CHECK (dump (*context) == original);
@@ -254,13 +264,13 @@ TEST_CASE (
       auto p2 = find (combined, "m_1p1", "p2");
       for (unsigned n = 0; n < 2; ++n) {
         auto result = p2.call_i64 ();
-        REQUIRE (result);
-        CHECK (*result == 2);
+        REQUIRE ((result).has_value ());
+        CHECK ((result).value () == 2);
       }
       std::array<std::int64_t, 2> args{40, 2};
       auto result = add.call_i64 (args);
-      REQUIRE (result);
-      CHECK (*result == 42);
+      REQUIRE ((result).has_value ());
+      CHECK ((result).value () == 42);
     }
 }
 TEST_CASE (
@@ -277,22 +287,22 @@ TEST_CASE (
         auto s = make (*source, options (engine, level));
         auto f = find (s, "m_sieve", "sieve");
         auto before = f.native_entry ();
-        REQUIRE (before);
-        auto address = before->address ();
-        if (engine >= 2) REQUIRE (f.compile ());
+        REQUIRE ((before).has_value ());
+        auto address = before.value ().address ();
+        if (engine >= 2) REQUIRE ((f.compile ()).has_value ());
         auto after = f.native_entry ();
-        REQUIRE (after);
-        CHECK (after->address () == address);
-        retained = *after;
+        REQUIRE ((after).has_value ());
+        CHECK (after.value ().address () == address);
+        retained = (after).value ();
         if (engine == 2 || engine == 3) {
-          REQUIRE (f.artifact ());
-          CHECK (f.artifact ()->verify ());
+          REQUIRE ((f.artifact ()).has_value ());
+          CHECK ((f.artifact ().value ().verify ()).has_value ());
         }
       }
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         ExecutionInvocation invocation;
         CHECK (reinterpret_cast<std::int64_t (*) ()> (retained->address ()) () == 31);
-        CHECK (invocation.status ());
+        CHECK ((invocation.status ()).has_value ());
       }
     }
 }
@@ -313,33 +323,36 @@ TEST_CASE (
       std::array<std::int64_t, 1> args{
         static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (&foreign_variadic))};
       auto result = f.call_i64 (args);
-      INFO ((result ? "" : result.error ().message));
-      REQUIRE (result);
-      CHECK (*result == 42);
+      INFO (((result).has_value () ? "" : result.error ().message));
+      REQUIRE ((result).has_value ());
+      CHECK ((result).value () == 42);
       CHECK (s.host_entry_count () == 1);
     }
     CHECK (foreign_calls == 3);
-    Context blocks;
-    auto module = blocks.create_module ("blocks");
-    REQUIRE (module);
+    Program blocks;
+    auto module = mirnext::ir::detail::access (blocks).create_module ("blocks");
+    REQUIRE ((module).has_value ());
     auto prototype
-      = (*module)->prototype ("p", {{Type::i64 ()}, {Type::block (sizeof (Pair), pair_class)}});
-    REQUIRE (prototype);
+      = mirnext::ir::detail::access (((module)).value ())
+          .prototype ("p", {{Type::i64 ()}, {Type::block (sizeof (Pair), pair_class)}});
+    REQUIRE ((prototype).has_value ());
     auto fn
-      = (*module)->create_function ("f",
-                                    {{Type::i64 ()},
-                                     {Type::pointer (), Type::block (sizeof (Pair), pair_class)}});
-    REQUIRE (fn);
-    auto block = (*fn)->create_block ();
-    REQUIRE (block);
-    IRBuilder b (**block);
-    auto args = (*fn)->arguments ();
-    auto called = b.call_indirect (**prototype, Operand (*args[0]),
-                                   {BlockArgument (*args[1], sizeof (Pair), pair_class)});
-    REQUIRE (called);
-    auto value = called->value ();
-    REQUIRE (value);
-    REQUIRE (b.ret (Operand (**value)));
+      = mirnext::ir::detail::access (((module)).value ())
+          .create_function ("f", {{Type::i64 ()},
+                                  {Type::pointer (), Type::block (sizeof (Pair), pair_class)}});
+    REQUIRE ((fn).has_value ());
+    auto block = mirnext::ir::detail::access (((fn)).value ()).create_block ();
+    REQUIRE ((block).has_value ());
+    InstructionBuilder b ((block).value ());
+    auto args = mirnext::ir::detail::ReferenceAccess::pointers (fn.value ().arguments ());
+    auto called
+      = b.call_indirect ((prototype).value (), Operand (*args[0]),
+                         {mirnext::ir::detail::BlockArgumentState (*args[1], sizeof (Pair),
+                                                                   pair_class)});
+    REQUIRE ((called).has_value ());
+    auto value = called.value ().value ();
+    REQUIRE ((value).has_value ());
+    REQUIRE ((b.ret (Operand ((value).value ()))).has_value ());
     auto program = make (blocks, configuration);
     auto bf = find (program, "blocks", "f");
     Pair pair{20, 22};
@@ -347,9 +360,9 @@ TEST_CASE (
       arguments{std::uint64_t (reinterpret_cast<std::uintptr_t> (&foreign_pair)),
                 ExecutionArgument::block (std::as_bytes (std::span (&pair, 1)), pair_class)};
     auto result = bf.call (arguments);
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    CHECK (*(*result)[0].as_i64 () == 42);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    CHECK ((((result).value ())[0].as_i64 ()).value () == 42);
     CHECK (pair.a == 20);
   }
 }
@@ -369,21 +382,21 @@ TEST_CASE (
   std::array<std::int64_t, 1> args{
     static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (&foreign_variadic))};
   auto result = f.call_i64 (args);
-  REQUIRE_FALSE (result);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("native foreign calls are disabled") != std::string::npos);
   args[0] = 0;
   result = f.call_i64 (args);
-  REQUIRE_FALSE (result);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("null native call target") != std::string::npos);
   auto address = find (disabled, "m", "get").call_i64 ();
-  REQUIRE (address);
-  args[0] = *address;
+  REQUIRE ((address).has_value ());
+  args[0] = (address).value ();
   result = f.call_i64 (args);
-  REQUIRE_FALSE (result);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("signature or convention mismatch") != std::string::npos);
   args[0] = static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (&foreign_variadic));
   result = find (disabled, "m", "j").call_i64 (args);
-  REQUIRE_FALSE (result);
+  REQUIRE_FALSE ((result).has_value ());
   CHECK (result.error ().message.find ("external jcall requires a nonstandard ABI entry")
          != std::string::npos);
   CHECK (foreign_calls == 0);
@@ -399,7 +412,7 @@ TEST_CASE (
                                      reinterpret_cast<std::uintptr_t> (&foreign_reentry)),
                                    1};
   auto rejected = find (s, "m", "f").call_i64 (args);
-  REQUIRE_FALSE (rejected);
+  REQUIRE_FALSE ((rejected).has_value ());
   CHECK (rejected.error ().message.find ("requires native_entries") != std::string::npos);
   CHECK (s.host_entry_count () == 0);
   for (bool instruction_budget : {false, true}) {
@@ -410,14 +423,14 @@ TEST_CASE (
     auto f = find (program, "m", "f");
     args[1] = 20;
     auto failed = f.call_i64 (args);
-    REQUIRE_FALSE (failed);
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK (failed.error ().message.find (instruction_budget ? "instruction limit" : "depth limit")
            != std::string::npos);
     args[1] = 1;
     auto recovered = f.call_i64 (args);
-    INFO ((recovered ? "" : recovered.error ().message));
-    REQUIRE (recovered);
-    CHECK (*recovered == 42);
+    INFO (((recovered).has_value () ? "" : recovered.error ().message));
+    REQUIRE ((recovered).has_value ());
+    CHECK ((recovered).value () == 42);
   }
 }
 TEST_CASE (
@@ -454,15 +467,15 @@ TEST_CASE (
   std::array<std::int64_t, 1> args{
     static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (&foreign_variadic))};
   auto failed = retained->call_i64 (args);
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("injected cold foreign adapter failure")
          != std::string::npos);
   CHECK (observer.lock ()->attempts == 1);
   observer.lock ()->reject = false;
   for (unsigned repeat = 0; repeat < 2; ++repeat) {
     auto value = retained->call_i64 (args);
-    REQUIRE (value);
-    CHECK (*value == 42);
+    REQUIRE ((value).has_value ());
+    CHECK ((value).value () == 42);
   }
   CHECK (observer.lock ()->attempts == 2);
   retained.reset ();

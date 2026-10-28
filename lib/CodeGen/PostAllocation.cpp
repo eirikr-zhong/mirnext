@@ -1,3 +1,8 @@
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/PostState.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* Post-allocation MIR algorithms, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. Transform block-owned machine instructions. */
 #include "mirnext/CodeGen/PostAllocation.hpp"
@@ -67,7 +72,7 @@ bool observable (MachineOpcode c) {
          || is (c, Opcode::VaStart) || is (c, Opcode::VaArg) || is (c, Opcode::VaEnd);
 }
 std::optional<target::PhysicalRegister> physical (const MachineOperand &o) {
-  if (auto r = o.get<target::PhysicalRegister> ()) return *r;
+  if (auto r = detail::operand_access (o).get<target::PhysicalRegister> ()) return *r;
   return {};
 }
 std::optional<Opcode> commutative (Opcode insn_code) {
@@ -177,26 +182,28 @@ struct PostAllocationEngine {
       input_graph (std::move (graph)),
       refs (f.target ().registers ().size ()) {}
   std::size_t live_index (MachineRegister r) {
-    if (auto p = std::get_if<target::PhysicalRegister> (&r)) return p->encoding ();
+    if (auto p = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&r)))
+      return p->encoding ();
     // Most functions have only physical effects at this stage. Allocate this
     // map only when copied-block dependencies actually survive allocation.
     if (virtual_indices.empty ()) {
       auto n = f.target ().registers ().size ();
       for (auto &v : f.registers ()) virtual_indices.emplace (&v, n++);
     }
-    return virtual_indices.at (std::get<const MachineVirtualRegister *> (r));
+    return virtual_indices.at (
+      std::get<const MachineVirtualRegister *> (detail::NodeAccess::storage (r)));
   }
   auto &statistics () { return result.statistics_; }
   template <class T>
   bool checked (const Result<T> &r) {
-    if (!r && !error) error = invalid (f, r.error ().message);
-    return bool (r);
+    if (!r.has_value () && !error) error = invalid (f, r.error ().message);
+    return r.has_value ();
   }
   Result<void> observe (MachinePostStage stage) {
     if (!options.observer) return {};
     MachinePostView view (f, input_graph.cfg (), boundary, deaths, statistics ());
     auto observed = options.observer (stage, view);
-    if (!observed) {
+    if (!(observed).has_value ()) {
       auto e = invalid (f, observed.error ().message, stage_name (stage));
       e.code = observed.error ().code;
       return e;
@@ -206,7 +213,7 @@ struct PostAllocationEngine {
   MachineInstruction *next (MachineInstruction *i) {
     auto r = rw.next (*i);
     if (!checked (r)) return nullptr;
-    return *r;
+    return r.value ().get ();
   }
   void erase (MachineInstruction *i) {
     deaths.erase (i);
@@ -217,7 +224,9 @@ struct PostAllocationEngine {
   }
   void properties (MachineInstruction *i) {
     ++statistics ().properties;
-    auto value = i->operands ().size () > 2 ? i->operands ()[2].get<std::int64_t> () : nullptr;
+    auto value = i->operands ().size () > 2
+                   ? detail::operand_access (i->operands ()[2]).get<std::int64_t> ()
+                   : nullptr;
     if (is (i->opcode (), Opcode::PrSet)
         || (is (i->opcode (), Opcode::PrBeq) && (!value || *value != 0))
         || (is (i->opcode (), Opcode::PrBne) && (!value || *value == 0)))
@@ -229,7 +238,8 @@ struct PostAllocationEngine {
     auto &ref = refs[r.encoding ()];
     auto &dead = deaths[i];
     return ref.instruction && ref.definition
-           && std::find (dead.begin (), dead.end (), MachineRegister (r)) != dead.end ();
+           && std::find (dead.begin (), dead.end (), detail::NodeAccess::make_MachineRegister (r))
+                != dead.end ();
   }
   bool obsolete (target::PhysicalRegister r, std::size_t number) {
     auto &ref = refs[r.encoding ()];
@@ -237,10 +247,13 @@ struct PostAllocationEngine {
   }
   bool obsolete (const MachineOperand &o, std::size_t number) {
     if (auto r = physical (o)) return obsolete (*r, number);
-    auto m = o.get<MachineMemory> ();
+    auto m = detail::operand_access (o).get<MachineMemory> ();
     if (!m) return false;
-    auto changed
-      = [&] (auto r) { return r && obsolete (std::get<target::PhysicalRegister> (*r), number); };
+    auto changed = [&] (auto r) {
+      return r
+             && obsolete (std::get<target::PhysicalRegister> (detail::NodeAccess::storage (*r)),
+                          number);
+    };
     return changed (m->base) || changed (m->index) || memory_number > number;
   }
   MachineInstruction *definition (target::PhysicalRegister r) {
@@ -262,11 +275,12 @@ struct PostAllocationEngine {
     auto &ref = refs[r.encoding ()];
     if (!ref.instruction || ref.deleted) return;
     auto &dead = deaths[at];
-    std::erase (dead, MachineRegister (r));
+    std::erase (dead, detail::NodeAccess::make_MachineRegister (r));
     auto inputs = machine_register_effects (f, *at);
     if (!checked (inputs)) return;
     for (auto value : deaths[def])
-      if (std::find (inputs->uses.begin (), inputs->uses.end (), value) != inputs->uses.end ())
+      if (std::find (inputs.value ().uses.begin (), inputs.value ().uses.end (), value)
+          != inputs.value ().uses.end ())
         dead.push_back (value);
     erase (def);
     ref.deleted = true;
@@ -304,7 +318,8 @@ struct PostAllocationEngine {
     SparseBitSet seen;
     // Candidate swaps never alter output positions for the supported commutative codes.
     for (std::size_t p = 0; p < ops.size (); ++p) {
-      if (operand_is_output (*i, p) || ops[p].get<MachineMemory> ()) continue;
+      if (operand_is_output (*i, p) || detail::operand_access (ops[p]).get<MachineMemory> ())
+        continue;
       if (auto r = physical (ops[p]); r && safe (*r, i) && !seen.contains (r->encoding ())) {
         seen.insert (r->encoding ());
         vars.push_back (*r);
@@ -316,9 +331,11 @@ struct PostAllocationEngine {
       auto def = definition (r);
       if (!def || is_call (def->opcode ())) return false;
       auto early = early_clobbers (f.target (), def->opcode ());
-      auto m = ops[0].get<MachineMemory> ();
+      auto m = detail::operand_access (ops[0]).get<MachineMemory> ();
       if (!move (def->opcode ()) && !early[0] && !early[1]
-          && (!m || (m->base != MachineRegister (r) && m->index != MachineRegister (r)))) {
+          && (!m
+              || (m->base != detail::NodeAccess::make_MachineRegister (r)
+                  && m->index != detail::NodeAccess::make_MachineRegister (r)))) {
         auto changed
           = std::vector<MachineOperand> (def->operands ().begin (), def->operands ().end ());
         changed[0] = ops[0];
@@ -345,16 +362,18 @@ struct PostAllocationEngine {
         if (!operand_is_output (*i, p) && physical (o) == r) {
           o = def->operands ()[1];
           change = true;
-        } else if (auto m = o.get<MachineMemory> ();
-                   m && (m->base == MachineRegister (r) || m->index == MachineRegister (r))) {
+        } else if (auto m = detail::operand_access (o).get<MachineMemory> ();
+                   m
+                   && (m->base == detail::NodeAccess::make_MachineRegister (r)
+                       || m->index == detail::NodeAccess::make_MachineRegister (r))) {
           auto src = physical (def->operands ()[1]);
           if (!src)
             success = false;
           else {
             auto value = *m;
-            if (value.base == MachineRegister (r)) value.base = *src;
-            if (value.index == MachineRegister (r)) value.index = *src;
-            o = MachineOperand (std::move (value));
+            if (value.base == detail::NodeAccess::make_MachineRegister (r)) value.base = *src;
+            if (value.index == detail::NodeAccess::make_MachineRegister (r)) value.index = *src;
+            o = detail::NodeAccess::make_MachineOperand (std::move (value));
             change = true;
           }
         }
@@ -403,7 +422,7 @@ struct PostAllocationEngine {
         changed = false;
         std::fill (refs.begin (), refs.end (), Reference{});
         memory_number = 0;
-        std::size_t number = block.labels ().size () + 1;
+        std::size_t number = ir::detail::ReferenceAccess::pointers (block.labels ()).size () + 1;
         auto body = block.instructions ();
         for (auto i = body.begin () == body.end () ? nullptr : &*body.begin (); i;) {
           auto following = next (i);
@@ -451,14 +470,18 @@ struct PostAllocationEngine {
               bool out = operand_is_output (*i, p);
               if (auto r = physical (o); r && (pass != 0) == out)
                 reference (*r, i, number, pass != 0);
-              else if (auto m = o.get<MachineMemory> ()) {
+              else if (auto m = detail::operand_access (o).get<MachineMemory> ()) {
                 if (out && pass == 1)
                   memory_number = number;
                 else if (pass == 0) {
                   if (m->base)
-                    reference (std::get<target::PhysicalRegister> (*m->base), i, number, false);
+                    reference (std::get<target::PhysicalRegister> (
+                                 detail::NodeAccess::storage (*m->base)),
+                               i, number, false);
                   if (m->index)
-                    reference (std::get<target::PhysicalRegister> (*m->index), i, number, false);
+                    reference (std::get<target::PhysicalRegister> (
+                                 detail::NodeAccess::storage (*m->index)),
+                               i, number, false);
                 }
               }
             }
@@ -469,8 +492,9 @@ struct PostAllocationEngine {
     }
   }
   void dce () {
-    for (std::size_t b = 2; b < input_graph.cfg ().blocks.size (); ++b) {
-      auto &block = *const_cast<MachineBasicBlock *> (input_graph.cfg ().blocks[b]);
+    for (std::size_t b = 2; b < detail::NodeAccess::blocks (input_graph.cfg ()).size (); ++b) {
+      auto &block
+        = *const_cast<MachineBasicBlock *> (detail::NodeAccess::blocks (input_graph.cfg ())[b]);
       auto live = boundary[b].out;
       auto body = block.instructions ();
       bool reachable_overflow = false;
@@ -493,7 +517,8 @@ struct PostAllocationEngine {
                  && (f.target ().architecture () == target::Architecture::X86_64
                        ? first_reg->encoding () == 5 || first_reg->encoding () == 4
                        : first_reg->encoding () == 29 || first_reg->encoding () == 31))) {
-          if (first && std::next (at) == body.end () && block.labels ().empty ()) {
+          if (first && std::next (at) == body.end ()
+              && ir::detail::ReferenceAccess::pointers (block.labels ()).empty ()) {
             checked (rw.insert_after (i, MachinePseudoOpcode::Use, {}));
             ++statistics ().no_op_anchors;
             reachable_overflow = false;
@@ -525,9 +550,24 @@ struct PostAllocationEngine {
       }
     }
   }
-  Result<MachinePostResult> run () {
+  std::optional<MachinePostStage> next_stage () const {
     auto level = result.allocation ().optimization_level ();
-    if (level < 2 && options.remove_properties) {
+    if (next_index == 0 && level < 2 && options.remove_properties)
+      return MachinePostStage::StripProperties;
+    if (next_index <= 1 && level) return MachinePostStage::Liveness;
+    if (next_index == 2 && level) return MachinePostStage::Combine;
+    if (next_index == 3 && level) return MachinePostStage::DeadCode;
+    return {};
+  }
+  unsigned next_index = 0;
+  bool finished = false;
+  Result<void> step () {
+    if (error) return *error;
+    if (finished || !next_stage ()) return invalid (f, "post-allocation stages already finished");
+    auto stage = *next_stage ();
+    auto level = result.allocation ().optimization_level ();
+    switch (stage) {
+    case MachinePostStage::StripProperties:
       for (auto &b : f.blocks ()) {
         auto body = b.instructions ();
         for (auto i = body.begin () == body.end () ? nullptr : &*body.begin (); i;) {
@@ -537,50 +577,67 @@ struct PostAllocationEngine {
         }
       }
       if (error) return *error;
-      auto observed = observe (MachinePostStage::StripProperties);
-      if (!observed) return observed.error ();
-    }
-    if (level) {
+      break;
+    case MachinePostStage::Liveness: {
       auto live
         = MachineLiveness::analyze_retained_topology (f, input_graph,
                                                       {.optimization_level = level,
                                                        .calculate_frequencies = false,
                                                        .global_registers
                                                        = result.allocation ().global_registers ()});
-      if (!live) return live.error ();
-      boundary.assign (live->blocks ().begin (), live->blocks ().end ());
+      if (!(live).has_value ()) return live.error ();
+      boundary.assign (live.value ().blocks ().begin (), live.value ().blocks ().end ());
       for (auto &b : f.blocks ())
         for (auto &i : b.instructions ()) {
-          auto dead = live->deaths (i);
-          if (!dead) return dead.error ();
-          if (!dead->empty ())
-            deaths.emplace (&i, std::vector<MachineRegister> (dead->begin (), dead->end ()));
+          auto dead = live.value ().deaths (i);
+          if (!(dead).has_value ()) return dead.error ();
+          if (!dead.value ().empty ())
+            deaths.emplace (&i, std::vector<MachineRegister> (dead.value ().begin (),
+                                                              dead.value ().end ()));
         }
-      auto observed = observe (MachinePostStage::Liveness);
-      if (!observed) return observed.error ();
-      combine ();
-      if (error) return *error;
-      observed = observe (MachinePostStage::Combine);
-      if (!observed) return observed.error ();
-      dce ();
-      if (error) return *error;
-      observed = observe (MachinePostStage::DeadCode);
-      if (!observed) return observed.error ();
+      break;
     }
+    case MachinePostStage::Combine: combine (); break;
+    case MachinePostStage::DeadCode: dce (); break;
+    }
+    if (error) return *error;
+    auto observed = observe (stage);
+    if (!(observed).has_value ()) {
+      error = observed.error ();
+      return *error;
+    }
+    next_index = static_cast<unsigned> (stage) + 1;
+    return {};
+  }
+  Result<MachinePostResult> finish () {
+    if (error) return *error;
+    if (finished) return invalid (f, "post-allocation result already consumed");
+    while (next_stage ()) {
+      auto checked = step ();
+      if (!(checked).has_value ()) return checked.error ();
+    }
+    finished = true;
     auto state = f.state ();
     state.post_allocation_optimized = true;
     auto committed = rw.set_state (state);
-    if (!committed) return committed.error ();
+    if (!(committed).has_value ()) return committed.error ();
     auto cfg = MachineControlFlow::build (f);
-    if (!cfg) return cfg.error ();
-    result.spill_.cfg_ = std::move (*cfg);
+    if (!(cfg).has_value ()) return cfg.error ();
+    result.spill_.cfg_ = std::move ((cfg).value ());
     result.spill_.rewrite_.allocation_.revision_ = f.revision ();
     return std::move (result);
   }
 };
 }  // namespace detail
-Result<MachinePostResult> optimize_allocated_machine (MachineFunction &f, MachineSpillResult spill,
-                                                      MachinePostOptions options) {
+namespace detail {
+PostAllocationState::PostAllocationState (std::unique_ptr<PostAllocationEngine> state)
+  : state_ (std::move (state)) {}
+PostAllocationState::PostAllocationState (PostAllocationState &&) noexcept = default;
+PostAllocationState &PostAllocationState::operator= (PostAllocationState &&) noexcept = default;
+PostAllocationState::~PostAllocationState () = default;
+Result<PostAllocationState> PostAllocationState::create (MachineFunction &f,
+                                                         MachineSpillResult spill,
+                                                         MachinePostOptions options) {
   if (f.target ().architecture () != target::Architecture::AArch64
       && f.target ().architecture () != target::Architecture::X86_64)
     return invalid (f, "unsupported target");
@@ -588,9 +645,27 @@ Result<MachinePostResult> optimize_allocated_machine (MachineFunction &f, Machin
       || f.state ().post_allocation_optimized)
     return invalid (f, "stale/foreign input or invalid phase");
   auto graph = MachineGraphAnalysis::build (f, spill.cfg ());
-  if (!graph) return graph.error ();
-  detail::PostAllocationEngine engine (f, std::move (spill), std::move (*graph),
-                                       std::move (options));
-  return engine.run ();
+  if (!(graph).has_value ()) return graph.error ();
+  return PostAllocationState (std::make_unique<PostAllocationEngine> (f, std::move (spill),
+                                                                      std::move ((graph).value ()),
+                                                                      std::move (options)));
+}
+std::optional<MachinePostStage> PostAllocationState::next_stage () const {
+  return state_ ? state_->next_stage () : std::nullopt;
+}
+Result<void> PostAllocationState::step () {
+  if (!state_) return Error{ErrorCode::InvalidArgument, "moved-from post-allocation state"};
+  return state_->step ();
+}
+Result<MachinePostResult> PostAllocationState::finish () {
+  if (!state_) return Error{ErrorCode::InvalidArgument, "moved-from post-allocation state"};
+  return state_->finish ();
+}
+}  // namespace detail
+Result<MachinePostResult> optimize_allocated_machine (MachineFunction &f, MachineSpillResult spill,
+                                                      MachinePostOptions options) {
+  auto state = detail::PostAllocationState::create (f, std::move (spill), std::move (options));
+  if (!(state).has_value ()) return state.error ();
+  return state.value ().finish ();
 }
 }  // namespace mirnext::codegen

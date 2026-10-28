@@ -4,6 +4,9 @@
 #include <functional>
 namespace mirnext::codegen {
 namespace detail {
+class NodeAccess;
+}
+namespace detail {
 struct ArtifactBuilder;
 }
 class CompiledLabel {
@@ -40,8 +43,20 @@ struct CodeRelocation {
   std::int64_t displacement = 0;
 };
 struct CodeSymbolRequest {
-  const MachineSymbol *symbol = nullptr;
-  std::optional<Builtin> builtin;
+  CodeSymbolRequest (OptionalRef<const MachineSymbol> symbol = {},
+                     std::optional<Builtin> builtin = {})
+    : CodeSymbolRequest (Key{}, symbol.get (), std::move (builtin)) {}
+  OptionalRef<const MachineSymbol> symbol () const {
+    return ::mirnext::detail::borrow_optional (symbol_);
+  }
+  std::optional<Builtin> builtin = {};
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  CodeSymbolRequest (Key, const MachineSymbol *symbol, std::optional<Builtin> builtin)
+    : builtin (builtin), symbol_ (symbol) {}
+  const MachineSymbol *symbol_;
 };
 using CodeSymbolResolver = std::function<Result<std::uint64_t> (const CodeSymbolRequest &)>;
 // Every original x86 pool reference owns a distinct aligned cell, even when
@@ -97,6 +112,5 @@ class CompiledFunction {
 struct MachineEncodingOptions {
   CodeSymbolResolver known_addresses;
 };
-Result<CompiledFunction> encode_machine (const MachineFunction &, const MachineFrameResult &,
-                                         MachineEncodingOptions = {});
+
 }  // namespace mirnext::codegen

@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Raw ABI entries with nested recovery. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/Execution/detail/NativeBoundary.hpp"
@@ -23,23 +25,24 @@ auto state () { return execution::detail::native_boundary_state_statistics (); }
 std::uintptr_t gate (Boundary &boundary, std::uintptr_t target, unsigned x87 = 0) {
   const std::array targets{execution::detail::NativeBoundaryTarget{target, x87}};
   auto entries = boundary.add_entries (targets);
-  REQUIRE (entries);
-  REQUIRE (entries->size () == 1);
-  return (*entries)[0];
+  REQUIRE ((entries).has_value ());
+  REQUIRE (entries.value ().size () == 1);
+  return ((entries).value ())[0];
 }
-std::unique_ptr<Runtime> runtime (Context &source, std::string_view module, std::string_view name,
+std::unique_ptr<Runtime> runtime (Program &source, std::string_view module, std::string_view name,
                                   unsigned level, const Boundary &boundary, Options options = {}) {
   auto optimized
     = transforms::optimize (source, {.level = static_cast<transforms::OptimizationLevel> (level)});
-  REQUIRE (optimized);
+  REQUIRE ((optimized).has_value ());
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  auto preparation = BBVPreparation::prepare (*optimized->find_function (module, name), *target,
-                                              {.optimization_level = level});
-  INFO ((preparation ? "" : preparation.error ().message));
-  REQUIRE (preparation);
-  auto program = BBVProgram::create (std::move (*preparation));
-  REQUIRE (program);
+  REQUIRE ((target).has_value ());
+  auto preparation
+    = BBVPreparation::prepare (*optimized.value ().find_function (module, name).get (),
+                               (target).value (), {.optimization_level = level});
+  INFO (((preparation).has_value () ? "" : preparation.error ().message));
+  REQUIRE ((preparation).has_value ());
+  auto program = BBVProgram::create (std::move ((preparation).value ()));
+  REQUIRE ((program).has_value ());
   options.code_capacity = 1024 * 1024;
   options.failure_continuation = boundary.recovery ().recovery_address ();
   if (!options.resolve)
@@ -47,20 +50,20 @@ std::unique_ptr<Runtime> runtime (Context &source, std::string_view module, std:
       if (!request.builtin)
         return Error{ErrorCode::UnknownName, "unexpected boundary fixture symbol"};
       auto address = builtin_address (*request.builtin);
-      if (!address) return address.error ();
-      return *address;
+      if (!address.has_value ()) return address.error ();
+      return address.value ();
     };
-  auto result = Runtime::create (std::move (*program), std::move (options));
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  auto result = Runtime::create (std::move ((program).value ()), std::move (options));
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 std::unique_ptr<Runtime> runtime (std::string_view text, unsigned level, const Boundary &boundary,
                                   Options options = {}) {
   auto source = serialization::parse_text (text);
-  INFO ((source ? "" : source.error ().message));
-  REQUIRE (source);
-  return runtime (**source, "m", "f", level, boundary, std::move (options));
+  INFO (((source).has_value () ? "" : source.error ().message));
+  REQUIRE ((source).has_value ());
+  return runtime ((source).value (), "m", "f", level, boundary, std::move (options));
 }
 std::int64_t integers (std::int64_t a, std::int64_t b, std::int64_t c, std::int64_t d,
                        std::int64_t e, std::int64_t f, std::int64_t g, std::int64_t h,
@@ -125,8 +128,8 @@ void floating_effect () {
 }
 unsigned x87_results () {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  return target->abi () == target::ABI::X86SysV && sizeof (long double) > 8 ? 1 : 0;
+  REQUIRE ((target).has_value ());
+  return target.value ().abi () == target::ABI::X86SysV && sizeof (long double) > 8 ? 1 : 0;
 }
 struct Lifetime {
   unsigned &destroyed;
@@ -141,61 +144,61 @@ TEST_CASE (
   "raw native boundary frames preserve original argument stacks and validate gate metadata") {
   for (auto abi : {target::ABI::X86SysV, target::ABI::X86Windows}) {
     auto f = codegen::detail::x86_boundary_frame (abi);
-    REQUIRE (f);
+    REQUIRE ((f).has_value ());
     bool windows = abi == target::ABI::X86Windows;
-    CHECK (f->checkpoint_offset == (windows ? 32 : 0));
-    CHECK (f->checkpoint_offset % 16 == 0);
-    CHECK (f->frame_bytes == f->checkpoint_offset + sizeof (NativeInvocationState));
-    CHECK (f->frame_bytes % 16 == 0);
-    CHECK (f->red_zone_bytes == (windows ? 0 : 128));
+    CHECK (f.value ().checkpoint_offset == (windows ? 32 : 0));
+    CHECK (f.value ().checkpoint_offset % 16 == 0);
+    CHECK (f.value ().frame_bytes == f.value ().checkpoint_offset + sizeof (NativeInvocationState));
+    CHECK (f.value ().frame_bytes % 16 == 0);
+    CHECK (f.value ().red_zone_bytes == (windows ? 0 : 128));
     for (auto original : {UINT64_C (0x100000000), UINT64_C (0x100000008)}) {
-      auto flags_sp = original - f->red_zone_bytes - 8;
-      auto frame_sp = (flags_sp & ~UINT64_C (15)) - f->frame_bytes;
+      auto flags_sp = original - f.value ().red_zone_bytes - 8;
+      auto frame_sp = (flags_sp & ~UINT64_C (15)) - f.value ().frame_bytes;
       CHECK (frame_sp % 16 == 0);
-      CHECK (frame_sp + f->frame_bytes <= flags_sp);
-      CHECK (flags_sp + f->red_zone_bytes + 8 == original);
+      CHECK (frame_sp + f.value ().frame_bytes <= flags_sp);
+      CHECK (flags_sp + f.value ().red_zone_bytes + 8 == original);
     }
   }
-  CHECK_FALSE (codegen::detail::x86_boundary_frame (target::ABI::AArch64Linux));
+  CHECK_FALSE ((codegen::detail::x86_boundary_frame (target::ABI::AArch64Linux)).has_value ());
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  CHECK_FALSE (make_native_boundary_entries (*target, 0, 0));
-  CHECK_FALSE (make_native_boundary_gate (*target, 0, 0));
-  if (target->architecture () == target::Architecture::AArch64) {
-    CHECK_FALSE (make_native_boundary_entries (*target, 1, 1));
-    CHECK_FALSE (make_native_boundary_gate (*target, 1, 1));
+  REQUIRE ((target).has_value ());
+  CHECK_FALSE ((make_native_boundary_entries ((target).value (), 0, 0)).has_value ());
+  CHECK_FALSE ((make_native_boundary_gate ((target).value (), 0, 0)).has_value ());
+  if (target.value ().architecture () == target::Architecture::AArch64) {
+    CHECK_FALSE ((make_native_boundary_entries ((target).value (), 1, 1)).has_value ());
+    CHECK_FALSE ((make_native_boundary_gate ((target).value (), 1, 1)).has_value ());
   }
   auto boundary = Boundary::create ();
-  REQUIRE (boundary);
-  auto empty = boundary->add_entries ({});
-  REQUIRE (empty);
-  CHECK (empty->empty ());
+  REQUIRE ((boundary).has_value ());
+  auto empty = boundary.value ().add_entries ({});
+  REQUIRE ((empty).has_value ());
+  CHECK (empty.value ().empty ());
   const std::array bad{execution::detail::NativeBoundaryTarget{0, 0}};
-  CHECK_FALSE (boundary->add_entries (bad));
+  CHECK_FALSE ((boundary.value ().add_entries (bad)).has_value ());
   const std::array bad_x87{
     execution::detail::NativeBoundaryTarget{reinterpret_cast<std::uintptr_t> (&integers), 3}};
-  CHECK_FALSE (boundary->add_entries (bad_x87));
-  CHECK_FALSE (Boundary::create (nullptr));
+  CHECK_FALSE ((boundary.value ().add_entries (bad_x87)).has_value ());
+  CHECK_FALSE ((Boundary::create (nullptr)).has_value ());
   CHECK (state ().depth == 0);
 }
 TEST_CASE (
   "raw native gates forward exhausted register banks aggregates and unknown scalar block varargs") {
   auto boundary = Boundary::create ();
-  REQUIRE (boundary);
+  REQUIRE ((boundary).has_value ());
   auto integer = reinterpret_cast<decltype (&integers)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&integers)));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&integers)));
   auto fp = reinterpret_cast<decltype (&floating)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&floating)));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&floating)));
   auto va = reinterpret_cast<decltype (&variadic)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&variadic)));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&variadic)));
   auto block_va = reinterpret_cast<decltype (&variadic_blocks)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&variadic_blocks)));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&variadic_blocks)));
   auto small = reinterpret_cast<decltype (&pair)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&pair)));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&pair)));
   auto large = reinterpret_cast<decltype (&aggregate)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&aggregate)));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&aggregate)));
   auto ld = reinterpret_cast<decltype (&extended)> (
-    gate (*boundary, reinterpret_cast<std::uintptr_t> (&extended), x87_results ()));
+    gate ((boundary).value (), reinterpret_cast<std::uintptr_t> (&extended), x87_results ()));
   auto cached = state ().cached_frames;
   for (unsigned n = 0; n < 20; ++n) {
     CHECK (integer (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55);
@@ -214,9 +217,9 @@ TEST_CASE (
     if (!n) cached = state ().cached_frames;
     CHECK (state ().cached_frames == cached);
   }
-  auto moved = std::move (*boundary);
+  auto moved = std::move ((boundary).value ());
   CHECK (integer (1, 2, 3, 4, 5, 6, 7, 8, 9, 10) == 55);
-  CHECK_FALSE (boundary->add_entries ({}));
+  CHECK_FALSE ((boundary.value ().add_entries ({})).has_value ());
   CHECK (moved.code_batches () == 9);
   CHECK (moved.code_bytes () > 7 * native_boundary_gate_bytes);
   std::fenv_t env;
@@ -232,19 +235,19 @@ TEST_CASE (
 }
 TEST_CASE ("raw x86 native boundary return-slot restoration preserves result flags") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  if (target->architecture () != target::Architecture::X86_64) return;
+  REQUIRE ((target).has_value ());
+  if (target.value ().architecture () != target::Architecture::X86_64) return;
   auto boundary = Boundary::create ();
-  REQUIRE (boundary);
-  const bool windows = target->abi () == target::ABI::X86Windows;
+  REQUIRE ((boundary).has_value ());
+  const bool windows = target.value ().abi () == target::ABI::X86Windows;
   // Load requested flags from the first argument, then return through the
   // real leave callback. Two patterns detect a return PC substituted as flags.
   const std::array<std::uint8_t, 3> callee{std::uint8_t (windows ? 0x51 : 0x57), 0x9d, 0xc3};
   auto reserved = CodeMemory ().reserve (std::array<std::size_t, 2>{callee.size (), 26});
-  REQUIRE (reserved);
-  auto address = reserved->address (0);
-  REQUIRE (address);
-  const auto entry = gate (*boundary, *address);
+  REQUIRE ((reserved).has_value ());
+  auto address = reserved.value ().address (0);
+  REQUIRE ((address).has_value ());
+  const auto entry = gate ((boundary).value (), (address).value ());
   // Save host flags, provide aligned home space, call the gate, and capture
   // flags immediately. Restore host flags before returning even on failure.
   const auto shadow = windows ? 32u : 0u;
@@ -253,9 +256,9 @@ TEST_CASE ("raw x86 native boundary return-slot restoration preserves result fla
   probe.insert (probe.end (), {0x41, 0xff, 0xd3, 0x9c, 0x58, 0x48, 0x83, 0xc4,
                                std::uint8_t (shadow), 0x9d, 0xc3});
   const std::array<std::span<const std::uint8_t>, 2> bytes{callee, probe};
-  auto code = reserved->publish (bytes);
-  REQUIRE (code);
-  auto call = reinterpret_cast<std::uint64_t (*) (std::uint64_t)> ((*code)[1].address ());
+  auto code = reserved.value ().publish (bytes);
+  REQUIRE ((code).has_value ());
+  auto call = reinterpret_cast<std::uint64_t (*) (std::uint64_t)> (((code).value ())[1].address ());
   for (unsigned n = 0; n < 8; ++n)
     for (auto requested : {0x202u, 0xad7u}) {
       auto flags = call (requested);
@@ -270,28 +273,28 @@ TEST_CASE (
       CAPTURE (level);
       CAPTURE (at_entry);
       auto boundary = Boundary::create ();
-      REQUIRE (boundary);
+      REQUIRE ((boundary).has_value ());
       bool fail = true;
       unsigned destroyed = 0;
-      auto r = runtime (branching, level, *boundary,
+      auto r = runtime (branching, level, (boundary).value (),
                         {.observe = [&] (auto &version, auto &) -> Result<void> {
                           Lifetime lifetime{destroyed};
                           CHECK (state ().depth == 1);
                           bool yes = false;
-                          for (auto label : version.block ().labels ())
-                            yes |= label->name () == "yes";
+                          for (auto &label : version.block ().labels ())
+                            yes |= label.name () == "yes";
                           if (fail && (at_entry ? version.call_entry () : yes))
                             return Error{ErrorCode::InvalidArgument, "raw BBV cold failure"};
                           return {};
                         }});
-      auto entry = gate (*boundary, r->entry_address ());
+      auto entry = gate ((boundary).value (), r->entry_address ());
       auto call = reinterpret_cast<std::int64_t (*) (std::int64_t, std::int64_t *)> (entry);
       std::int64_t out = -1;
       {
         ExecutionInvocation invocation;
         CHECK (call (1, &out) == 0);
         auto status = invocation.status ();
-        REQUIRE_FALSE (status);
+        REQUIRE_FALSE ((status).has_value ());
         CHECK (status.error ().message.find ("raw BBV cold failure") != std::string::npos);
       }
       CHECK (out == (at_entry ? -1 : 1));
@@ -301,9 +304,9 @@ TEST_CASE (
       {
         ExecutionInvocation invocation;
         CHECK (call (1, &out) == 42);
-        REQUIRE (invocation.status ());
+        REQUIRE ((invocation.status ()).has_value ());
         CHECK (call (0, &out) == 17);
-        REQUIRE (invocation.status ());
+        REQUIRE ((invocation.status ()).has_value ());
       }
       auto count = r->statistics ().compilation_attempts, frames = state ().cached_frames;
       for (unsigned n = 0; n < 10; ++n) CHECK (call (1, &out) == 42);
@@ -327,33 +330,33 @@ std::int64_t host_reentry (std::int64_t value) {
   ExecutionInvocation invocation;
   auto result = n.entry (value);
   auto status = invocation.status ();
-  n.failed = !status;
+  n.failed = !(status).has_value ();
   CHECK (state ().depth == 1);
-  return status ? result : 7;
+  return (status).has_value () ? result : 7;
 }
 }  // namespace
 TEST_CASE (
   "nested raw callback reentry recovers locally and leaves outer C++ destructors and checkpoints "
   "intact") {
   auto boundary = Boundary::create ();
-  REQUIRE (boundary);
+  REQUIRE ((boundary).has_value ());
   bool inner_fail = true, outer_fail = true;
   auto inner = runtime (
     "m:module\nf:func i64,i64:x\nlocal p:s\nalloca s,4096\nbt done,x\nret 0\ndone:ret "
     "x\nendfunc\nendmodule\n",
-    0, *boundary, {.observe = [&] (auto &version, auto &) -> Result<void> {
+    0, (boundary).value (), {.observe = [&] (auto &version, auto &) -> Result<void> {
       CHECK (state ().depth == 2);
       if (inner_fail && !version.call_entry ())
         return Error{ErrorCode::InvalidArgument, "inner raw failure"};
       return {};
     }});
-  Nested nesting{
-    reinterpret_cast<std::int64_t (*) (std::int64_t)> (gate (*boundary, inner->entry_address ()))};
+  Nested nesting{reinterpret_cast<std::int64_t (*) (std::int64_t)> (
+    gate ((boundary).value (), inner->entry_address ()))};
   nested = &nesting;
   auto outer = runtime (
     "m:module\np:proto i64,i64:x\nimport callback\nf:func i64,i64:x\nlocal i64:r\ncall "
     "p,callback,r,x\nbt done,r\nadd r,r,1\ndone:ret r\nendfunc\nendmodule\n",
-    0, *boundary,
+    0, (boundary).value (),
     {.resolve = [] (auto &) -> Result<std::uint64_t> {
        return reinterpret_cast<std::uintptr_t> (&host_reentry);
      },
@@ -363,13 +366,13 @@ TEST_CASE (
          return Error{ErrorCode::InvalidArgument, "outer raw failure"};
        return {};
      }});
-  auto call
-    = reinterpret_cast<std::int64_t (*) (std::int64_t)> (gate (*boundary, outer->entry_address ()));
+  auto call = reinterpret_cast<std::int64_t (*) (std::int64_t)> (
+    gate ((boundary).value (), outer->entry_address ()));
   {
     ExecutionInvocation invocation;
     CHECK (call (1) == 0);
     auto status = invocation.status ();
-    REQUIRE_FALSE (status);
+    REQUIRE_FALSE ((status).has_value ());
     CHECK (status.error ().message.find ("outer raw failure") != std::string::npos);
   }
   CHECK (nesting.called == 1);
@@ -380,7 +383,7 @@ TEST_CASE (
   {
     ExecutionInvocation invocation;
     CHECK (call (1) == 7);
-    REQUIRE (invocation.status ());
+    REQUIRE ((invocation.status ()).has_value ());
   }
   CHECK (nesting.called == 2);
   CHECK (nesting.destroyed == 2);
@@ -390,7 +393,7 @@ TEST_CASE (
   {
     ExecutionInvocation invocation;
     CHECK (call (1) == 1);
-    REQUIRE (invocation.status ());
+    REQUIRE ((invocation.status ()).has_value ());
   }
   CHECK (nesting.destroyed == 3);
   CHECK_FALSE (nesting.failed);
@@ -400,20 +403,20 @@ TEST_CASE (
 TEST_CASE (
   "raw BBV variadic block RBLK and long double entries recover their actual native result banks") {
   auto boundary = Boundary::create ();
-  REQUIRE (boundary);
+  REQUIRE ((boundary).has_value ());
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   for (auto kind : {test::CallExample::Block, test::CallExample::ReturnBlock,
                     test::CallExample::Variadic, test::CallExample::VariadicBlock}) {
     auto source = test::call_example (kind);
     bool fail = true;
-    auto r = runtime (*source, "calls", "sum", 0, *boundary,
+    auto r = runtime (*source, "calls", "sum", 0, (boundary).value (),
                       {.observe = [&] (auto &, auto &) -> Result<void> {
                         if (fail) return Error{ErrorCode::InvalidArgument, "raw ABI failure"};
                         return {};
                       }});
     source.reset ();
-    auto entry = gate (*boundary, r->entry_address ());
+    auto entry = gate ((boundary).value (), r->entry_address ());
     std::array<std::int64_t, 2> pair{20, 22};
     execution::detail::NativeCalls calls ({});
     auto &signature = r->program ().preparation ().function ().signature ();
@@ -435,12 +438,13 @@ TEST_CASE (
       // MIR BLK classifications/RBLK are explicit ABI contracts, not arbitrary
       // C++ struct signatures. The typed adapter supplies their exact layout.
       auto values = calls.call (entry, signature, arguments);
-      INFO ((values ? "" : values.error ().message));
-      REQUIRE (values);
-      return kind == test::CallExample::ReturnBlock ? pair[0] : *(*values)[0].as_i64 ();
+      INFO (((values).has_value () ? "" : values.error ().message));
+      REQUIRE ((values).has_value ());
+      return kind == test::CallExample::ReturnBlock ? pair[0]
+                                                    : (((values).value ())[0].as_i64 ()).value ();
     };
     auto failed = calls.call (entry, signature, arguments);
-    REQUIRE_FALSE (failed);
+    REQUIRE_FALSE ((failed).has_value ());
     CHECK (failed.error ().message.find ("raw ABI failure") != std::string::npos);
     CHECK (pair[0] == 20);
     CHECK (state ().depth == 0);
@@ -448,36 +452,39 @@ TEST_CASE (
     {
       ExecutionInvocation invocation;
       CHECK (call () == 42);
-      REQUIRE (invocation.status ());
+      REQUIRE ((invocation.status ()).has_value ());
       CHECK (call () == 42);
-      REQUIRE (invocation.status ());
+      REQUIRE ((invocation.status ()).has_value ());
     }
     CHECK (state ().depth == 0);
   }
-  Context source;
-  auto module = source.create_module ("m");
-  REQUIRE (module);
+  Program source;
+  auto module = mirnext::ir::detail::access (source).create_module ("m");
+  REQUIRE ((module).has_value ());
   const Type ld (Type::Kind::LongDouble);
-  auto function = (*module)->create_function ("f", {{ld}, {ld}});
-  REQUIRE (function);
-  auto block = (*function)->create_block ();
-  REQUIRE (block);
+  auto function
+    = mirnext::ir::detail::access (((module)).value ()).create_function ("f", {{ld}, {ld}});
+  REQUIRE ((function).has_value ());
+  auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+  REQUIRE ((block).has_value ());
   // Pass the value through the actual native argument/result banks. This
   // isolated runtime fixture has no loaded data image for literal symbols.
-  IRBuilder b (**block);
-  REQUIRE (b.ret (Operand (*(*function)->arguments ()[0])));
+  InstructionBuilder b ((block).value ());
+  REQUIRE ((b.ret (Operand (
+              *mirnext::ir::detail::ReferenceAccess::pointers (function.value ().arguments ())[0])))
+             .has_value ());
   bool fail = true;
-  auto r
-    = runtime (source, "m", "f", 0, *boundary, {.observe = [&] (auto &, auto &) -> Result<void> {
-                 if (fail) return Error{ErrorCode::InvalidArgument, "raw long double failure"};
-                 return {};
-               }});
+  auto r = runtime (source, "m", "f", 0, (boundary).value (),
+                    {.observe = [&] (auto &, auto &) -> Result<void> {
+                      if (fail) return Error{ErrorCode::InvalidArgument, "raw long double failure"};
+                      return {};
+                    }});
   auto call = reinterpret_cast<long double (*) (long double)> (
-    gate (*boundary, r->entry_address (), x87_results ()));
+    gate ((boundary).value (), r->entry_address (), x87_results ()));
   for (unsigned n = 0; n < 12; ++n) {
     ExecutionInvocation invocation;
     CHECK (call (42.0L) == 0);
-    REQUIRE_FALSE (invocation.status ());
+    REQUIRE_FALSE ((invocation.status ()).has_value ());
     CHECK (state ().depth == 0);
   }
   fail = false;
@@ -485,9 +492,9 @@ TEST_CASE (
     ExecutionInvocation invocation;
     auto value = call (42.0L);
     auto status = invocation.status ();
-    INFO ((status ? "" : status.error ().message));
+    INFO (((status).has_value () ? "" : status.error ().message));
     CHECK (value == 42);
-    REQUIRE (status);
+    REQUIRE ((status).has_value ());
     CHECK (state ().depth == 0);
   }
 }

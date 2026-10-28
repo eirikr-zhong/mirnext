@@ -1,47 +1,54 @@
 /* Licensed under the MIT License. Native fixtures from the original MIR drivers. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #pragma once
 #include "mirnext/Serialization/Format.hpp"
 namespace mirnext::test {
 // Original loop builder expressed with owning C++ blocks, labels and DSL.
-inline Result<std::unique_ptr<ir::Context>> classic_loop () {
+inline Result<ir::Program> classic_loop () {
   using namespace ir;
-  auto context = std::make_unique<Context> ();
-  auto module = context->create_module ("m");
-  if (!module) return module.error ();
-  auto function = (*module)->create_function ("loop", {{Type::i64 ()}, {Type::i64 ()}});
-  if (!function) return function.error ();
-  auto entry = (*function)->create_block ("entry"), loop = (*function)->create_block ("loop"),
-       done = (*function)->create_block ("done");
-  if (!entry) return entry.error ();
-  if (!loop) return loop.error ();
-  if (!done) return done.error ();
-  auto again = (*function)->create_label (**loop, "again"),
-       finish = (*function)->create_label (**done, "finish");
-  if (!again) return again.error ();
-  if (!finish) return finish.error ();
-  auto count = (*function)->create_register (Type::i64 (), "count");
-  if (!count) return count.error ();
-  auto limit = (*function)->arguments ()[0];
-  IRBuilder body (**entry);
-  auto assigned = body.assign (**count, 0);
-  if (!assigned) return assigned.error ();
-  auto branch = body.branch (Comparison::GreaterEqual, body.expression (**count),
-                             body.expression (*limit), **finish);
-  if (!branch) return branch.error ();
-  auto point = body.set_insert_point (**loop);
-  if (!point) return point.error ();
-  assigned = body.assign (**count, body.expression (**count) + body.literal (1));
-  if (!assigned) return assigned.error ();
-  branch
-    = body.branch (Comparison::Less, body.expression (**count), body.expression (*limit), **again);
-  if (!branch) return branch.error ();
-  point = body.set_insert_point (**done);
-  if (!point) return point.error ();
-  auto returned = body.ret (Operand (**count));
-  if (!returned) return returned.error ();
+  auto context = std::make_unique<Program> ();
+  auto module = mirnext::ir::detail::access (*(context)).create_module ("m");
+  if (!(module).has_value ()) return module.error ();
+  auto function = mirnext::ir::detail::access (((module)).value ())
+                    .create_function ("loop", {{Type::i64 ()}, {Type::i64 ()}});
+  if (!(function).has_value ()) return function.error ();
+  auto entry = mirnext::ir::detail::access (((function)).value ()).create_block ("entry"),
+       loop = mirnext::ir::detail::access (((function)).value ()).create_block ("loop"),
+       done = mirnext::ir::detail::access (((function)).value ()).create_block ("done");
+  if (!(entry).has_value ()) return entry.error ();
+  if (!(loop).has_value ()) return loop.error ();
+  if (!(done).has_value ()) return done.error ();
+  auto again
+    = mirnext::ir::detail::access (((function)).value ()).create_label ((loop).value (), "again"),
+    finish
+    = mirnext::ir::detail::access (((function)).value ()).create_label ((done).value (), "finish");
+  if (!(again).has_value ()) return again.error ();
+  if (!(finish).has_value ()) return finish.error ();
+  auto count
+    = mirnext::ir::detail::access (((function)).value ()).create_register (Type::i64 (), "count");
+  if (!(count).has_value ()) return count.error ();
+  auto limit = mirnext::ir::detail::ReferenceAccess::pointers (function.value ().arguments ())[0];
+  InstructionBuilder body ((entry).value ());
+  auto assigned = body.assign ((count).value (), 0);
+  if (!(assigned).has_value ()) return assigned.error ();
+  auto branch = body.branch (Comparison::GreaterEqual, body.expression ((count).value ()),
+                             body.expression (*limit), (finish).value ());
+  if (!(branch).has_value ()) return branch.error ();
+  auto point = body.set_insert_point ((loop).value ());
+  if (!(point).has_value ()) return point.error ();
+  assigned = body.assign ((count).value (), body.expression ((count).value ()) + body.literal (1));
+  if (!(assigned).has_value ()) return assigned.error ();
+  branch = body.branch (Comparison::Less, body.expression ((count).value ()),
+                        body.expression (*limit), (again).value ());
+  if (!(branch).has_value ()) return branch.error ();
+  point = body.set_insert_point ((done).value ());
+  if (!(point).has_value ()) return point.error ();
+  auto returned = body.ret (Operand ((count).value ()));
+  if (!(returned).has_value ()) return returned.error ();
   auto valid = context->verify ();
-  if (!valid) return valid.error ();
-  return context;
+  if (!(valid).has_value ()) return valid.error ();
+  return std::move (*context);
 }
 inline constexpr std::string_view classic_hi_text = R"mir(
 m_hi:    module

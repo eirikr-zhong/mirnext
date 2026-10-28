@@ -4,24 +4,49 @@
 #include "mirnext/CodeGen/BlockVersionId.hpp"
 namespace mirnext::codegen {
 namespace detail {
+class NodeAccess;
+}
+namespace detail {
 struct BBVLayout;
 struct BBVState;
 }  // namespace detail
 class BBVBlock;
 struct BBVSuccessor {
   enum class Kind { LabelAddress, Branch, SwitchCase, Fallthrough };
+  BBVSuccessor (Kind kind, const BBVBlock &block, OptionalRef<const MachineInstruction> instruction,
+                std::size_t operand, OptionalRef<const MachineLabel> label)
+    : BBVSuccessor (Key{}, std::move (kind), &block, instruction.get (), std::move (operand),
+                    label.get ()) {}
   Kind kind;
-  const BBVBlock *block;
-  const MachineInstruction *instruction;
+  const BBVBlock &block () const { return *block_; }
+  OptionalRef<const MachineInstruction> instruction () const {
+    return ::mirnext::detail::borrow_optional (instruction_);
+  }
   std::size_t operand;
-  const MachineLabel *label;
+  OptionalRef<const MachineLabel> label () const {
+    return ::mirnext::detail::borrow_optional (label_);
+  }
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  BBVSuccessor (Key, Kind kind, const BBVBlock *block, const MachineInstruction *instruction,
+                std::size_t operand, const MachineLabel *label)
+    : kind (kind), operand (operand), block_ (block), instruction_ (instruction), label_ (label) {}
+  const BBVBlock *block_;
+  const MachineInstruction *instruction_;
+  const MachineLabel *label_;
 };
 class BBVBlock {
  public:
   const MachineFunction &function () const { return *function_; }
   std::size_t index () const { return index_; }
-  std::span<const MachineInstruction *const> instructions () const { return instructions_; }
-  std::span<const MachineLabel *const> labels () const { return labels_; }
+  ir::ReferenceRange<const MachineInstruction> instructions () const {
+    return ir::ReferenceRange<const MachineInstruction> (instructions_);
+  }
+  ir::ReferenceRange<const MachineLabel> labels () const {
+    return ir::ReferenceRange<const MachineLabel> (labels_);
+  }
   std::span<const BBVSuccessor> successors () const { return successors_; }
 
  private:
@@ -49,8 +74,8 @@ class BBVPreparation {
   const PreparedMachineFunction &prepared () const { return prepared_; }
   const MachineFunction &function () const { return prepared_.function (); }
   auto blocks () const { return ir::nodes (blocks_); }
-  Result<const BBVBlock *> block_for (const MachineInstruction &) const;
-  Result<const BBVBlock *> block_for (const MachineLabel &) const;
+  Result<const BBVBlock &> block_for (const MachineInstruction &) const;
+  Result<const BBVBlock &> block_for (const MachineLabel &) const;
   Result<void> verify () const;
   std::string dump () const;
 
@@ -62,7 +87,29 @@ class BBVPreparation {
   std::unordered_map<const MachineInstruction *, const BBVBlock *> instructions_;
   std::unordered_map<const MachineLabel *, const BBVBlock *> labels_;
 };
-using BBVPropertyLocation = std::variant<target::PhysicalRegister, const MachineMemoryLocation *>;
+class BBVPropertyLocation {
+  using Storage = std::variant<target::PhysicalRegister, const MachineMemoryLocation *>;
+
+ public:
+  BBVPropertyLocation (target::PhysicalRegister value) : value_ (value) {}
+  BBVPropertyLocation (const MachineMemoryLocation &value) : value_ (&value) {}
+  template <class T>
+    requires (!std::is_pointer_v<T>)
+  OptionalRef<const T> get () const {
+    if constexpr (std::is_same_v<T, MachineMemoryLocation>) {
+      auto value = std::get_if<const T *> (&value_);
+      return value ? ::mirnext::detail::borrow_optional (*value) : OptionalRef<const T>{};
+    } else
+      return ::mirnext::detail::borrow_optional (std::get_if<T> (&value_));
+  }
+  friend bool operator== (const BBVPropertyLocation &, const BBVPropertyLocation &) = default;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  BBVPropertyLocation (Key, const MachineMemoryLocation *value) : value_ (value) {}
+  Storage value_;
+};
 struct BBVProperty {
   BBVPropertyLocation location;
   std::uint32_t value;
@@ -75,7 +122,7 @@ class BBVProperties {
   static Result<BBVProperties> create (const MachineFunction &, std::span<const BBVProperty> = {});
   const MachineFunction &function () const { return *function_; }
   std::span<const BBVProperty> entries () const { return entries_; }
-  const BBVProperty *find (BBVPropertyLocation) const;
+  OptionalRef<const BBVProperty> find (BBVPropertyLocation) const;
   Result<void> verify () const;
 
  private:
@@ -86,17 +133,43 @@ class BBVProperties {
 };
 class BBVVersion;
 struct BBVEmission {
-  const MachineInstruction *instruction;
-  // PRBEQ/PRBNE become JMP in the emission plan. The authoritative machine
-  // body and its stable identities are never rewritten during specialization.
+  BBVEmission (const MachineInstruction &instruction, MachineOpcode opcode)
+    : BBVEmission (Key{}, &instruction, std::move (opcode)) {}
+  const MachineInstruction &instruction () const { return *instruction_; }
   MachineOpcode opcode;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  BBVEmission (Key, const MachineInstruction *instruction, MachineOpcode opcode)
+    : opcode (std::move (opcode)), instruction_ (instruction) {}
+  const MachineInstruction *instruction_;
 };
 struct BBVVersionEdge {
+  BBVVersionEdge (BBVSuccessor::Kind kind, OptionalRef<const MachineInstruction> instruction,
+                  std::size_t operand, const BBVVersion &version, bool newly_created)
+    : BBVVersionEdge (Key{}, std::move (kind), instruction.get (), std::move (operand), &version,
+                      std::move (newly_created)) {}
   BBVSuccessor::Kind kind;
-  const MachineInstruction *instruction;
+  OptionalRef<const MachineInstruction> instruction () const {
+    return ::mirnext::detail::borrow_optional (instruction_);
+  }
   std::size_t operand;
-  const BBVVersion *version;
+  const BBVVersion &version () const { return *version_; }
   bool newly_created;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  BBVVersionEdge (Key, BBVSuccessor::Kind kind, const MachineInstruction *instruction,
+                  std::size_t operand, const BBVVersion *version, bool newly_created)
+    : kind (kind),
+      operand (operand),
+      newly_created (newly_created),
+      instruction_ (instruction),
+      version_ (version) {}
+  const MachineInstruction *instruction_;
+  const BBVVersion *version_;
 };
 class BBVSpecialization {
  public:
@@ -117,7 +190,9 @@ class BBVVersion {
   const BBVBlock &block () const { return *block_; }
   const BBVProperties &incoming () const { return incoming_; }
   bool call_entry () const { return call_entry_; }
-  const BBVSpecialization *specialization () const { return specialized_.get (); }
+  OptionalRef<const BBVSpecialization> specialization () const {
+    return ::mirnext::detail::borrow_optional (specialized_.get ());
+  }
 
  private:
   friend struct detail::BBVState;
@@ -136,8 +211,17 @@ class BBVVersion {
   std::unique_ptr<BBVSpecialization> specialized_;
 };
 struct BBVVersionRequest {
-  const BBVVersion *version;
+  BBVVersionRequest (const BBVVersion &version, bool created)
+    : BBVVersionRequest (Key{}, &version, std::move (created)) {}
+  const BBVVersion &version () const { return *version_; }
   bool created;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  BBVVersionRequest (Key, const BBVVersion *version, bool created)
+    : created (created), version_ (version) {}
+  const BBVVersion *version_;
 };
 // Owns stable versions and specialization plans, not executable memory. The
 // current MIR policy reuses the first version of each block, ignoring later
@@ -153,7 +237,7 @@ class BBVProgram {
   const BBVPreparation &preparation () const;
   Result<BBVVersionRequest> request_version (const BBVBlock &, const BBVProperties &,
                                              bool call_entry = false);
-  Result<const BBVSpecialization *> specialize (const BBVVersion &);
+  Result<const BBVSpecialization &> specialize (const BBVVersion &);
   Result<void> verify () const;
   std::string dump () const;
 

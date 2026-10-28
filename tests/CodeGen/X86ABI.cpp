@@ -1,4 +1,7 @@
 /* Licensed under the MIT License. Pure ABI plans and native owning lowering. */
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/Target/X86ABI.hpp"
@@ -18,9 +21,9 @@ using R = X86Register;
 using K = Type::Kind;
 X86ArgumentLayout layout (ABI abi, std::initializer_list<Type> types) {
   auto result = layout_x86_arguments (abi, std::span (types.begin (), types.size ()));
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::move ((result).value ());
 }
 void location (const X86ArgumentLocation &loc, std::initializer_list<R> regs,
                std::size_t offset = 0) {
@@ -29,24 +32,24 @@ void location (const X86ArgumentLocation &loc, std::initializer_list<R> regs,
   for (auto r : regs) CHECK (loc.registers[n++] == r);
   if (!regs.size ()) CHECK (loc.stack_offset == offset);
 }
-bool x86 () { return TargetMachine::native ()->architecture () == Architecture::X86_64; }
+bool x86 () { return TargetMachine::native ().value ().architecture () == Architecture::X86_64; }
 std::unique_ptr<MachineFunction> machine (std::string_view text, unsigned level) {
   auto c = serialization::parse_text (text);
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
   transforms::OptimizationOptions options;
   options.level = static_cast<transforms::OptimizationLevel> (level);
-  auto p = transforms::optimize (**c, options);
-  INFO ((p ? "" : p.error ().message));
-  REQUIRE (p);
+  auto p = transforms::optimize ((c).value (), options);
+  INFO (((p).has_value () ? "" : p.error ().message));
+  REQUIRE ((p).has_value ());
   auto t = TargetMachine::native ();
-  REQUIRE (t);
-  auto f = p->find_function ("m", "f");
+  REQUIRE ((t).has_value ());
+  auto f = p.value ().find_function ("m", "f").get ();
   REQUIRE (f);
-  auto result = prepare_machine_ir (*f, *t);
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  return std::move (*result);
+  auto result = prepare_machine_ir (*f, (t).value ());
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  return std::make_unique<MachineFunction> (std::move ((result).value ()));
 }
 }  // namespace
 TEST_CASE ("x86 ABI scalar register banks exhaust independently on SysV and share Windows slots") {
@@ -84,11 +87,11 @@ TEST_CASE ("x86 ABI scalar register banks exhaust independently on SysV and shar
   CHECK (extended.stack_bytes == 32);
   std::vector<Type> many (20, d);
   auto all = layout_x86_arguments (ABI::X86SysV, many);
-  REQUIRE (all);
-  CHECK (all->variadic_xmm_count == 8);
-  CHECK (all->stack_bytes == 96);
-  location (all->arguments[8], {}, 0);
-  location (all->arguments[19], {}, 88);
+  REQUIRE ((all).has_value ());
+  CHECK (all.value ().variadic_xmm_count == 8);
+  CHECK (all.value ().stack_bytes == 96);
+  location (all.value ().arguments[8], {}, 0);
+  location (all.value ().arguments[19], {}, 88);
   CHECK (layout (ABI::X86Windows, {}).stack_bytes == 32);
   CHECK (layout (ABI::X86SysV, {}).stack_bytes == 0);
 }
@@ -138,16 +141,16 @@ TEST_CASE ("x86 ABI failed aggregate register assignment consumes neither regist
   types.push_back (Type::block (16, Type::BlockClass::Class2));
   types.push_back (d);
   auto floats = layout_x86_arguments (ABI::X86SysV, types);
-  REQUIRE (floats);
-  location (floats->arguments[7], {}, 0);
-  location (floats->arguments[8], {R::XMM7});
+  REQUIRE ((floats).has_value ());
+  location (floats.value ().arguments[7], {}, 0);
+  location (floats.value ().arguments[8], {R::XMM7});
   types.assign (6, i);
   types.push_back (Type::block (16, Type::BlockClass::Class3));
   types.push_back (d);
   auto mixed = layout_x86_arguments (ABI::X86SysV, types);
-  REQUIRE (mixed);
-  location (mixed->arguments[6], {}, 0);
-  location (mixed->arguments[7], {R::XMM0});
+  REQUIRE ((mixed).has_value ());
+  location (mixed.value ().arguments[6], {}, 0);
+  location (mixed.value ().arguments[7], {R::XMM0});
   auto win = layout (ABI::X86Windows, {i, d, i, d, Type::block (8), Type::block (24)});
   location (win.arguments[4], {}, 32);
   CHECK (win.arguments[4].by_value);
@@ -177,9 +180,9 @@ TEST_CASE ("x86 ABI spills preserve frame direction variadic save areas and relo
           for (std::size_t offset : {0u, 8u, 16u, 1024u, 32768u}) {
             auto type = Type (kind);
             auto disp = x86_spill_displacement (abi, fp, variadic, type, offset);
-            REQUIRE (disp);
+            REQUIRE ((disp).has_value ());
             CHECK (
-              *disp
+              (disp).value ()
               == (fp ? -static_cast<std::int64_t> (offset + (kind == K::LongDouble ? 16 : 8)
                                                    + (variadic && abi == ABI::X86SysV ? 176 : 0))
                      : static_cast<std::int64_t> (offset)));
@@ -199,34 +202,37 @@ TEST_CASE ("x86 ABI spills preserve frame direction variadic save areas and relo
           }
         auto edge = x86_spill_displacement (abi, fp, variadic, Type::i64 (),
                                             std::size_t (INT32_MAX) / 8 * 8);
-        REQUIRE (edge);
-        CHECK_FALSE (x86_spill_displacement (abi, fp, variadic, Type::i64 (), SIZE_MAX));
-        CHECK_FALSE (x86_spill_displacement (abi, fp, variadic, Type::i64 (),
-                                             std::size_t (INT64_MAX) / 8 * 8));
-        CHECK_FALSE (x86_spill_displacement (abi, fp, variadic, Type::i64 (), 1));
-        CHECK_FALSE (x86_spill_displacement (abi, fp, variadic, Type::block (8), 0));
+        REQUIRE ((edge).has_value ());
+        CHECK_FALSE (
+          (x86_spill_displacement (abi, fp, variadic, Type::i64 (), SIZE_MAX)).has_value ());
+        CHECK_FALSE ((x86_spill_displacement (abi, fp, variadic, Type::i64 (),
+                                              std::size_t (INT64_MAX) / 8 * 8))
+                       .has_value ());
+        CHECK_FALSE ((x86_spill_displacement (abi, fp, variadic, Type::i64 (), 1)).has_value ());
+        CHECK_FALSE ((x86_spill_displacement (abi, fp, variadic, Type::block (8), 0)).has_value ());
         CHECK_FALSE (x86_reload_register (abi, Type (K::Undef), true));
       }
-  CHECK_FALSE (x86_spill_displacement (ABI::AArch64Linux, true, false, Type::i64 (), 0));
+  CHECK_FALSE (
+    (x86_spill_displacement (ABI::AArch64Linux, true, false, Type::i64 (), 0)).has_value ());
   CHECK_FALSE (x86_reload_register (ABI::AArch64MacOS, Type::i64 (), true));
 }
 TEST_CASE ("x86 ABI result banks and unsupported layouts return diagnostics") {
   std::vector<Type> types{Type::i64 (), Type (K::F32), Type (K::LongDouble),
                           Type::i64 (), Type (K::F64), Type (K::LongDouble)};
   auto result = layout_x86_results (ABI::X86SysV, types);
-  REQUIRE (result);
-  CHECK (*result == std::vector<R>{R::AX, R::XMM0, R::ST0, R::DX, R::XMM1, R::ST1});
-  CHECK_FALSE (layout_x86_results (ABI::X86Windows, types));
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == std::vector<R>{R::AX, R::XMM0, R::ST0, R::DX, R::XMM1, R::ST1});
+  CHECK_FALSE ((layout_x86_results (ABI::X86Windows, types)).has_value ());
   for (auto kind : {K::I64, K::F64, K::LongDouble}) {
     types.assign (3, Type (kind));
-    CHECK_FALSE (layout_x86_results (ABI::X86SysV, types));
+    CHECK_FALSE ((layout_x86_results (ABI::X86SysV, types)).has_value ());
   }
   for (auto invalid : {Type::block (8), Type (K::Undef), Type (static_cast<K> (65535))}) {
     types.assign (1, invalid);
-    CHECK_FALSE (layout_x86_results (ABI::X86SysV, types));
+    CHECK_FALSE ((layout_x86_results (ABI::X86SysV, types)).has_value ());
   }
-  CHECK_FALSE (layout_x86_arguments (ABI::AArch64Linux, {}));
-  CHECK_FALSE (layout_x86_results (ABI::AArch64MacOS, {}));
+  CHECK_FALSE ((layout_x86_arguments (ABI::AArch64Linux, {})).has_value ());
+  CHECK_FALSE ((layout_x86_results (ABI::AArch64MacOS, {})).has_value ());
   CHECK_FALSE (x86_integer_argument_register (ABI::X86SysV, 6));
   CHECK_FALSE (x86_floating_argument_register (ABI::X86Windows, 4));
   CHECK_FALSE (x86_integer_argument_register (ABI::AArch64Linux, 0));
@@ -235,16 +241,16 @@ TEST_CASE ("x86 ABI result banks and unsupported layouts return diagnostics") {
        {Type::block (0), Type::block (SIZE_MAX), Type::block (17, Type::BlockClass::Class1),
         Type::block (8, Type::BlockClass::Class3), Type (K::Undef)}) {
     types.assign (1, bad);
-    CHECK_FALSE (layout_x86_arguments (ABI::X86SysV, types));
+    CHECK_FALSE ((layout_x86_arguments (ABI::X86SysV, types)).has_value ());
   }
   types.assign (2, Type::block (std::size_t (INT64_MAX) - 63));
-  CHECK_FALSE (layout_x86_arguments (ABI::X86SysV, types));
+  CHECK_FALSE ((layout_x86_arguments (ABI::X86SysV, types)).has_value ());
 }
 TEST_CASE (
   "native x86 owning ABI lowering and legalization cover public opcodes and boundary fixtures") {
   if (!x86 ()) return;
   auto target = TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   for (auto &d : instruction_descriptors ())
     for (unsigned level = 0; level < 4; ++level) {
       CAPTURE (d.name);
@@ -253,36 +259,36 @@ TEST_CASE (
       transforms::OptimizationOptions options;
       options.level = static_cast<transforms::OptimizationLevel> (level);
       auto p = transforms::optimize (*source, options);
-      REQUIRE (p);
-      for (auto &module : p->context ().modules ())
+      REQUIRE ((p).has_value ());
+      for (auto &module : p.value ().program ().modules ())
         for (auto &f : module.functions ()) {
-          auto m = prepare_machine_ir (f, *target);
-          REQUIRE (m);
-          auto r = machinize (**m);
-          INFO ((r ? "" : r.error ().message));
-          REQUIRE (r);
-          REQUIRE ((*m)->verify ());
-          REQUIRE (legalize_operands (**m));
-          REQUIRE ((*m)->verify ());
-          CHECK ((*m)->state ().machinized);
+          auto m = prepare_machine_ir (f, (target).value ());
+          REQUIRE ((m).has_value ());
+          auto r = machinize ((m).value ());
+          INFO (((r).has_value () ? "" : r.error ().message));
+          REQUIRE ((r).has_value ());
+          REQUIRE ((m.value ().verify ()).has_value ());
+          REQUIRE ((legalize_operands ((m).value ())).has_value ());
+          REQUIRE ((m.value ().verify ()).has_value ());
+          CHECK (m.value ().state ().machinized);
         }
     }
-  for (auto &text : test::x86_lowering_fixtures (target->abi () == ABI::X86Windows))
+  for (auto &text : test::x86_lowering_fixtures (target.value ().abi () == ABI::X86Windows))
     for (unsigned level = 0; level < 4; ++level) {
       CAPTURE (text);
       CAPTURE (level);
       auto m = machine (text, level);
       auto r = machinize (*m);
-      INFO ((r ? "" : r.error ().message));
-      REQUIRE (r);
+      INFO (((r).has_value () ? "" : r.error ().message));
+      REQUIRE ((r).has_value ());
       auto lowered = m->dump ();
-      REQUIRE (m->verify ());
+      REQUIRE ((m->verify ()).has_value ());
       auto revision = m->revision ();
-      CHECK_FALSE (machinize (*m));
+      CHECK_FALSE ((machinize (*m)).has_value ());
       CHECK (m->revision () == revision);
       CHECK (m->dump () == lowered);
-      REQUIRE (legalize_operands (*m));
-      REQUIRE (m->verify ());
+      REQUIRE ((legalize_operands (*m)).has_value ());
+      REQUIRE ((m->verify ()).has_value ());
     }
 }
 TEST_CASE ("x86 ABI regression fixtures prepare independently owned IR on every host") {
@@ -293,24 +299,28 @@ TEST_CASE ("x86 ABI regression fixtures prepare independently owned IR on every 
         CAPTURE (level);
         CAPTURE (text);
         auto m = machine (text, level);
-        REQUIRE (m->verify ());
+        REQUIRE ((m->verify ()).has_value ());
       }
 }
 TEST_CASE ("native x86 invalid ABI inputs fail before modifying machine nodes") {
   if (!x86 ()) return;
   auto target = TargetMachine::native ();
-  REQUIRE (target);
-  MachineFunction f ("bad", "results", {{Type::i64 (), Type::i64 (), Type::i64 ()}, {}}, *target);
-  auto &b = f.create_block ();
+  REQUIRE ((target).has_value ());
+  MachineFunction f ("bad", "results", {{Type::i64 (), Type::i64 (), Type::i64 ()}, {}},
+                     (target).value ());
+  auto &b = mirnext::codegen::detail::access (f).create_block ();
   MachineRewriter rw (f);
-  auto r = f.create_register (Type::i64 ());
-  REQUIRE (r);
-  REQUIRE (
-    rw.append (b, Opcode::Ret, {MachineOperand (**r), MachineOperand (**r), MachineOperand (**r)}));
+  auto r = mirnext::codegen::detail::access (f).create_register (Type::i64 ());
+  REQUIRE ((r).has_value ());
+  REQUIRE ((rw.append (b, Opcode::Ret,
+                       {mirnext::codegen::detail::NodeAccess::make_MachineOperand ((r).value ()),
+                        mirnext::codegen::detail::NodeAccess::make_MachineOperand ((r).value ()),
+                        mirnext::codegen::detail::NodeAccess::make_MachineOperand ((r).value ())}))
+             .has_value ());
   auto before = f.dump ();
   auto revision = f.revision ();
   auto lowered = machinize (f);
-  REQUIRE_FALSE (lowered);
+  REQUIRE_FALSE ((lowered).has_value ());
   CHECK (lowered.error ().message.find ("machinize") != std::string::npos);
   CHECK (f.dump () == before);
   CHECK (f.revision () == revision);

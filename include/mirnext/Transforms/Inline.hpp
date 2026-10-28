@@ -8,9 +8,9 @@ class InlinePass final : public FunctionPass {
   InlinePass ();
   ~InlinePass () override;
   std::string_view name () const noexcept override { return "inline"; }
-  Result<void> initialize (ir::Context &) override;
+  Result<void> initialize (ir::Program &) override;
   void finalize () noexcept override;
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 
  private:
   struct Symbols;

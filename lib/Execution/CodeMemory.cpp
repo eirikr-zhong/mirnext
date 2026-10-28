@@ -151,19 +151,19 @@ Result<std::vector<ExecutableCode>> CodeReservation::publish (
   auto &provider = *region_->provider;
   auto mapping = region_->mapping;
   auto writable = provider.make_writable (publication_);
-  if (!writable) {
+  if (!(writable).has_value ()) {
     (void) provider.make_executable (publication_);
     return writable.error ();
   }
   for (std::size_t n = 0; n < buffers.size (); ++n)
     std::memmove (mapping.data + slots_[n].offset, buffers[n].data (), buffers[n].size ());
   auto executable = provider.make_executable (publication_);
-  if (!executable) {
+  if (!(executable).has_value ()) {
     (void) provider.make_executable (publication_);
     return executable.error ();
   }
   auto flushed = provider.flush (publication_);
-  if (!flushed) return flushed.error ();
+  if (!(flushed).has_value ()) return flushed.error ();
   for (auto slot : slots_) code.push_back (ExecutableCode (region_, slot.offset, slot.size));
   region_.reset ();
   slots_.clear ();
@@ -196,16 +196,16 @@ Result<CodeSlotLayout<Slot>> slot_layout (std::span<const std::size_t> sizes, st
 Result<std::shared_ptr<detail::CodeRegion>> allocate_region (
   const std::shared_ptr<CodeMemoryProvider> &provider, std::size_t length, std::size_t page) {
   auto memory = provider->allocate (length);
-  if (!memory) return memory.error ();
-  if (!memory->data || reinterpret_cast<std::uintptr_t> (memory->data) % page
-      || memory->size != length
-      || length > UINTPTR_MAX - reinterpret_cast<std::uintptr_t> (memory->data)) {
-    (void) provider->release (*memory);
+  if (!(memory).has_value ()) return memory.error ();
+  if (!memory.value ().data || reinterpret_cast<std::uintptr_t> (memory.value ().data) % page
+      || memory.value ().size != length
+      || length > UINTPTR_MAX - reinterpret_cast<std::uintptr_t> (memory.value ().data)) {
+    (void) provider->release ((memory).value ());
     return invalid ("invalid mapped region");
   }
   auto region = std::make_shared<detail::CodeRegion> ();
   region->provider = provider;
-  region->mapping = *memory;
+  region->mapping = (memory).value ();
   return region;
 }
 }  // namespace
@@ -214,10 +214,11 @@ Result<CodeReservation> CodeMemory::reserve (std::span<const std::size_t> sizes)
   auto page = provider_->page_size ();
   if (!page || page % 16) return invalid ("invalid page size");
   auto layout = slot_layout<CodeReservation::Slot> (sizes, page);
-  if (!layout) return layout.error ();
-  auto region = allocate_region (provider_, layout->length, page);
-  if (!region) return region.error ();
-  return CodeReservation (*region, std::move (layout->slots), (*region)->mapping);
+  if (!(layout).has_value ()) return layout.error ();
+  auto region = allocate_region (provider_, layout.value ().length, page);
+  if (!(region).has_value ()) return region.error ();
+  return CodeReservation ((region).value (), std::move (layout.value ().slots),
+                          ((region).value ())->mapping);
 }
 Result<CodeArena> CodeArena::create (std::size_t capacity,
                                      std::shared_ptr<CodeMemoryProvider> provider) {
@@ -228,8 +229,8 @@ Result<CodeArena> CodeArena::create (std::size_t capacity,
     return invalid ("empty arena or capacity overflow");
   auto length = (capacity + page - 1) / page * page;
   auto region = allocate_region (provider, length, page);
-  if (!region) return region.error ();
-  return CodeArena (*region, page);
+  if (!(region).has_value ()) return region.error ();
+  return CodeArena ((region).value (), page);
 }
 std::size_t CodeArena::capacity () const { return region_ ? region_->mapping.size : 0; }
 std::size_t CodeArena::remaining () const { return region_ ? capacity () - used_ : 0; }
@@ -239,36 +240,36 @@ std::uintptr_t CodeArena::address () const {
 Result<CodeReservation> CodeArena::reserve (std::span<const std::size_t> sizes) {
   if (!region_) return invalid ("moved-from code arena");
   auto layout = slot_layout<CodeReservation::Slot> (sizes, page_);
-  if (!layout) return layout.error ();
-  if (layout->length > remaining ()) return invalid ("code arena capacity exhausted");
-  for (auto &slot : layout->slots) slot.offset += used_;
-  MappedCodeMemory publication{region_->mapping.data + used_, layout->length};
-  used_ += layout->length;
-  return CodeReservation (region_, std::move (layout->slots), publication);
+  if (!(layout).has_value ()) return layout.error ();
+  if (layout.value ().length > remaining ()) return invalid ("code arena capacity exhausted");
+  for (auto &slot : layout.value ().slots) slot.offset += used_;
+  MappedCodeMemory publication{region_->mapping.data + used_, layout.value ().length};
+  used_ += layout.value ().length;
+  return CodeReservation (region_, std::move (layout.value ().slots), publication);
 }
 Result<ExecutableFunction> CodeMemory::publish (codegen::CompiledFunction artifact,
                                                 const codegen::CodeSymbolResolver &resolver) const {
   auto target = target::TargetMachine::native ();
-  if (!target) return target.error ();
+  if (!(target).has_value ()) return target.error ();
   auto diagnostic = [&] (Error error) {
     error.message = std::string (artifact.module_name ()) + '/' + std::string (artifact.name ())
-                    + " [" + std::string (target->name ()) + "/publish]: " + error.message;
+                    + " [" + std::string (target.value ().name ()) + "/publish]: " + error.message;
     return error;
   };
-  if (artifact.architecture () != target->architecture ())
+  if (artifact.architecture () != target.value ().architecture ())
     return diagnostic (invalid ("cannot publish code for another architecture"));
   auto valid = artifact.verify ();
-  if (!valid) return diagnostic (valid.error ());
+  if (!(valid).has_value ()) return diagnostic (valid.error ());
   std::size_t size = artifact.bytes ().size ();
   auto reservation = reserve ({&size, 1});
-  if (!reservation) return diagnostic (reservation.error ());
-  auto address = reservation->address (0);
-  if (!address) return diagnostic (address.error ());
-  auto bytes = artifact.relocate (*address, resolver);
-  if (!bytes) return diagnostic (bytes.error ());
-  std::span<const std::uint8_t> buffer = *bytes;
-  auto code = reservation->publish ({&buffer, 1});
-  if (!code) return diagnostic (code.error ());
-  return ExecutableFunction (std::move (artifact), std::move ((*code)[0]));
+  if (!(reservation).has_value ()) return diagnostic (reservation.error ());
+  auto address = reservation.value ().address (0);
+  if (!(address).has_value ()) return diagnostic (address.error ());
+  auto bytes = artifact.relocate ((address).value (), resolver);
+  if (!(bytes).has_value ()) return diagnostic (bytes.error ());
+  std::span<const std::uint8_t> buffer = (bytes).value ();
+  auto code = reservation.value ().publish ({&buffer, 1});
+  if (!(code).has_value ()) return diagnostic (code.error ());
+  return ExecutableFunction (std::move (artifact), std::move (((code).value ())[0]));
 }
 }  // namespace mirnext::execution

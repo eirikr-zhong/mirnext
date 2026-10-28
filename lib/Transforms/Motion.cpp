@@ -1,4 +1,7 @@
 /* Licensed under the MIT License. Derived from MIR LICM and pressure relief. */
+#include "mirnext/Analysis/Access.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #include "mirnext/Transforms/Motion.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
 #include "mirnext/IR/SSA.hpp"
@@ -19,8 +22,8 @@ Result<void> validate (Function &f, FunctionAnalysisManager &a, std::string_view
   };
   if (&a.function () != &f) return invalid ("analysis owner mismatch");
   auto checked = f.verify ();
-  if (!checked) return checked;
-  auto form = f.ssa_form ();
+  if (!(checked).has_value ()) return checked;
+  auto form = f.ssa_form ().get ();
   if (!form || !form->renamed () || form->conventional ())
     return invalid ("requires renamed nonconventional SSA");
   return {};
@@ -28,8 +31,8 @@ Result<void> validate (Function &f, FunctionAnalysisManager &a, std::string_view
 struct LoopMotion {
   Function &function;
   SSAForm &form;
-  SSARewriter rewriter;
-  IRRewriter layout;
+  SSAUpdater rewriter;
+  InstructionRewriter layout;
   FunctionGraph graph;
   LoopTree tree;
   std::vector<std::size_t> preheaders, parents;
@@ -37,7 +40,7 @@ struct LoopMotion {
   std::size_t changes = 0;
   LoopMotion (Function &f, FunctionGraph g, LoopTree t)
     : function (f),
-      form (*const_cast<SSAForm *> (f.ssa_form ())),
+      form (*const_cast<SSAForm *> (f.ssa_form ().get ())),
       rewriter (form),
       layout (f),
       graph (std::move (g)),
@@ -46,9 +49,11 @@ struct LoopMotion {
     for (std::size_t b = 0; b < graph.blocks.size (); ++b) parents.push_back (tree.nodes[b].parent);
   }
   bool logical_empty (std::size_t b) {
-    auto block = graph.blocks[b].ir;
+    auto block = analysis::detail::NodeAccess::ir (graph.blocks[b]);
     return !block ? graph.blocks[b].kind != FunctionGraph::Kind::Prologue
-                  : block->size () == 0 && block->labels ().empty () && form.phis (*block).empty ();
+                  : block->size () == 0
+                      && ir::detail::ReferenceAccess::pointers (block->labels ()).empty ()
+                      && ir::detail::ReferenceAccess::pointers (form.phis (*block)).empty ();
   }
   Result<void> preheader (std::size_t loop) {
     bool nested = false;
@@ -57,7 +62,7 @@ struct LoopMotion {
       if (tree.nodes[node].block == SIZE_MAX) {
         nested = true;
         auto checked = preheader (node);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
       }
     if (nested || loop == tree.root) return {};
     auto header = tree.nodes[tree.nodes[loop].entry].block, edge = SIZE_MAX;
@@ -68,7 +73,8 @@ struct LoopMotion {
       }
     if (edge == SIZE_MAX) return {};
     auto src = graph.edges[edge].source;
-    auto from = graph.blocks[src].ir, to = graph.blocks[header].ir;
+    auto from = analysis::detail::NodeAccess::ir (graph.blocks[src]),
+         to = analysis::detail::NodeAccess::ir (graph.blocks[header]);
     if (graph.edges[edge].kind != EdgeKind::Fallthrough && from && from->size ()
         && std::prev (from->instructions ().end ())->opcode () != Opcode::Jmp)
       return {};
@@ -78,9 +84,11 @@ struct LoopMotion {
     const Instruction *last
       = from && from->size () ? &*std::prev (from->instructions ().end ()) : nullptr;
     bool phi_tail
-      = from && !form.phis (*from).empty () && form.phis (*from).back ()->before () == nullptr;
+      = from && !ir::detail::ReferenceAccess::pointers (form.phis (*from)).empty ()
+        && ir::detail::ReferenceAccess::pointers (form.phis (*from)).back ()->before ().get ()
+             == nullptr;
     if (!last || phi_tail || last->opcode () == Opcode::Jmp
-        || instruction_descriptor (last->opcode ())->flow == ControlFlow::Next) {
+        || instruction_descriptor (last->opcode ()).get ()->flow == ControlFlow::Next) {
       preheaders[loop] = src;
       return {};
     }
@@ -88,10 +96,10 @@ struct LoopMotion {
       return Error{ErrorCode::InvalidArgument, "licm: missing canonical fallthrough blocks"};
     auto added = rewriter.split_fallthrough (*const_cast<BasicBlock *> (from),
                                              *const_cast<BasicBlock *> (to));
-    if (!added) return added.error ();
+    if (!(added).has_value ()) return added.error ();
     auto b = graph.blocks.size (), parent = tree.nodes[loop].parent;
-    graph.indices.emplace (*added, b);
-    graph.blocks.push_back ({FunctionGraph::Kind::Body, *added});
+    analysis::detail::NodeAccess::indices (graph).emplace (&(added).value (), b);
+    graph.blocks.push_back ({FunctionGraph::Kind::Body, (added).value ()});
     graph.incoming.emplace_back ();
     graph.outgoing.emplace_back ();
     graph.preorder.push_back (0);
@@ -125,13 +133,16 @@ struct LoopMotion {
   }
   std::size_t parent_of (std::size_t block) const { return parents[block]; }
   std::size_t def_block (const SSAValue &value) const {
-    if (value.instruction ()) return graph.indices.at (&value.instruction ()->block ());
-    if (value.phi ()) return graph.indices.at (&value.phi ()->block ());
+    if (value.instruction ().get ())
+      return analysis::detail::NodeAccess::indices (graph).at (
+        &value.instruction ().get ()->block ());
+    if (value.phi ().get ())
+      return analysis::detail::NodeAccess::indices (graph).at (&value.phi ().get ()->block ());
     return FunctionGraph::entry;
   }
   bool eligible (std::size_t loop, const Instruction &i, bool use_invariants) {
     auto op = i.opcode ();
-    auto descriptor = instruction_descriptor (op);
+    auto descriptor = instruction_descriptor (op).get ();
     if (descriptor->flow != ControlFlow::Next || descriptor->count == OperandCount::Call
         || op == Opcode::Alloca || op == Opcode::BStart || op == Opcode::BEnd
         || op == Opcode::VaStart || op == Opcode::VaArg || op == Opcode::VaBlockArg
@@ -140,13 +151,16 @@ struct LoopMotion {
         || op == Opcode::UMod || op == Opcode::UMods)
       return false;
     for (auto &operand : i.operands ())
-      if (operand.get<Memory> ()
-          || (operand.get<const Register *> ()
-              && !(*operand.get<const Register *> ())->hardware_binding ().empty ()))
+      if (ir::detail::operand_access (operand).get<Memory> ()
+          || (ir::detail::operand_access (operand).get<const Register *> ()
+              && !(*ir::detail::operand_access (operand).get<const Register *> ())
+                    ->hardware_binding ()
+                    .empty ()))
         return false;
-    for (auto use : form.inputs (i)) {
+    for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (i))) {
       auto &value = use->value ();
-      if (use_invariants && value.instruction () && invariant.contains (value.instruction ()))
+      if (use_invariants && value.instruction ().get ()
+          && invariant.contains (value.instruction ().get ()))
         continue;
       auto parent = parent_of (def_block (value));
       bool outside = false;
@@ -161,10 +175,11 @@ struct LoopMotion {
     return true;
   }
   bool noninvariant_use (const Instruction &i) const {
-    for (auto value : form.definitions (i))
-      for (auto use : value->uses ()) {
+    for (auto value : ir::detail::ReferenceAccess::pointers (form.definitions (i)))
+      for (auto use : ir::detail::ReferenceAccess::pointers (value->uses ())) {
         auto site = std::get_if<SSAInstructionUse> (&use->site ());
-        if (!site || !invariant.contains (site->instruction)) return true;
+        if (!site || !invariant.contains (ir::detail::NodeAccess::instruction (*(site))))
+          return true;
       }
     return false;
   }
@@ -174,8 +189,8 @@ struct LoopMotion {
       auto current = pending.back ();
       pending.pop_back ();
       if (!marked.insert (current).second || !invariant.contains (current)) continue;
-      for (auto use : form.inputs (*current))
-        if (auto definition = use->value ().instruction ()) pending.push_back (definition);
+      for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (*current)))
+        if (auto definition = use->value ().instruction ().get ()) pending.push_back (definition);
     }
   }
   Result<void> process (std::size_t loop) {
@@ -184,26 +199,28 @@ struct LoopMotion {
       if (tree.nodes[node].block == SIZE_MAX) {
         nested = true;
         auto checked = process (node);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
       }
     if (nested || loop == tree.root || preheaders[loop] == SIZE_MAX) return {};
     invariant.clear ();
     marked.clear ();
     std::vector<const Instruction *> order;
     for (auto node : tree.nodes[loop].children)
-      if (auto b = tree.nodes[node].block; b != SIZE_MAX && graph.blocks[b].ir)
-        for (auto &i : graph.blocks[b].ir->instructions ())
+      if (auto b = tree.nodes[node].block;
+          b != SIZE_MAX && analysis::detail::NodeAccess::ir (graph.blocks[b]))
+        for (auto &i : analysis::detail::NodeAccess::ir (graph.blocks[b])->instructions ())
           if (eligible (loop, i, false)) {
             invariant.insert (&i);
             order.push_back (&i);
           }
     for (std::size_t p = 0; p < order.size (); ++p)
-      for (auto value : form.definitions (*order[p]))
-        for (auto it = value->uses ().begin (); it != value->uses ().end (); ++it) {
+      for (auto value : ir::detail::ReferenceAccess::pointers (form.definitions (*order[p])))
+        for (auto it = ir::detail::ReferenceAccess::pointers (value->uses ()).begin ();
+             it != ir::detail::ReferenceAccess::pointers (value->uses ()).end (); ++it) {
           auto site = std::get_if<SSAInstructionUse> (&(*it)->site ());
-          if (site && eligible (loop, *site->instruction, true)
-              && invariant.insert (site->instruction).second)
-            order.push_back (site->instruction);
+          if (site && eligible (loop, *ir::detail::NodeAccess::instruction (*(site)), true)
+              && invariant.insert (ir::detail::NodeAccess::instruction (*(site))).second)
+            order.push_back (ir::detail::NodeAccess::instruction (*(site)));
         }
     for (auto it = order.rbegin (); it != order.rend (); ++it) {
       auto &i = **it;
@@ -212,9 +229,9 @@ struct LoopMotion {
         mark (i);
         continue;
       }
-      bool profitable = !form.inputs (i).empty ();
-      for (auto use : form.inputs (i))
-        if (auto def = use->value ().instruction ();
+      bool profitable = !ir::detail::ReferenceAccess::pointers (form.inputs (i)).empty ();
+      for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (i)))
+        if (auto def = use->value ().instruction ().get ();
             def && invariant.contains (def) && !marked.contains (def) && noninvariant_use (*def)) {
           profitable = false;
           break;
@@ -222,17 +239,17 @@ struct LoopMotion {
       if (profitable) mark (i);
     }
     auto target = preheaders[loop];
-    auto block = graph.blocks[target].ir;
+    auto block = analysis::detail::NodeAccess::ir (graph.blocks[target]);
     for (auto i : order)
       if (marked.contains (i)) {
         if (!block)
           return Error{ErrorCode::InvalidArgument,
                        std::string (function.symbol ().name ())
                          + ": licm: invariant has no canonical preheader"};
-        auto before = block->terminator ();
+        auto before = block->terminator ().get ();
         auto checked = rewriter.move_before (*const_cast<Instruction *> (i),
                                              *const_cast<BasicBlock *> (block), before);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
         ++changes;
       }
     return {};
@@ -240,8 +257,9 @@ struct LoopMotion {
   void layout_indices () {
     std::vector<std::size_t> old{0, 1};
     for (std::size_t b = 2; b < graph.blocks.size (); ++b)
-      if (!graph.blocks[b].ir) old.push_back (b);
-    for (auto &block : function.blocks ()) old.push_back (graph.indices.at (&block));
+      if (!analysis::detail::NodeAccess::ir (graph.blocks[b])) old.push_back (b);
+    for (auto &block : function.blocks ())
+      old.push_back (analysis::detail::NodeAccess::indices (graph).at (&block));
     std::vector<std::size_t> indices (old.size ());
     for (std::size_t p = 0; p < old.size (); ++p) indices[old[p]] = p;
     FunctionGraph result;
@@ -252,8 +270,10 @@ struct LoopMotion {
       result.outgoing.push_back (std::move (graph.outgoing[b]));
       result.preorder.push_back (graph.preorder[b]);
       result.rpost.push_back (graph.rpost[b]);
-      if (graph.blocks[b].ir)
-        result.indices.emplace (graph.blocks[b].ir, result.blocks.size () - 1);
+      if (analysis::detail::NodeAccess::ir (graph.blocks[b]))
+        analysis::detail::NodeAccess::indices (result).emplace (analysis::detail::NodeAccess::ir (
+                                                                  graph.blocks[b]),
+                                                                result.blocks.size () - 1);
     }
     result.edges = std::move (graph.edges);
     result.back_edges = std::move (graph.back_edges);
@@ -266,62 +286,77 @@ struct LoopMotion {
   }
 };
 }  // namespace
-Result<PassResult> LICMPass::run (ir::Function &function,
+Result<PassResult> LICMPass::run (ir::MIRBuilder &edit,
                                   analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   auto checked = validate (function, analyses, name ());
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto cfg = analyses.get<analysis::FunctionGraphAnalysis> ();
-  if (!cfg) return cfg.error ();
+  if (!(cfg).has_value ()) return cfg.error ();
   auto loops = analyses.get<analysis::LoopAnalysis> ();
-  if (!loops) return loops.error ();
+  if (!(loops).has_value ()) return loops.error ();
   auto tree = analyses.take_cached<analysis::LoopAnalysis> ();
-  if (!tree) return tree.error ();
+  if (!(tree).has_value ()) return tree.error ();
   auto graph = analyses.take_cached<analysis::FunctionGraphAnalysis> ();
-  if (!graph) return graph.error ();
-  LoopMotion state (function, std::move (**graph), std::move (**tree));
+  if (!(graph).has_value ()) return graph.error ();
+  LoopMotion state (function, std::move (*(graph).value ()), std::move (*(tree).value ()));
   checked = state.preheader (state.tree.root);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   checked = state.process (state.tree.root);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   checked = function.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   state.layout_indices ();
   analysis::enumerate (state.graph);
   checked = analyses.set<analysis::FunctionGraphAnalysis> (std::move (state.graph));
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();
   return PassResult{state.changes, preserved};
 }
-Result<PassResult> PressureReliefPass::run (ir::Function &function,
+Result<PassResult> PressureReliefPass::run (ir::MIRBuilder &edit,
                                             analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   auto checked = validate (function, analyses, name ());
-  if (!checked) return checked.error ();
-  auto form = function.ssa_form ();
-  auto rewriter = SSARewriter::get (function);
-  if (!rewriter) return rewriter.error ();
+  if (!(checked).has_value ()) return checked.error ();
+  auto form = function.ssa_form ().get ();
+  auto rewriter = SSAUpdater::get (function);
+  if (!(rewriter).has_value ()) return rewriter.error ();
   std::size_t changes = 0;
   for (auto &block : function.blocks ())
     for (auto it = block.instructions ().begin (); it != block.instructions ().end ();) {
       auto &i = *it++;
-      if (!move (i.opcode ()) || !i.operands ()[0].get<const Register *> ()
-          || i.operands ()[1].get<const Register *> () || i.operands ()[1].get<Memory> ())
+      if (!move (i.opcode ())
+          || !ir::detail::operand_access (i.operands ()[0]).get<const Register *> ()
+          || ir::detail::operand_access (i.operands ()[1]).get<const Register *> ()
+          || ir::detail::operand_access (i.operands ()[1]).get<Memory> ())
         continue;
-      auto values = form->definitions (i);
-      if (values.size () != 1 || values[0]->uses ().size () != 1) continue;
-      auto &site = values[0]->uses ().front ()->site ();
+      auto values = ir::detail::ReferenceAccess::pointers (form->definitions (i));
+      if (values.size () != 1
+          || ir::detail::ReferenceAccess::pointers (values[0]->uses ()).size () != 1)
+        continue;
+      auto &site = ir::detail::ReferenceAccess::pointers (values[0]->uses ()).front ()->site ();
       const Instruction *user = nullptr;
       if (auto ordinary = std::get_if<SSAInstructionUse> (&site))
-        user = ordinary->instruction;
+        user = ir::detail::NodeAccess::instruction (*(ordinary));
       else if (auto hardware = std::get_if<SSAHardwareUse> (&site))
-        user = hardware->ret;
+        user = ir::detail::NodeAccess::ret (*(hardware));
       if (!user || &user->block () == &block) continue;
-      checked = rewriter->move_before (i, *const_cast<BasicBlock *> (&user->block ()), user);
-      if (!checked) return checked.error ();
+      checked
+        = rewriter.value ().move_before (i, *const_cast<BasicBlock *> (&user->block ()), user);
+      if (!(checked).has_value ()) return checked.error ();
       ++changes;
     }
   checked = function.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();
   return PassResult{changes, preserved};

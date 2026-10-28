@@ -7,6 +7,9 @@
 
 namespace mirnext::codegen {
 namespace detail {
+class NodeAccess;
+}
+namespace detail {
 struct EdgeSpillEngine;
 struct MachineEdgeEditor;
 struct PostAllocationEngine;
@@ -17,6 +20,12 @@ struct X86EncodingEngine;
 class MachineFunction;
 class MachineBasicBlock;
 class MachineRewriter;
+class MachineEditor;
+namespace detail {
+struct MachineEditState;
+class MachineAccess;
+class OperandAccess;
+}  // namespace detail
 enum class Builtin;
 class MachineVirtualRegister {
  public:
@@ -40,7 +49,29 @@ class MachineVirtualRegister {
   bool argument_, memory_backed_;
   std::optional<target::PhysicalRegister> binding_;
 };
-using MachineRegister = std::variant<const MachineVirtualRegister *, target::PhysicalRegister>;
+class MachineRegister {
+  using Storage = std::variant<const MachineVirtualRegister *, target::PhysicalRegister>;
+
+ public:
+  MachineRegister (const MachineVirtualRegister &value) : value_ (&value) {}
+  MachineRegister (target::PhysicalRegister value) : value_ (value) {}
+  template <class T>
+    requires (!std::is_pointer_v<T>)
+  OptionalRef<const T> get () const {
+    if constexpr (std::is_same_v<T, MachineVirtualRegister>) {
+      auto value = std::get_if<const T *> (&value_);
+      return value ? ::mirnext::detail::borrow_optional (*value) : OptionalRef<const T>{};
+    } else
+      return ::mirnext::detail::borrow_optional (std::get_if<T> (&value_));
+  }
+  friend bool operator== (const MachineRegister &, const MachineRegister &) = default;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  MachineRegister (Key, const MachineVirtualRegister *value) : value_ (value) {}
+  Storage value_;
+};
 class MachineStackSlot {
  public:
   MachineStackSlot (const MachineStackSlot &) = delete;
@@ -93,9 +124,19 @@ struct MachineSymbol {
   friend bool operator== (const MachineSymbol &, const MachineSymbol &) = default;
 };
 struct MachineSymbolReference {
-  const MachineSymbol *symbol = nullptr;
+  MachineSymbolReference (const MachineSymbol &symbol, std::int64_t displacement = 0)
+    : MachineSymbolReference (Key{}, &symbol, std::move (displacement)) {}
+  MachineSymbolReference (const MachineSymbol &&, std::int64_t = 0) = delete;
+  const MachineSymbol &symbol () const { return *symbol_; }
   std::int64_t displacement = 0;
-  friend bool operator== (MachineSymbolReference, MachineSymbolReference) = default;
+  friend bool operator== (const MachineSymbolReference &, const MachineSymbolReference &) = default;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  MachineSymbolReference (Key, const MachineSymbol *symbol, std::int64_t displacement)
+    : displacement (displacement), symbol_ (symbol) {}
+  const MachineSymbol *symbol_;
 };
 enum class Builtin {
   CopyBlock,
@@ -147,7 +188,27 @@ struct MachineMemory {
   std::int64_t displacement = 0;
   unsigned scale = 1;
   std::string alias, nonalias;
-  const MachineMemoryLocation *location = nullptr;
+  OptionalRef<const MachineMemoryLocation> location () const {
+    return ::mirnext::detail::borrow_optional (location_);
+  }
+
+ private:
+  friend class detail::NodeAccess;
+  const MachineMemoryLocation *location_ = nullptr;
+
+ public:
+  MachineMemory (ir::Type type, std::optional<MachineRegister> base = {},
+                 std::optional<MachineRegister> index = {}, std::int64_t displacement = 0,
+                 unsigned scale = 1, std::string alias = {}, std::string nonalias = {},
+                 OptionalRef<const MachineMemoryLocation> location = {})
+    : type (type),
+      base (base),
+      index (index),
+      displacement (displacement),
+      scale (scale),
+      alias (std::move (alias)),
+      nonalias (std::move (nonalias)),
+      location_ (location.get ()) {}
   friend bool operator== (const MachineMemory &a, const MachineMemory &b) {
     return a.type == b.type && a.base == b.base && a.index == b.index
            && a.displacement == b.displacement && a.scale == b.scale && a.alias == b.alias
@@ -155,29 +216,45 @@ struct MachineMemory {
   }
 };
 struct StackSlotReference {
-  const MachineStackSlot *slot = nullptr;
+  StackSlotReference (const MachineStackSlot &slot, std::int64_t displacement = 0)
+    : StackSlotReference (Key{}, &slot, std::move (displacement)) {}
+  const MachineStackSlot &slot () const { return *slot_; }
   std::int64_t displacement = 0;
-  friend bool operator== (StackSlotReference, StackSlotReference) = default;
+  friend bool operator== (const StackSlotReference &, const StackSlotReference &) = default;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  StackSlotReference (Key, const MachineStackSlot *slot, std::int64_t displacement)
+    : displacement (displacement), slot_ (slot) {}
+  const MachineStackSlot *slot_;
 };
 class MachineOperand {
- public:
   using Storage = std::variant<std::int64_t, std::uint64_t, float, double, long double,
                                const MachineVirtualRegister *, target::PhysicalRegister,
                                MachineMemory, const MachineLabel *, MachineSymbolReference,
                                StackSlotReference, BuiltinReference>;
+
+ public:
   template <class T>
-    requires std::is_constructible_v<Storage, T>
+    requires (std::is_constructible_v<Storage, T> && !std::is_pointer_v<T>)
   explicit MachineOperand (T value) : storage_ (std::move (value)) {}
   explicit MachineOperand (const MachineVirtualRegister &reg) : storage_ (&reg) {}
   explicit MachineOperand (const MachineLabel &label) : storage_ (&label) {}
   template <class T>
-  const T *get () const {
-    return std::get_if<T> (&storage_);
+    requires (!std::is_pointer_v<T>)
+  OptionalRef<const T> get () const {
+    if constexpr (std::is_same_v<T, MachineVirtualRegister> || std::is_same_v<T, MachineLabel>) {
+      auto value = std::get_if<const T *> (&storage_);
+      return value ? ::mirnext::detail::borrow_optional (*value) : OptionalRef<const T>{};
+    } else
+      return ::mirnext::detail::borrow_optional (std::get_if<T> (&storage_));
   }
-  const Storage &storage () const { return storage_; }
   friend bool operator== (const MachineOperand &, const MachineOperand &) = default;
 
  private:
+  friend class detail::OperandAccess;
+  friend class detail::NodeAccess;
   Storage storage_;
 };
 // USE is a backend liveness boundary (empty USE is the backend's no-op).
@@ -188,9 +265,18 @@ std::string_view opcode_name (MachineOpcode);
 // A copied stack block retains its source value's analysis identity after
 // allocation. This is a liveness dependency, never an address to encode.
 struct CallArgumentDependency {
+  CallArgumentDependency (std::size_t operand, const MachineVirtualRegister &value)
+    : CallArgumentDependency (Key{}, std::move (operand), &value) {}
   std::size_t operand;
-  const MachineVirtualRegister *value;
+  const MachineVirtualRegister &value () const { return *value_; }
   friend bool operator== (const CallArgumentDependency &, const CallArgumentDependency &) = default;
+
+ private:
+  friend class detail::NodeAccess;
+  struct Key {};
+  CallArgumentDependency (Key, std::size_t operand, const MachineVirtualRegister *value)
+    : operand (operand), value_ (value) {}
+  const MachineVirtualRegister *value_;
 };
 class MachineInstruction {
  public:
@@ -231,10 +317,14 @@ class MachineBasicBlock {
   const MachineFunction &function () const { return *function_; }
   std::string_view name () const { return name_; }
   auto instructions () const {
-    return ir::NodeRange (instructions_.cbegin (), instructions_.cend ());
+    return ir::NodeRange (instructions_.cbegin (), instructions_.cend (), instructions_.size ());
   }
-  auto instructions () { return ir::NodeRange (instructions_.begin (), instructions_.end ()); }
-  std::span<const MachineLabel *const> labels () const { return labels_; }
+  auto instructions () {
+    return ir::NodeRange (instructions_.begin (), instructions_.end (), instructions_.size ());
+  }
+  ir::ReferenceRange<const MachineLabel> labels () const {
+    return ir::ReferenceRange<const MachineLabel> (labels_);
+  }
 
  private:
   friend class MachineFunction;
@@ -266,6 +356,9 @@ struct MachineFunctionState {
 };
 class MachineFunction {
  public:
+  ~MachineFunction ();
+  MachineFunction (MachineFunction &&) noexcept;
+  MachineFunction &operator= (MachineFunction &&) noexcept;
   MachineFunction (const MachineFunction &) = delete;
   MachineFunction &operator= (const MachineFunction &) = delete;
   MachineFunction (std::string module, std::string name, ir::Signature, target::TargetMachine);
@@ -281,28 +374,34 @@ class MachineFunction {
   auto symbols () const { return ir::nodes (symbols_); }
   auto stack_slots () const { return ir::nodes (slots_); }
   auto memory_locations () const { return ir::nodes (memory_locations_); }
-  std::span<const MachineVirtualRegister *const> arguments () const { return arguments_; }
+  ir::ReferenceRange<const MachineVirtualRegister> arguments () const {
+    return ir::ReferenceRange<const MachineVirtualRegister> (arguments_);
+  }
   std::span<const target::PhysicalRegister> global_registers () const { return global_registers_; }
   std::uint64_t revision () const { return revision_; }
-  Result<MachineVirtualRegister *> create_register (ir::Type, std::string name = {},
-                                                    bool argument = false,
-                                                    bool memory_backed = false,
-                                                    std::optional<target::PhysicalRegister> binding
-                                                    = {});
-  Result<MachineStackSlot *> create_stack_slot (std::size_t size, std::size_t alignment);
-  const MachineMemoryLocation &create_memory_location ();
-  MachineBasicBlock &create_block (std::string name = {});
-  Result<MachineLabel *> create_label (MachineBasicBlock &, std::string name = {},
-                                       bool address_taken = false,
-                                       std::optional<std::size_t> source_ordinal = {},
-                                       bool function_entry = false);
-  Result<const MachineSymbol *> intern_symbol (MachineSymbol);
+  Result<void> status () const;
   Result<void> verify () const;
   std::size_t instruction_count () const;
   std::string dump () const;
 
  private:
+  friend class detail::MachineAccess;
+  Result<MachineVirtualRegister &> create_register (ir::Type, std::string name = {},
+                                                    bool argument = false,
+                                                    bool memory_backed = false,
+                                                    std::optional<target::PhysicalRegister> binding
+                                                    = {});
+  Result<MachineStackSlot &> create_stack_slot (std::size_t size, std::size_t alignment);
+  const MachineMemoryLocation &create_memory_location ();
+  MachineBasicBlock &create_block (std::string name = {});
+  Result<MachineLabel &> create_label (MachineBasicBlock &, std::string name = {},
+                                       bool address_taken = false,
+                                       std::optional<std::size_t> source_ordinal = {},
+                                       bool function_entry = false);
+  Result<const MachineSymbol &> intern_symbol (MachineSymbol);
   friend class MachineRewriter;
+  friend class MachineEditor;
+  std::unique_ptr<detail::MachineEditState> edit_state_;
   std::string module_, name_;
   ir::Signature signature_;
   target::TargetMachine target_;
@@ -323,45 +422,7 @@ class MachineFunction {
   std::uint64_t revision_ = 0;
   std::uint64_t next_instruction_ = 0;
 };
-class MachineRewriter {
- public:
-  explicit MachineRewriter (MachineFunction &function) : function_ (function) {}
-  Result<MachineInstruction *> append (MachineBasicBlock &, MachineOpcode,
-                                       std::vector<MachineOperand>);
-  Result<MachineInstruction *> insert_before (MachineInstruction &, MachineOpcode,
-                                              std::vector<MachineOperand>);
-  Result<MachineInstruction *> insert_after (MachineInstruction &, MachineOpcode,
-                                             std::vector<MachineOperand>);
-  Result<MachineInstruction *> previous (MachineInstruction &) const;
-  Result<MachineInstruction *> next (MachineInstruction &) const;
-  Result<void> replace (MachineInstruction &, MachineOpcode, std::vector<MachineOperand>);
-  Result<void> erase (MachineInstruction &);
-  Result<void> move_before (MachineInstruction &, MachineInstruction &);
-  Result<void> move_to (MachineInstruction &, MachineBasicBlock &, bool at_end = true);
-  Result<void> move_label (MachineLabel &, MachineBasicBlock &);
-  Result<void> erase_label (MachineLabel &);
-  Result<MachineBasicBlock *> create_block_before (MachineBasicBlock &);
-  Result<MachineBasicBlock *> create_block_after (MachineBasicBlock &);
-  Result<void> set_call_arguments (MachineInstruction &, std::span<const target::PhysicalRegister>);
-  // Dependencies are attached after allocation; they cannot enter coalescing
-  // or be mistaken for executable virtual addresses.
-  Result<void> set_call_dependencies (MachineInstruction &,
-                                      std::span<const CallArgumentDependency>);
-  // Atomic replacement of an ABI-lowered call. Its block operands describe
-  // physical argument locations, rather than public IR block addresses.
-  Result<void> lower_call (MachineInstruction &, MachineOpcode, std::vector<MachineOperand>);
-  Result<void> set_state (MachineFunctionState);
-  Result<void> set_global_registers (std::span<const target::PhysicalRegister>);
-  Result<void> set_entry_setup (MachineInstruction &, bool = true);
 
- private:
-  friend class MachineFunction;
-  Result<void> validate (MachineOpcode, std::span<const MachineOperand>,
-                         bool lowered_call = false) const;
-  Result<void> validate_dependencies (MachineOpcode, std::span<const MachineOperand>,
-                                      std::span<const CallArgumentDependency>) const;
-  MachineFunction &function_;
-};
 struct MachineControlFlow {
   enum class EdgeKind { Branch, Fallthrough, SwitchCase, Indirect, Entry, Exit };
   struct Edge {
@@ -370,7 +431,15 @@ struct MachineControlFlow {
     std::size_t operand = SIZE_MAX;
   };
   // Entry and exit are derived boundaries, not owners of a second instruction body.
-  std::vector<const MachineBasicBlock *> blocks;
+  ir::ReferenceRange<const MachineBasicBlock> blocks () const {
+    return ir::ReferenceRange<const MachineBasicBlock> (blocks_);
+  }
+
+ private:
+  friend class detail::NodeAccess;
+  std::vector<const MachineBasicBlock *> blocks_;
+
+ public:
   std::vector<Edge> edges;
   std::vector<std::vector<std::size_t>> incoming, outgoing;
   std::uint64_t revision = 0;
@@ -386,7 +455,6 @@ struct MachineControlFlow {
   friend struct detail::MachineEdgeEditor;
 };
 // The result owns every name, operand, signature and relocation identity; it
-// borrows no public IR node and can outlive the source Context/optimized result.
-Result<std::unique_ptr<MachineFunction>> prepare_machine_ir (const ir::Function &,
-                                                             const target::TargetMachine &);
+// borrows no public IR node and can outlive the source Program/optimized result.
+
 }  // namespace mirnext::codegen

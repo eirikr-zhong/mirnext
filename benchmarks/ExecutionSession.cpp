@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. First entry versus cached checked native calls. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #include "mirnext/Execution/Session.hpp"
 #include <algorithm>
 #include <array>
@@ -13,18 +15,20 @@ double elapsed (Clock::time_point start) {
   return std::chrono::duration<double, std::nano> (Clock::now () - start).count ();
 }
 Result<void> measure (unsigned count, JITCompilation policy) {
-  Context c;
-  auto m = c.create_module ("benchmark");
-  if (!m) return m.error ();
-  auto f = (*m)->create_function ("sum", {{Type::i64 ()}, std::vector<Type> (count, Type::i64 ())});
-  if (!f) return f.error ();
-  auto b = (*f)->create_block ();
-  if (!b) return b.error ();
-  IRBuilder body (**b);
+  Program c;
+  auto m = mirnext::ir::detail::access (c).create_module ("benchmark");
+  if (!(m).has_value ()) return m.error ();
+  auto f = mirnext::ir::detail::access (((m)).value ())
+             .create_function ("sum", {{Type::i64 ()}, std::vector<Type> (count, Type::i64 ())});
+  if (!(f).has_value ()) return f.error ();
+  auto b = mirnext::ir::detail::access (((f)).value ()).create_block ();
+  if (!(b).has_value ()) return b.error ();
+  InstructionBuilder body ((b).value ());
   auto sum = body.literal (Type::i64 (), 0);
-  for (auto a : (*f)->arguments ()) sum = sum + body.expression (*a);
+  for (auto a : mirnext::ir::detail::ReferenceAccess::pointers (f.value ().arguments ()))
+    sum = sum + body.expression (*a);
   auto returned = body.ret (sum);
-  if (!returned) return returned.error ();
+  if (!(returned).has_value ()) return returned.error ();
   constexpr unsigned iterations = 100000;
   std::vector<std::int64_t> arguments (count, 3);
   std::vector<ExecutionArgument> generic_arguments (count, ExecutionArgument (3));
@@ -34,71 +38,72 @@ Result<void> measure (unsigned count, JITCompilation policy) {
     auto start = Clock::now ();
     auto s = ExecutionSession::create (c, {.link = {.compilation = policy}});
     linking[trial] = elapsed (start);
-    if (!s) return s.error ();
-    if (s->statistics ().compiled_functions != (policy == JITCompilation::Eager ? 1u : 0u))
+    if (!(s).has_value ()) return s.error ();
+    if (s.value ().statistics ().compiled_functions != (policy == JITCompilation::Eager ? 1u : 0u))
       return Error{ErrorCode::InvalidOperand, "wrong initial compilation state"};
-    auto entry = s->find_function ("benchmark", "sum");
-    if (!entry) return entry.error ();
+    auto entry = s.value ().find_function ("benchmark", "sum");
+    if (!(entry).has_value ()) return entry.error ();
     start = Clock::now ();
-    auto result = s->call_i64 (*entry, arguments);
+    auto result = s.value ().call_i64 ((entry).value (), arguments);
     first[trial] = elapsed (start);
-    if (!result) return result.error ();
-    if (*result != count * 3) return Error{ErrorCode::InvalidOperand, "wrong first call result"};
+    if (!(result).has_value ()) return result.error ();
+    if ((result).value () != count * 3)
+      return Error{ErrorCode::InvalidOperand, "wrong first call result"};
     std::int64_t total = 0;
     start = Clock::now ();
     for (unsigned n = 0; n < iterations; ++n) {
-      auto value = s->call_i64 (*entry, arguments);
-      if (!value) return value.error ();
-      total += *value;
+      auto value = s.value ().call_i64 ((entry).value (), arguments);
+      if (!(value).has_value ()) return value.error ();
+      total += (value).value ();
     }
     cached[trial] = elapsed (start) / iterations;
-    if (total != std::int64_t (count) * 3 * iterations || s->host_entry_count () != 1)
+    if (total != std::int64_t (count) * 3 * iterations || s.value ().host_entry_count () != 1)
       return Error{ErrorCode::InvalidOperand,
                    "cached calls changed results or generated another wrapper"};
     total = 0;
     start = Clock::now ();
     for (unsigned n = 0; n < iterations; ++n) {
-      auto value = entry->call_i64 (arguments);
-      if (!value) return value.error ();
-      total += *value;
+      auto value = entry.value ().call_i64 (arguments);
+      if (!(value).has_value ()) return value.error ();
+      total += (value).value ();
     }
     handle_cached[trial] = elapsed (start) / iterations;
-    if (total != std::int64_t (count) * 3 * iterations || s->host_entry_count () != 1)
+    if (total != std::int64_t (count) * 3 * iterations || s.value ().host_entry_count () != 1)
       return Error{ErrorCode::InvalidOperand, "handle calls did not share the scalar adapter"};
     start = Clock::now ();
-    auto generic = s->call (*entry, generic_arguments);
+    auto generic = s.value ().call ((entry).value (), generic_arguments);
     generic_first[trial] = elapsed (start);
-    if (!generic || generic->size () != 1)
+    if (!(generic).has_value () || generic.value ().size () != 1)
       return Error{ErrorCode::InvalidOperand, "generic first call failed"};
-    auto scalar = (*generic)[0].as_i64 ();
-    if (!scalar || *scalar != count * 3)
+    auto scalar = ((generic).value ())[0].as_i64 ();
+    if (!(scalar).has_value () || (scalar).value () != count * 3)
       return Error{ErrorCode::InvalidOperand, "wrong generic first result"};
     total = 0;
     start = Clock::now ();
     for (unsigned n = 0; n < iterations; ++n) {
-      auto values = s->call (*entry, generic_arguments);
-      if (!values || values->size () != 1)
+      auto values = s.value ().call ((entry).value (), generic_arguments);
+      if (!(values).has_value () || values.value ().size () != 1)
         return Error{ErrorCode::InvalidOperand, "generic cached call failed"};
-      auto value = (*values)[0].as_i64 ();
-      if (!value) return value.error ();
-      total += *value;
+      auto value = ((values).value ())[0].as_i64 ();
+      if (!(value).has_value ()) return value.error ();
+      total += (value).value ();
     }
     generic_cached[trial] = elapsed (start) / iterations;
-    if (total != std::int64_t (count) * 3 * iterations || s->host_entry_count () != 2)
+    if (total != std::int64_t (count) * 3 * iterations || s.value ().host_entry_count () != 2)
       return Error{ErrorCode::InvalidOperand,
                    "generic cached calls changed results or generated another adapter"};
     total = 0;
     start = Clock::now ();
     for (unsigned n = 0; n < iterations; ++n) {
-      auto values = entry->call (generic_arguments);
-      if (!values || values->size () != 1)
+      auto values = entry.value ().call (generic_arguments);
+      if (!(values).has_value () || values.value ().size () != 1)
         return Error{ErrorCode::InvalidOperand, "generic handle call failed"};
-      auto value = (*values)[0].as_i64 ();
-      if (!value) return value.error ();
-      total += *value;
+      auto value = ((values).value ())[0].as_i64 ();
+      if (!(value).has_value ()) return value.error ();
+      total += (value).value ();
     }
     handle_generic_cached[trial] = elapsed (start) / iterations;
-    if (total != std::int64_t (count) * 3 * iterations || s->host_entry_count () != 2)
+    if (total != std::int64_t (count) * 3 * iterations || s.value ().host_entry_count () != 2)
       return Error{ErrorCode::InvalidOperand, "generic handle calls did not share the adapter"};
   }
   auto median = [] (auto values) {
@@ -116,38 +121,40 @@ Result<void> measure (unsigned count, JITCompilation policy) {
   return {};
 }
 Result<void> measure_variadic (unsigned count, JITCompilation policy) {
-  Context c;
-  auto m = c.create_module ("benchmark");
-  if (!m) return m.error ();
-  auto f = (*m)->create_function ("first", {{Type::i64 ()}, {Type::i64 ()}, true});
-  if (!f) return f.error ();
-  auto block = (*f)->create_block ();
-  if (!block) return block.error ();
-  IRBuilder b (**block);
-  auto returned = b.ret (Operand (*(*f)->arguments ()[0]));
-  if (!returned) return returned.error ();
+  Program c;
+  auto m = mirnext::ir::detail::access (c).create_module ("benchmark");
+  if (!(m).has_value ()) return m.error ();
+  auto f = mirnext::ir::detail::access (((m)).value ())
+             .create_function ("first", {{Type::i64 ()}, {Type::i64 ()}, true});
+  if (!(f).has_value ()) return f.error ();
+  auto block = mirnext::ir::detail::access (((f)).value ()).create_block ();
+  if (!(block).has_value ()) return block.error ();
+  InstructionBuilder b ((block).value ());
+  auto returned = b.ret (
+    Operand (*mirnext::ir::detail::ReferenceAccess::pointers (f.value ().arguments ())[0]));
+  if (!(returned).has_value ()) return returned.error ();
   constexpr unsigned iterations = 100000;
   std::vector<ExecutionArgument> args (count, ExecutionArgument (42));
   std::array<double, 7> cached;
   for (auto &trial : cached) {
     auto s = ExecutionSession::create (c, {.link = {.compilation = policy}});
-    if (!s) return s.error ();
-    auto f = s->find_function ("benchmark", "first");
-    if (!f) return f.error ();
-    auto warm = s->call (*f, args);
-    if (!warm) return warm.error ();
+    if (!(s).has_value ()) return s.error ();
+    auto f = s.value ().find_function ("benchmark", "first");
+    if (!(f).has_value ()) return f.error ();
+    auto warm = s.value ().call ((f).value (), args);
+    if (!(warm).has_value ()) return warm.error ();
     auto start = Clock::now ();
     std::int64_t total = 0;
     for (unsigned n = 0; n < iterations; ++n) {
-      auto values = s->call (*f, args);
-      if (!values || values->size () != 1)
+      auto values = s.value ().call ((f).value (), args);
+      if (!(values).has_value () || values.value ().size () != 1)
         return Error{ErrorCode::InvalidOperand, "variadic cached call failed"};
-      auto value = (*values)[0].as_i64 ();
-      if (!value) return value.error ();
-      total += *value;
+      auto value = ((values).value ())[0].as_i64 ();
+      if (!(value).has_value ()) return value.error ();
+      total += (value).value ();
     }
     trial = elapsed (start) / iterations;
-    if (total != std::int64_t (42) * iterations || s->host_entry_count () != 1)
+    if (total != std::int64_t (42) * iterations || s.value ().host_entry_count () != 1)
       return Error{ErrorCode::InvalidOperand, "variadic cache result mismatch"};
   }
   std::sort (cached.begin (), cached.end ());
@@ -159,20 +166,20 @@ Result<void> measure_variadic (unsigned count, JITCompilation policy) {
 }  // namespace
 int main () {
   auto t = target::TargetMachine::native ();
-  if (!t) return 1;
-  if (t->architecture () != target::Architecture::AArch64) {
+  if (!(t).has_value ()) return 1;
+  if (t.value ().architecture () != target::Architecture::AArch64) {
     std::cout << "Native session benchmark currently requires AArch64.\n";
     return 0;
   }
   for (auto policy : {JITCompilation::Eager, JITCompilation::Lazy})
     for (unsigned count : {1u, 17u}) {
       auto result = measure (count, policy);
-      if (!result) {
+      if (!(result).has_value ()) {
         std::cerr << result.error ().message << '\n';
         return 1;
       }
       result = measure_variadic (count, policy);
-      if (!result) {
+      if (!(result).has_value ()) {
         std::cerr << result.error ().message << '\n';
         return 1;
       }

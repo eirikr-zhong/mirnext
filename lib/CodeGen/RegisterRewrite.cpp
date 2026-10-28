@@ -1,9 +1,13 @@
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* Allocation rewriting derived from MIR, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. No instruction/CFG transport projection. */
 #include "mirnext/CodeGen/RegisterRewrite.hpp"
 #include "mirnext/CodeGen/Detail/RegisterEffects.hpp"
 #include "mirnext/CodeGen/Detail/InstructionPatterns.hpp"
-#include "mirnext/CodeGen/Detail/SpillEmitter.hpp"
+#include "mirnext/CodeGen/SpillEmitter.hpp"
 #include <algorithm>
 #include <bit>
 #include <climits>
@@ -31,8 +35,8 @@ Opcode move_type (Type t) {
                                       : Opcode::Mov;
 }
 bool equal (const MachineOperand &a, const MachineOperand &b) {
-  if (auto x = a.get<MachineMemory> ()) {
-    auto y = b.get<MachineMemory> ();
+  if (auto x = detail::operand_access (a).get<MachineMemory> ()) {
+    auto y = detail::operand_access (b).get<MachineMemory> ();
     return y && x->type == y->type && x->displacement == y->displacement && x->base == y->base
            && x->index == y->index && (!x->index || x->scale == y->scale);
   }
@@ -58,13 +62,15 @@ DataMode data_mode (MachineOpcode code, std::span<const MachineOperand> ops, std
   if (op == Opcode::LAddr) return {};
   if (detail::is_call (code)) {
     if (p < 2) return {};
-    auto &s = *ops[0].get<MachineSymbolReference> ()->symbol->signature;
+    auto &s = *detail::NodeAccess::symbol (
+                 *(detail::operand_access (ops[0]).get<MachineSymbolReference> ()))
+                 ->signature;
     auto n = p - 2;
     if (n < s.results.size ()) return {s.results[n], true};
     n -= s.results.size ();
     return {n < s.parameters.size () ? s.parameters[n] : Type::i64 (), false};
   }
-  auto d = ir::instruction_descriptor (op);
+  auto d = ir::instruction_descriptor (op).get ();
   if (d->count != ir::OperandCount::Fixed) return {};
   auto r = d->roles[p];
   return {Type (r == 'F' || r == 'f'   ? K::F32
@@ -105,17 +111,17 @@ struct AllocationRewriteEngine {
       spill (f, result, used, "allocation-rewrite"),
       advanced (l.optimization_level () >= 2) {
     for (auto p : result.allocation_.used_registers_) used.insert (p.encoding ());
-    for (std::size_t b = 0; b < g.cfg ().blocks.size (); ++b)
-      result.blocks_.push_back ({g.cfg ().blocks[b], l.blocks ()[b].in,
-                                 result.allocation_.spill_[b].gen,
-                                 result.allocation_.spill_[b].kill});
+    for (std::size_t b = 0; b < detail::NodeAccess::blocks (g.cfg ()).size (); ++b)
+      result.blocks_.push_back (
+        {::mirnext::detail::borrow_optional (detail::NodeAccess::blocks (g.cfg ())[b]),
+         l.blocks ()[b].in, result.allocation_.spill_[b].gen, result.allocation_.spill_[b].kill});
   }
   void fail (std::string why) {
     if (!error) error = invalid (f, std::move (why));
   }
   template <class T>
   void check (const Result<T> &r) {
-    if (!r && !error) error = invalid (f, r.error ().message);
+    if (!r.has_value () && !error) error = invalid (f, r.error ().message);
   }
   target::PhysicalRegister physical (unsigned n) const { return f.target ().registers ()[n].reg; }
   std::optional<target::PhysicalRegister> temporary (Type t, bool first) const {
@@ -125,8 +131,9 @@ struct AllocationRewriteEngine {
     return result.allocation_.virtuals_.at (r);
   }
   std::size_t index (MachineRegister r) const {
-    if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) return index (*v);
-    return std::get<target::PhysicalRegister> (r).encoding ();
+    if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r)))
+      return index (*v);
+    return std::get<target::PhysicalRegister> (detail::NodeAccess::storage (r)).encoding ();
   }
   MachineLocation location (const MachineVirtualRegister *r) const {
     return result.allocation_.locations_[index (r)];
@@ -137,7 +144,7 @@ struct AllocationRewriteEngine {
   std::int64_t offset (StackLocation slot, Type type, std::size_t extra = 0) {
     auto r = spill.offset (slot, type, extra);
     check (r);
-    return r ? *r : 0;
+    return (r).has_value () ? (r).value () : 0;
   }
   bool valid_offset (Type t, std::int64_t value) const {
     return MachineSpillEmitter::valid_offset (f.target ().architecture (), t, value);
@@ -169,7 +176,9 @@ struct AllocationRewriteEngine {
     return p;
   }
   MachineOperand memory (Type t, std::int64_t displacement, target::PhysicalRegister base) const {
-    return MachineOperand (MachineMemory{t, MachineRegister (base), {}, displacement, 1, {}, {}});
+    return detail::NodeAccess::make_MachineOperand (
+      detail::NodeAccess::make_MachineMemory (t, detail::NodeAccess::make_MachineRegister (base),
+                                              {}, displacement, 1, {}, {}));
   }
   void load_store (StackLocation slot, Type t, target::PhysicalRegister p,
                    target::PhysicalRegister address, MachineInstruction &i, bool after,
@@ -180,7 +189,8 @@ struct AllocationRewriteEngine {
   MachineOperand change (const MachineVirtualRegister *r, Type data, MachineInstruction &i,
                          bool output) {
     auto loc = location (r);
-    if (auto p = std::get_if<target::PhysicalRegister> (&loc)) return MachineOperand (*p);
+    if (auto p = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&loc)))
+      return detail::NodeAccess::make_MachineOperand (*p);
     auto type = r->type ();
     auto p = reload (r, type, output);
     auto address = output || type != Type::i64 () ? reload (nullptr, Type::i64 (), output) : p;
@@ -189,7 +199,7 @@ struct AllocationRewriteEngine {
       return memory (data, offset (std::get<StackLocation> (loc), data), spill.base ());
     }
     load_store (std::get<StackLocation> (loc), data, *p, *address, i, output, output);
-    return MachineOperand (*p);
+    return detail::NodeAccess::make_MachineOperand (*p);
   }
   void preserve (const MachineVirtualRegister *r, MachineInstruction &i, bool after, bool restore) {
     check (spill.preserve (r, const_cast<MachineBasicBlock &> (i.block ()), &i, after, restore));
@@ -200,13 +210,13 @@ struct AllocationRewriteEngine {
       fail ("address reload lacks a memory operand");
       return;
     }
-    auto mem = *ops[output >= 0 ? output : input].get<MachineMemory> ();
+    auto mem = *detail::operand_access (ops[output >= 0 ? output : input]).get<MachineMemory> ();
     if (input >= 0 && output >= 0 && !equal (ops[input], ops[output])) {
       fail ("incompatible input/output address reloads");
       return;
     }
-    auto a = std::get<const MachineVirtualRegister *> (*mem.base),
-         b = std::get<const MachineVirtualRegister *> (*mem.index);
+    auto a = std::get<const MachineVirtualRegister *> (detail::NodeAccess::storage (*mem.base)),
+         b = std::get<const MachineVirtualRegister *> (detail::NodeAccess::storage (*mem.index));
     auto first = *temporary (Type::i64 (), true), second = *temporary (Type::i64 (), false);
     load_store (std::get<StackLocation> (location (a)), Type::i64 (), first, first, i, false,
                 false);
@@ -214,17 +224,22 @@ struct AllocationRewriteEngine {
                 false);
     if (mem.scale != 1)
       insert (i, Opcode::Lsh,
-              {MachineOperand (second), MachineOperand (second),
-               MachineOperand (std::int64_t (std::countr_zero (mem.scale)))},
+              {detail::NodeAccess::make_MachineOperand (second),
+               detail::NodeAccess::make_MachineOperand (second),
+               detail::NodeAccess::make_MachineOperand (
+                 std::int64_t (std::countr_zero (mem.scale)))},
               false);
     insert (i, Opcode::Add,
-            {MachineOperand (first), MachineOperand (first), MachineOperand (second)}, false);
+            {detail::NodeAccess::make_MachineOperand (first),
+             detail::NodeAccess::make_MachineOperand (first),
+             detail::NodeAccess::make_MachineOperand (second)},
+            false);
     for (auto p : {input, output})
       if (p >= 0) {
-        auto m = *ops[p].get<MachineMemory> ();
+        auto m = *detail::operand_access (ops[p]).get<MachineMemory> ();
         m.base = first;
         m.index.reset ();
-        ops[p] = MachineOperand (std::move (m));
+        ops[p] = detail::NodeAccess::make_MachineOperand (std::move (m));
       }
   }
   void rewrite (MachineInstruction &i, std::size_t block, SparseBitSet *living,
@@ -240,7 +255,8 @@ struct AllocationRewriteEngine {
         living->erase (n);
       else
         living->insert (n);
-      if (auto v = std::get_if<const MachineVirtualRegister *> (&r); v && saves->contains (n)) {
+      if (auto v = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r));
+          v && saves->contains (n)) {
         saves->erase (n);
         preserve (*v, i, true, false);
       }
@@ -248,23 +264,26 @@ struct AllocationRewriteEngine {
     for (unsigned iteration = 0; iteration <= 1; ++iteration) {
       for (std::size_t p = 0; p < ops.size (); ++p) {
         auto mode = data_mode (code, ops, p);
-        auto m = ops[p].get<MachineMemory> ();
+        auto m = detail::operand_access (ops[p]).get<MachineMemory> ();
         if ((!iteration && (!mode.output || m)) || (iteration && mode.output && !m)) continue;
-        if (auto v = ops[p].get<const MachineVirtualRegister *> ()) {
+        if (auto v = detail::operand_access (ops[p]).get<const MachineVirtualRegister *> ()) {
           if (!mode.output && spilled (*v) && mode.type == Type::i64 ()) ++inputs;
-          touch (*v, mode.output);
-        } else if (auto h = ops[p].get<target::PhysicalRegister> ()) {
+          touch (detail::NodeAccess::make_MachineRegister (*v), mode.output);
+        } else if (auto h = detail::operand_access (ops[p]).get<target::PhysicalRegister> ()) {
           used.insert (h->encoding ());
           touch (*h, mode.output);
         } else if (m) {
           for (auto r : {m->base, m->index})
             if (r)
-              if (auto h = std::get_if<target::PhysicalRegister> (&*r))
+              if (auto h
+                  = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&*r)))
                 used.insert (h->encoding ());
-          auto virtual_base
-            = m->base ? std::get_if<const MachineVirtualRegister *> (&*m->base) : nullptr;
-          auto virtual_index
-            = m->index ? std::get_if<const MachineVirtualRegister *> (&*m->index) : nullptr;
+          auto virtual_base = m->base ? std::get_if<const MachineVirtualRegister *> (
+                                          detail::NodeAccess::storage (&*m->base))
+                                      : nullptr;
+          auto virtual_index = m->index ? std::get_if<const MachineVirtualRegister *> (
+                                            detail::NodeAccess::storage (&*m->index))
+                                        : nullptr;
           if (virtual_base && virtual_index && spilled (*virtual_base)
               && spilled (*virtual_index)) {
             auto &which = mode.output ? output_memory : input_memory;
@@ -274,8 +293,9 @@ struct AllocationRewriteEngine {
               return;
             }
             which = static_cast<int> (p);
-            if (other < 0 || m->base != ops[other].get<MachineMemory> ()->base
-                || m->index != ops[other].get<MachineMemory> ()->index)
+            if (other < 0
+                || m->base != detail::operand_access (ops[other]).get<MachineMemory> ()->base
+                || m->index != detail::operand_access (ops[other]).get<MachineMemory> ()->index)
               inputs += 2;
           }
           if (m->base) touch (*m->base, false);
@@ -292,11 +312,11 @@ struct AllocationRewriteEngine {
           for (auto p : live.global_registers ()) living->insert (p.encoding ());
           for (auto p : i.call_arguments ()) living->insert (p.encoding ());
           living->for_each ([&] (auto n) {
-            auto r
-              = std::get_if<const MachineVirtualRegister *> (&result.allocation_.registers_[n]);
+            auto r = std::get_if<const MachineVirtualRegister *> (
+              detail::NodeAccess::storage (&result.allocation_.registers_[n]));
             if (!r || result.blocks_[block].spill_gen.contains (n)) return;
             auto loc = location (*r);
-            auto h = std::get_if<target::PhysicalRegister> (&loc);
+            auto h = std::get_if<target::PhysicalRegister> (detail::NodeAccess::storage (&loc));
             if (h && f.target ().call_clobbers (*h, (*r)->type ()) && !saves->contains (n)) {
               saves->insert (n);
               preserve (*r, i, true, true);
@@ -312,7 +332,7 @@ struct AllocationRewriteEngine {
       reload (nullptr, Type::i64 (), false);
     }
     if (address (code)) {
-      auto r = *ops[1].get<const MachineVirtualRegister *> ();
+      auto r = *detail::operand_access (ops[1]).get<const MachineVirtualRegister *> ();
       auto loc = location (r);
       auto slot = std::get_if<StackLocation> (&loc);
       if (!slot) {
@@ -326,15 +346,20 @@ struct AllocationRewriteEngine {
         extra = op == Opcode::Addr8 ? 7 : op == Opcode::Addr16 ? 6 : op == Opcode::Addr32 ? 4 : 0;
       }
       insert (i, Opcode::Mov,
-              {MachineOperand (p), MachineOperand (offset (*slot, r->type (), extra))}, false);
+              {detail::NodeAccess::make_MachineOperand (p),
+               detail::NodeAccess::make_MachineOperand (offset (*slot, r->type (), extra))},
+              false);
       insert (i, Opcode::Add,
-              {MachineOperand (p), MachineOperand (p), MachineOperand (spill.base ())}, false);
+              {detail::NodeAccess::make_MachineOperand (p),
+               detail::NodeAccess::make_MachineOperand (p),
+               detail::NodeAccess::make_MachineOperand (spill.base ())},
+              false);
       code = Opcode::Mov;
-      ops[1] = MachineOperand (p);
+      ops[1] = detail::NodeAccess::make_MachineOperand (p);
     }
     for (std::size_t p = 0; p < ops.size () && !error; ++p) {
       auto mode = data_mode (code, ops, p);
-      if (auto v = ops[p].get<const MachineVirtualRegister *> ()) {
+      if (auto v = detail::operand_access (ops[p]).get<const MachineVirtualRegister *> ()) {
         auto r = *v;
         auto loc = location (r);
         if (!p && std::holds_alternative<StackLocation> (loc)) {
@@ -343,7 +368,9 @@ struct AllocationRewriteEngine {
             auto trial = ops;
             auto mem = memory (r->type (), displacement, spill.base ());
             for (auto &o : trial)
-              if (auto v = o.get<const MachineVirtualRegister *> (); v && *v == r) o = mem;
+              if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ();
+                  v && *v == r)
+                o = mem;
             if (instruction_pattern_matches (f.target (), code, trial)) {
               ops = std::move (trial);
               continue;
@@ -351,31 +378,33 @@ struct AllocationRewriteEngine {
           }
         }
         ops[p] = change (r, mode.declared ? r->type () : mode.type, i, mode.output);
-      } else if (auto mem = ops[p].get<MachineMemory> ();
+      } else if (auto mem = detail::operand_access (ops[p]).get<MachineMemory> ();
                  mem && !(is_call (code) && mem->type.kind () == K::Block)) {
         auto m = *mem;
         if (is_call (code) && m.type.kind () == K::Undef && m.base && !m.index) {
-          if (auto v = std::get_if<const MachineVirtualRegister *> (&*m.base)) {
-            dependencies.push_back ({p, *v});
+          if (auto v = std::get_if<const MachineVirtualRegister *> (
+                detail::NodeAccess::storage (&*m.base))) {
+            dependencies.push_back (detail::NodeAccess::make_CallArgumentDependency (p, *v));
             m.base.reset ();
-            ops[p] = MachineOperand (std::move (m));
+            ops[p] = detail::NodeAccess::make_MachineOperand (std::move (m));
             continue;
           }
         }
         for (auto r : {&m.base, &m.index})
           if (*r)
-            if (auto v = std::get_if<const MachineVirtualRegister *> (&**r)) {
+            if (auto v = std::get_if<const MachineVirtualRegister *> (
+                  detail::NodeAccess::storage (&**r))) {
               auto changed = change (*v, Type::i64 (), i, false);
-              *r = *changed.get<target::PhysicalRegister> ();
+              *r = *detail::operand_access (changed).get<target::PhysicalRegister> ();
             }
-        ops[p] = MachineOperand (std::move (m));
+        ops[p] = detail::NodeAccess::make_MachineOperand (std::move (m));
       }
     }
     if (error) return;
     if (move (code) && equal (ops[0], ops[1])) {
       auto &b = const_cast<MachineBasicBlock &> (i.block ());
       // Checking just the successor keeps consecutive no-op deletion linear.
-      if (live.optimization_level () && b.labels ().empty ()
+      if (live.optimization_level () && ir::detail::ReferenceAccess::pointers (b.labels ()).empty ()
           && std::next (b.instructions ().begin ()) == b.instructions ().end ())
         insert (i, MachinePseudoOpcode::Use, {}, false);
       check (rw.erase (i));
@@ -387,8 +416,8 @@ struct AllocationRewriteEngine {
     }
   }
   Result<MachineRewriteResult> run () {
-    for (std::size_t b = 2; b < graph.cfg ().blocks.size () && !error; ++b) {
-      auto &block = *const_cast<MachineBasicBlock *> (graph.cfg ().blocks[b]);
+    for (std::size_t b = 2; b < detail::NodeAccess::blocks (graph.cfg ()).size () && !error; ++b) {
+      auto &block = *const_cast<MachineBasicBlock *> (detail::NodeAccess::blocks (graph.cfg ())[b]);
       auto body = block.instructions ();
       if (!advanced) {
         for (auto it = body.begin (); it != body.end () && !error;) {
@@ -417,7 +446,8 @@ struct AllocationRewriteEngine {
             fail ("invalid block-entry preservation");
             return;
           }
-          preserve (std::get<const MachineVirtualRegister *> (result.allocation_.registers_[n]),
+          preserve (std::get<const MachineVirtualRegister *> (
+                      detail::NodeAccess::storage (result.allocation_.registers_[n])),
                     *first, false, false);
         });
       }
@@ -429,13 +459,13 @@ struct AllocationRewriteEngine {
     auto state = f.state ();
     state.operands_rewritten = true;
     auto changed = rw.set_state (state);
-    if (!changed) return changed.error ();
+    if (!(changed).has_value ()) return changed.error ();
     for (auto &[call, dependencies] : pending_dependencies) {
       auto attached = rw.set_call_dependencies (*call, dependencies);
-      if (!attached) return attached.error ();
+      if (!(attached).has_value ()) return attached.error ();
     }
     auto valid = f.verify ();
-    if (!valid) return invalid (f, valid.error ().message);
+    if (!(valid).has_value ()) return invalid (f, valid.error ().message);
     result.allocation_.revision_ = f.revision ();
     return std::move (result);
   }
@@ -444,7 +474,7 @@ struct AllocationRewriteEngine {
 Result<std::optional<StackLocation>> MachineRewriteResult::spill_slot (
   const MachineVirtualRegister &r) const {
   auto checked = allocation_.location (r);
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto found = spill_slots_.find (&r);
   return found == spill_slots_.end () ? std::optional<StackLocation>{}
                                       : std::optional (found->second);
@@ -469,19 +499,20 @@ Result<MachineRewriteResult> rewrite_allocated (MachineFunction &f,
       || !std::ranges::equal (live.global_registers (), allocation.global_registers ()))
     return invalid (f, "inconsistent allocation analyses");
   auto checked = f.verify ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   for (auto &b : f.blocks ())
     for (auto &i : b.instructions ()) {
       for (auto &o : i.operands ())
-        if (o.get<StackSlotReference> ())
+        if (detail::operand_access (o).get<StackSlotReference> ())
           return invalid (f, "explicit stack objects require frame lowering");
       std::optional<Error> error;
       auto assigned = [&] (MachineRegister r) {
-        if (auto v = std::get_if<const MachineVirtualRegister *> (&r)) {
+        if (auto v
+            = std::get_if<const MachineVirtualRegister *> (detail::NodeAccess::storage (&r))) {
           auto location = allocation.location (**v);
-          if (!location)
+          if (!(location).has_value ())
             error = location.error ();
-          else if (std::holds_alternative<std::monostate> (*location))
+          else if (std::holds_alternative<std::monostate> ((location).value ()))
             error = invalid (f, "unassigned register operand");
         }
       };

@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Derived from MIR gvn; canonical IR is the only body. */
+#include "mirnext/Transforms/AnalysisAccess.hpp"
+#include "mirnext/Analysis/Access.hpp"
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 #include "mirnext/Transforms/GVN.hpp"
 #include "mirnext/Transforms/IntegerFolding.hpp"
 #include "mirnext/Analysis/FunctionGraph.hpp"
@@ -28,7 +32,7 @@ bool overflow (Opcode op) {
          || op == Opcode::UMulos;
 }
 bool call (const Instruction &i) {
-  return instruction_descriptor (i.opcode ())->count == OperandCount::Call;
+  return instruction_descriptor (i.opcode ()).get ()->count == OperandCount::Call;
 }
 bool fixed (const Instruction &i) {
   switch (i.opcode ()) {
@@ -44,14 +48,19 @@ bool fixed (const Instruction &i) {
   default: return call (i);
   }
 }
-bool store (const Instruction &i) { return move (i.opcode ()) && i.operands ()[0].get<Memory> (); }
-bool load (const Instruction &i) { return move (i.opcode ()) && i.operands ()[1].get<Memory> (); }
+bool store (const Instruction &i) {
+  return move (i.opcode ()) && ir::detail::operand_access (i.operands ()[0]).get<Memory> ();
+}
+bool load (const Instruction &i) {
+  return move (i.opcode ()) && ir::detail::operand_access (i.operands ()[1]).get<Memory> ();
+}
 bool copy (const Instruction &i) {
-  return move (i.opcode ()) && i.operands ()[0].get<const Register *> ()
-         && i.operands ()[1].get<const Register *> ();
+  return move (i.opcode ())
+         && ir::detail::operand_access (i.operands ()[0]).get<const Register *> ()
+         && ir::detail::operand_access (i.operands ()[1]).get<const Register *> ();
 }
 bool hard (const Operand &o) {
-  auto r = o.get<const Register *> ();
+  auto r = ir::detail::operand_access (o).get<const Register *> ();
   return r && !(*r)->hardware_binding ().empty ();
 }
 Opcode move_code (Type type) {
@@ -105,14 +114,14 @@ struct ExpressionHash {
             std::visit (
               [&] (const auto &operand) {
                 using O = std::decay_t<decltype (operand)>;
-                mix (hash, value.storage ().index ());
+                mix (hash, ir::detail::operand_access (value).storage ().index ());
                 if constexpr (std::is_same_v<O, SymbolReference>) {
-                  mix (hash, std::hash<const Symbol *>{}(operand.symbol));
+                  mix (hash, std::hash<const Symbol *>{}(ir::detail::NodeAccess::symbol (operand)));
                   mix (hash, operand.displacement);
                 } else if constexpr (!std::is_same_v<O, Memory>)
                   mix (hash, std::hash<O>{}(operand));
               },
-              value.storage ());
+              ir::detail::operand_access (value).storage ());
         },
         atom);
     }
@@ -136,7 +145,7 @@ struct MemoryHash {
   }
 };
 struct State {
-  struct Expression {
+  struct ExpressionEntry {
     const Instruction *instruction;
     SSAValue *temporary = nullptr;
   };
@@ -149,12 +158,12 @@ struct State {
   Function &function;
   FunctionAnalysisManager &analyses;
   SSAForm &form;
-  SSARewriter rewriter;
+  SSAUpdater rewriter;
   FunctionGraph graph;
   DominatorTree dominators;
   GVNResult result;
   std::unordered_map<const Instruction *, GVNResult::Number> effects;
-  std::unordered_map<ExpressionKey, Expression, ExpressionHash> expressions;
+  std::unordered_map<ExpressionKey, ExpressionEntry, ExpressionHash> expressions;
   std::unordered_map<MemoryKey, std::vector<std::size_t>, MemoryHash> history;
   std::vector<MemoryExpression> memory;
   std::unordered_map<const Instruction *, std::size_t> memory_indices;
@@ -177,16 +186,18 @@ struct State {
       calls (graph.blocks.size ()),
       stale (graph.blocks.size ()) {}
   SSAValue *output (const Instruction &i) {
-    auto values = form.definitions (i);
+    auto values = ir::detail::ReferenceAccess::pointers (form.definitions (i));
     return values.empty () ? nullptr : values[0];
   }
   SSAValue *input (const Instruction &i, std::size_t p) {
-    for (auto use : form.inputs (i))
+    for (auto use : ir::detail::ReferenceAccess::pointers (form.inputs (i)))
       if (auto site = std::get_if<SSAInstructionUse> (&use->site ()); site && site->operand == p)
         return const_cast<SSAValue *> (&use->value ());
     return nullptr;
   }
-  GVNResult::Number &number (const SSAValue &v) { return result.numbers.at (&v); }
+  GVNResult::Number &number (const SSAValue &v) {
+    return detail::AnalysisAccess::numbers (result).at (&v);
+  }
   GVNResult::Number &number (const Instruction &i) {
     if (auto v = output (i)) return number (*v);
     return effects.at (&i);
@@ -201,20 +212,27 @@ struct State {
     return number (*v).value;
   }
   const Memory &mem (const Instruction &i) {
-    return *i.operands ()[store (i) ? 0 : 1].get<Memory> ();
+    return *ir::detail::operand_access (i.operands ()[store (i) ? 0 : 1]).get<Memory> ();
   }
   ExpressionKey key (const Instruction &i) {
     ExpressionKey key{i.opcode (), {}};
     for (std::size_t p = 0; p < i.operands ().size (); ++p) {
       auto &operand = i.operands ()[p];
-      if (ssa_output_operand (function, i, p) && !operand.get<Memory> ()) continue;
-      if (operand.get<const Register *> () || operand.get<Memory> ()) {
+      if (ssa_output_operand (function, i, p)
+          && !ir::detail::operand_access (operand).get<Memory> ())
+        continue;
+      if (ir::detail::operand_access (operand).get<const Register *> ()
+          || ir::detail::operand_access (operand).get<Memory> ()) {
         if (auto value = input (i, p)) {
           key.inputs.emplace_back (this->key (*value));
-          if (value->instruction () && form.definitions (*value->instruction ()).size () > 1)
+          if (value->instruction ().get ()
+              && ir::detail::ReferenceAccess::pointers (
+                   form.definitions (*value->instruction ().get ()))
+                     .size ()
+                   > 1)
             key.inputs.emplace_back (MultiResult{&i});
         }
-        if (auto memory = operand.get<Memory> ())
+        if (auto memory = ir::detail::operand_access (operand).get<Memory> ())
           key.inputs.emplace_back (canonical (memory->type));
       } else
         key.inputs.emplace_back (operand);
@@ -225,23 +243,26 @@ struct State {
     auto &m = mem (i);
     return {key (*input (i, store (i) ? 0 : 1)), canonical (m.type), m.alias, m.nonalias};
   }
-  Instruction *next (const Instruction &i) { return IRRewriter (function).next_instruction (i); }
-  Result<Instruction *> insert (BasicBlock &block, const Instruction *before, Opcode opcode,
+  Instruction *next (const Instruction &i) {
+    return InstructionRewriter (function).next_instruction (i);
+  }
+  Result<Instruction &> insert (BasicBlock &block, const Instruction *before, Opcode opcode,
                                 std::initializer_list<Operand> operands,
                                 std::initializer_list<SSAValue *> inputs,
                                 const SSAPhi *after_phi = nullptr) {
     auto added = rewriter.insert (block, before, opcode, {operands.begin (), operands.size ()},
                                   {inputs.begin (), inputs.size ()}, after_phi);
-    if (!added) return added.error ();
-    for (auto value : form.definitions (**added))
-      result.numbers.emplace (value, GVNResult::Number{false, next_number++,
-                                                       opcode == Opcode::Alloca ? 3u : 0u});
-    if (form.definitions (**added).empty ())
-      effects.emplace (*added, GVNResult::Number{false, next_number++});
+    if (!(added).has_value ()) return added.error ();
+    for (auto value : ir::detail::ReferenceAccess::pointers (form.definitions ((added).value ())))
+      detail::AnalysisAccess::numbers (result)
+        .emplace (value,
+                  GVNResult::Number{false, next_number++, opcode == Opcode::Alloca ? 3u : 0u});
+    if (ir::detail::ReferenceAccess::pointers (form.definitions ((added).value ())).empty ())
+      effects.emplace (&(added).value (), GVNResult::Number{false, next_number++});
     ++changes;
-    return *added;
+    return (added).value ();
   }
-  Result<Instruction *> insert_after (const Instruction &i, Opcode opcode,
+  Result<Instruction &> insert_after (const Instruction &i, Opcode opcode,
                                       std::initializer_list<Operand> operands,
                                       std::initializer_list<SSAValue *> inputs) {
     return insert (const_cast<BasicBlock &> (i.block ()), next (i), opcode, operands, inputs);
@@ -278,14 +299,15 @@ struct State {
   void prepare () {
     for (auto &v : form.values ())
       if (v.alive ())
-        result.numbers.emplace (&v, GVNResult::Number{false, next_number++,
-                                                      v.instruction ()
-                                                          && v.instruction ()->opcode ()
-                                                               == Opcode::Alloca
-                                                        ? 3u
-                                                        : 0u});
+        detail::AnalysisAccess::numbers (result)
+          .emplace (&v,
+                    GVNResult::Number{false, next_number++,
+                                      v.instruction ().get ()
+                                          && v.instruction ().get ()->opcode () == Opcode::Alloca
+                                        ? 3u
+                                        : 0u});
     for (auto &block : function.blocks ()) {
-      auto b = graph.indices.at (&block);
+      auto b = analysis::detail::NodeAccess::indices (graph).at (&block);
       for (auto &i : block.instructions ()) {
         if (!output (i)) effects.emplace (&i, GVNResult::Number{false, next_number++});
         if (call (i)) {
@@ -324,10 +346,10 @@ struct State {
     auto &incoming = graph.incoming[e.destination];
     auto found = std::find (incoming.begin (), incoming.end (), id);
     auto slot = static_cast<std::size_t> (found - incoming.begin ());
-    if (auto block = graph.blocks[e.destination].ir)
-      for (auto phi : form.phis (*block)) {
+    if (auto block = analysis::detail::NodeAccess::ir (graph.blocks[e.destination]))
+      for (auto phi : ir::detail::ReferenceAccess::pointers (form.phis (*block))) {
         auto checked = rewriter.erase_phi_input (*phi, slot);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
       }
     incoming.erase (found);
     std::erase (graph.outgoing[e.source], id);
@@ -357,7 +379,7 @@ struct State {
       auto value = input (i, store (i) ? 0 : 1);
       std::unordered_set<const SSAValue *> seen;
       while (value && seen.insert (value).second) {
-        auto def = value->instruction ();
+        auto def = value->instruction ().get ();
         if (def && copy (*def)) {
           value = input (*def, 1);
           continue;
@@ -372,17 +394,17 @@ struct State {
           value = input (*def, 1);
           continue;
         }
-        attr.base = value;
+        attr.base = *value;
         break;
       }
     }
     if (result.memory.empty ()) result.memory.push_back (attr);
-    result.locations[&i] = result.memory.size ();
+    detail::AnalysisAccess::locations (result)[&i] = result.memory.size ();
     result.memory.push_back (std::move (attr));
   }
   void reuse_location (const Instruction &i, const Instruction &other, unsigned flags) {
-    auto slot = result.locations.at (&other);
-    result.locations[&i] = slot;
+    auto slot = detail::AnalysisAccess::locations (result).at (&other);
+    detail::AnalysisAccess::locations (result)[&i] = slot;
     auto &attr = result.memory[slot];
     attr.alloca_flags = ((attr.alloca_flags | flags) & 1) | (attr.alloca_flags & flags & 2);
   }
@@ -391,7 +413,7 @@ struct State {
     auto &n = number (value);
     bool same = true;
     SSAValue *first = nullptr;
-    for (auto use : phi.inputs ()) {
+    for (auto use : ir::detail::ReferenceAccess::pointers (phi.inputs ())) {
       auto v = const_cast<SSAValue *> (&use->value ());
       auto info = number (*v);
       if (!first) {
@@ -404,35 +426,39 @@ struct State {
       }
     }
     if (same && first && number (*first).constant) {
-      auto added = insert (const_cast<BasicBlock &> (phi.block ()), phi.before (), Opcode::Mov,
-                           {Operand (value.reg ()),
-                            Operand (std::bit_cast<std::int64_t> (number (*first).value))},
-                           {}, form.phis (phi.block ()).back ());
-      if (!added) return added.error ();
-      number (**added) = {true, number (*first).value};
-      return bind (value, *output (**added));
+      auto added
+        = insert (const_cast<BasicBlock &> (phi.block ()), phi.before ().get (), Opcode::Mov,
+                  {Operand (value.reg ()),
+                   Operand (std::bit_cast<std::int64_t> (number (*first).value))},
+                  {}, ir::detail::ReferenceAccess::pointers (form.phis (phi.block ())).back ());
+      if (!(added).has_value ()) return added.error ();
+      number ((added).value ()) = {true, number (*first).value};
+      return bind (value, *output ((added).value ()));
     }
-    if (phi.inputs ().size () == 1 && value.reg ().hardware_binding ().empty ()
+    if (ir::detail::ReferenceAccess::pointers (phi.inputs ()).size () == 1
+        && value.reg ().hardware_binding ().empty ()
         && first->reg ().hardware_binding ().empty ()) {
       // Removing unreachable incoming edges can leave a closed PHI cycle.
       // Its own input is not a replacement definition.
       if (first == &value) {
         auto checked = rewriter.erase_phi_input (phi, 0);
-        if (!checked) return checked;
-        if (value.uses ().empty ())
+        if (!(checked).has_value ()) return checked;
+        if (ir::detail::ReferenceAccess::pointers (value.uses ()).empty ())
           checked = rewriter.erase_phi (phi);
         else {
           auto initial = rewriter.initial (value.reg (), SSAValue::Kind::Undefined);
-          if (!initial) return initial.error ();
-          result.numbers.emplace (*initial, GVNResult::Number{false, next_number++});
-          checked = rewriter.erase_phi (phi, **initial);
+          if (!(initial).has_value ()) return initial.error ();
+          detail::AnalysisAccess::numbers (result).emplace (&(initial).value (),
+                                                            GVNResult::Number{false,
+                                                                              next_number++});
+          checked = rewriter.erase_phi (phi, (initial).value ());
         }
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
         ++changes;
         return {};
       }
       auto checked = rewriter.erase_phi (phi, *first);
-      if (!checked) return checked;
+      if (!(checked).has_value ()) return checked;
       ++changes;
       return {};
     }
@@ -450,17 +476,18 @@ struct State {
                          instruction->operands ()[1]};
       SSAValue *inputs[]{input (*instruction, 2), input (*instruction, 1)};
       auto checked = rewriter.replace (*instruction, op, operands, inputs);
-      if (!checked) return checked;
+      if (!(checked).has_value ()) return checked;
       ++changes;
     }
     auto c2 = constant (*instruction, 2);
     auto base = input (*instruction, 1);
     std::unordered_set<const SSAValue *> seen;
-    while (base && base->instruction () && base->instruction ()->opcode () == Opcode::Mov
-           && copy (*base->instruction ()) && !hard (base->instruction ()->operands ()[1])
-           && seen.insert (base).second)
-      base = input (*base->instruction (), 1);
-    auto definition = base ? base->instruction () : nullptr;
+    while (base && base->instruction ().get ()
+           && base->instruction ().get ()->opcode () == Opcode::Mov
+           && copy (*base->instruction ().get ())
+           && !hard (base->instruction ().get ()->operands ()[1]) && seen.insert (base).second)
+      base = input (*base->instruction ().get (), 1);
+    auto definition = base ? base->instruction ().get () : nullptr;
     auto c1 = definition ? constant (*definition, 2) : std::nullopt;
     if (!c1 || !c2 || !definition || hard (instruction->operands ()[1])
         || hard (definition->operands ()[1])
@@ -476,38 +503,39 @@ struct State {
       combined = static_cast<std::uint64_t> (static_cast<std::int64_t> (
         std::bit_cast<std::int32_t> (static_cast<std::uint32_t> (combined))));
     auto temp = rewriter.fresh_register (Type::i64 ());
-    if (!temp) return temp.error ();
-    auto copied = insert (const_cast<BasicBlock &> (definition->block ()), definition, Opcode::Mov,
-                          {Operand (**temp), definition->operands ()[1]}, {input (*definition, 1)});
-    if (!copied) return copied.error ();
-    number (**copied) = number (*input (*definition, 1));
+    if (!(temp).has_value ()) return temp.error ();
+    auto copied
+      = insert (const_cast<BasicBlock &> (definition->block ()), definition, Opcode::Mov,
+                {Operand ((temp).value ()), definition->operands ()[1]}, {input (*definition, 1)});
+    if (!(copied).has_value ()) return copied.error ();
+    number ((copied).value ()) = number (*input (*definition, 1));
     if (combined) {
       auto literal = rewriter.fresh_register (Type::i64 ());
-      if (!literal) return literal.error ();
-      auto constant_insn
-        = insert_after (*instruction, Opcode::Mov,
-                        {Operand (**literal), Operand (std::bit_cast<std::int64_t> (combined))},
-                        {});
-      if (!constant_insn) return constant_insn.error ();
-      number (**constant_insn) = {true, combined};
-      auto added
-        = insert_after (**constant_insn, narrow ? Opcode::Adds : Opcode::Add,
-                        {instruction->operands ()[0], Operand (**temp), Operand (**literal)},
-                        {output (**copied), output (**constant_insn)});
-      if (!added) return added.error ();
-      auto checked = bind (*output (*instruction), *output (**added));
-      if (!checked) return checked;
-      following = *constant_insn;
+      if (!(literal).has_value ()) return literal.error ();
+      auto constant_insn = insert_after (*instruction, Opcode::Mov,
+                                         {Operand ((literal).value ()),
+                                          Operand (std::bit_cast<std::int64_t> (combined))},
+                                         {});
+      if (!(constant_insn).has_value ()) return constant_insn.error ();
+      number ((constant_insn).value ()) = {true, combined};
+      auto added = insert_after ((constant_insn).value (), narrow ? Opcode::Adds : Opcode::Add,
+                                 {instruction->operands ()[0], Operand ((temp).value ()),
+                                  Operand ((literal).value ())},
+                                 {output ((copied).value ()), output ((constant_insn).value ())});
+      if (!(added).has_value ()) return added.error ();
+      auto checked = bind (*output (*instruction), *output ((added).value ()));
+      if (!(checked).has_value ()) return checked;
+      following = &(constant_insn).value ();
       revisit = true;
       return {};
     }
-    auto added
-      = insert_after (*instruction, Opcode::Mov, {instruction->operands ()[0], Operand (**temp)},
-                      {output (**copied)});
-    if (!added) return added.error ();
-    auto checked = bind (*output (*instruction), *output (**added));
-    if (!checked) return checked;
-    instruction = *added;
+    auto added = insert_after (*instruction, Opcode::Mov,
+                               {instruction->operands ()[0], Operand ((temp).value ())},
+                               {output ((copied).value ())});
+    if (!(added).has_value ()) return added.error ();
+    auto checked = bind (*output (*instruction), *output ((added).value ()));
+    if (!(checked).has_value ()) return checked;
+    instruction = &(added).value ();
     following = next (*instruction);
     return {};
   }
@@ -524,7 +552,10 @@ struct State {
       auto source = input (i, 1);
       if (number (*source).alloca_flags) result.full_escape = true;
       auto st = previous (true);
-      bool fresh = st && cycle (graph.indices.at (&memory[*st].instruction->block ()), b);
+      bool fresh = st
+                   && cycle (analysis::detail::NodeAccess::indices (graph).at (
+                               &memory[*st].instruction->block ()),
+                             b);
       auto prev = previous (false);
       if (fresh || !prev)
         location (i, number (*address).alloca_flags);
@@ -534,9 +565,9 @@ struct State {
         if (load (*old) && key (*source) == key (*output (*old))) {
           available.erase (memory_indices.at (&i));
           removed.insert (memory_indices.at (&i));
-          result.locations.erase (&i);
+          detail::AnalysisAccess::locations (result).erase (&i);
           auto checked = rewriter.erase_instruction (i);
-          if (!checked) return checked.error ();
+          if (!(checked).has_value ()) return checked.error ();
           ++changes;
           return true;
         }
@@ -546,7 +577,7 @@ struct State {
       number (i) = number (*source);
       return true;
     }
-    if (output (i)->uses ().empty ()) return true;
+    if (ir::detail::ReferenceAccess::pointers (output (i)->uses ()).empty ()) return true;
     auto prev = previous (false);
     if (!prev) {
       location (i, number (*address).alloca_flags);
@@ -554,7 +585,8 @@ struct State {
     } else {
       auto &old = memory[*prev];
       reuse_location (i, *old.instruction, number (*address).alloca_flags);
-      if (load (*old.instruction) && output (*old.instruction)->uses ().empty ())
+      if (load (*old.instruction)
+          && ir::detail::ReferenceAccess::pointers (output (*old.instruction)->uses ()).empty ())
         list.push_back (memory_indices.at (&i));
       else {
         number (i) = number (*old.instruction);
@@ -562,11 +594,12 @@ struct State {
           auto source
             = store (*old.instruction) ? input (*old.instruction, 1) : output (*old.instruction);
           auto temp = rewriter.fresh_register (output (i)->reg ().type ());
-          if (!temp) return temp.error ();
-          auto added = insert_after (*old.instruction, i.opcode (),
-                                     {Operand (**temp), Operand (source->reg ())}, {source});
-          if (!added) return added.error ();
-          old.temporary = output (**added);
+          if (!(temp).has_value ()) return temp.error ();
+          auto added
+            = insert_after (*old.instruction, i.opcode (),
+                            {Operand ((temp).value ()), Operand (source->reg ())}, {source});
+          if (!(added).has_value ()) return added.error ();
+          old.temporary = output ((added).value ());
           number (*old.temporary) = number (*old.instruction);
         }
         available.erase (memory_indices.at (&i));
@@ -574,7 +607,7 @@ struct State {
         Operand operands[]{i.operands ()[0], Operand (old.temporary->reg ())};
         SSAValue *inputs[]{old.temporary};
         auto checked = rewriter.replace (i, i.opcode (), operands, inputs);
-        if (!checked) return checked.error ();
+        if (!(checked).has_value ()) return checked.error ();
         ++changes;
         return true;
       }
@@ -585,8 +618,8 @@ struct State {
   Result<void> process (Instruction *i, Instruction *&following, SparseBitSet &available,
                         std::size_t b) {
     if (i->opcode () == Opcode::Mov) {
-      auto signed_value = i->operands ()[1].get<std::int64_t> ();
-      auto unsigned_value = i->operands ()[1].get<std::uint64_t> ();
+      auto signed_value = ir::detail::operand_access (i->operands ()[1]).get<std::int64_t> ();
+      auto unsigned_value = ir::detail::operand_access (i->operands ()[1]).get<std::uint64_t> ();
       if (signed_value || unsigned_value) {
         number (*i)
           = {true, signed_value ? static_cast<std::uint64_t> (*signed_value) : *unsigned_value};
@@ -617,76 +650,83 @@ struct State {
         if (auto input_value = input (*i, p))
           number (*i).alloca_flags |= number (*input_value).alloca_flags & (arithmetic ? 3u : 1u);
     if (value) {
-      if (instruction_descriptor (i->opcode ())->flow == ControlFlow::Branch) {
+      if (instruction_descriptor (i->opcode ()).get ()->flow == ControlFlow::Branch) {
         if (graph.outgoing[b].size () != 2)
           return invalid (function, "conditional branch must have two edges");
         auto edge = graph.outgoing[b][*value ? 0 : 1];
         auto checked = erase_edge (edge);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
         if (!*value)
           checked = rewriter.erase_instruction (*i);
         else {
           Operand operands[]{i->operands ()[0]};
           checked = rewriter.replace (*i, Opcode::Jmp, operands, {});
         }
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
         ++changes;
       } else if (auto original = output (*i)) {
         auto added
           = insert_after (*i, Opcode::Mov,
                           {i->operands ()[0], Operand (std::bit_cast<std::int64_t> (*value))}, {});
-        if (!added) return added.error ();
-        number (**added) = {true, *value};
-        return bind (*original, *output (**added));
+        if (!(added).has_value ()) return added.error ();
+        number ((added).value ()) = {true, *value};
+        return bind (*original, *output ((added).value ()));
       }
       return {};
     }
     bool revisit = false;
     auto checked = canonicalize (i, following, revisit);
-    if (!checked) return checked;
+    if (!(checked).has_value ()) return checked;
     if (revisit) return {};
     if (store (*i) || load (*i)) {
       auto done = process_memory (*i, available, b);
-      if (!done) return done.error ();
-      if (*done) return {};
+      if (!(done).has_value ()) return done.error ();
+      if ((done).value ()) return {};
     } else if (copy (*i) && !hard (i->operands ()[0]) && !hard (i->operands ()[1])) {
       auto source = input (*i, 1);
-      if ((source->instruction () || source->phi ()) && source->uses ().size () == 1) {
+      if ((source->instruction ().get () || source->phi ().get ())
+          && ir::detail::ReferenceAccess::pointers (source->uses ()).size () == 1) {
         checked = bind (*output (*i), *source);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
         checked = rewriter.erase_instruction (*i);
-        if (!checked) return checked;
+        if (!(checked).has_value ()) return checked;
         ++changes;
         return {};
       }
     }
-    if (instruction_descriptor (i->opcode ())->flow != ControlFlow::Next) return {};
+    if (instruction_descriptor (i->opcode ()).get ()->flow != ControlFlow::Next) return {};
     if (copy (*i)) {
       number (*i) = number (*input (*i, 1));
       return {};
     }
     if (overflow (i->opcode ()) || !output (*i)) return {};
-    auto [found, fresh] = expressions.try_emplace (key (*i), Expression{i});
+    auto [found, fresh] = expressions.try_emplace (key (*i), ExpressionEntry{i});
     if (!fresh && load (*i) && !available.contains (memory_indices.at (found->second.instruction)))
       found->second = {i};
     auto &expression = found->second;
     auto original = expression.instruction;
     number (*i) = {false, number (*original).value, number (*original).alloca_flags};
     if (original == i || address (i->opcode ())) return {};
-    if (move (i->opcode ()) && !i->operands ()[1].get<Memory> ()
-        && !i->operands ()[1].get<const Register *> ()
-        && !i->operands ()[1].get<SymbolReference> ())
+    if (move (i->opcode ()) && !ir::detail::operand_access (i->operands ()[1]).get<Memory> ()
+        && !ir::detail::operand_access (i->operands ()[1]).get<const Register *> ()
+        && !ir::detail::operand_access (i->operands ()[1]).get<SymbolReference> ())
       return {};
     if ((i->opcode () == Opcode::Add || i->opcode () == Opcode::Sub)
-        && output (*i)->uses ().size () == 1) {
-      auto site = std::get_if<SSAInstructionUse> (&output (*i)->uses ().front ()->site ());
-      if (site && site->instruction->operands ()[site->operand].get<Memory> ()) {
+        && ir::detail::ReferenceAccess::pointers (output (*i)->uses ()).size () == 1) {
+      auto site = std::get_if<SSAInstructionUse> (
+        &ir::detail::ReferenceAccess::pointers (output (*i)->uses ()).front ()->site ());
+      if (site
+          && ir::detail::operand_access (
+               ir::detail::NodeAccess::instruction (*(site))->operands ()[site->operand])
+               .get<Memory> ()) {
         auto literal = [&] (std::size_t p) -> std::optional<std::uint64_t> {
           auto def = input (*i, p);
-          if (!def || !def->instruction () || !move (def->instruction ()->opcode ())) return {};
-          auto &o = def->instruction ()->operands ()[1];
-          if (auto s = o.get<std::int64_t> ()) return static_cast<std::uint64_t> (*s);
-          if (auto u = o.get<std::uint64_t> ()) return *u;
+          if (!def || !def->instruction ().get () || !move (def->instruction ().get ()->opcode ()))
+            return {};
+          auto &o = def->instruction ().get ()->operands ()[1];
+          if (auto s = ir::detail::operand_access (o).get<std::int64_t> ())
+            return static_cast<std::uint64_t> (*s);
+          if (auto u = ir::detail::operand_access (o).get<std::uint64_t> ()) return *u;
           return {};
         };
         auto displacement = literal (2);
@@ -698,30 +738,32 @@ struct State {
         }
       }
     }
-    auto original_block = graph.indices.at (&original->block ());
+    auto original_block = analysis::detail::NodeAccess::indices (graph).at (&original->block ());
     if (b != original_block && !dominators.dominates (original_block, b)) return {};
     auto op = move_code (output (*i)->reg ().type ());
     if (!expression.temporary) {
       auto temp = rewriter.fresh_register (output (*i)->reg ().type ());
-      if (!temp) return temp.error ();
+      if (!(temp).has_value ()) return temp.error ();
       // Redirect before adding the new input so it cannot redirect itself.
       auto old = output (*original);
-      std::vector<SSAUse *> users (old->uses ().begin (), old->uses ().end ());
-      auto added = insert_after (*original, op, {Operand (**temp), Operand (old->reg ())}, {old});
-      if (!added) return added.error ();
-      expression.temporary = output (**added);
-      number (**added) = number (*original);
+      std::vector<SSAUse *> users (ir::detail::ReferenceAccess::pointers (old->uses ()).begin (),
+                                   ir::detail::ReferenceAccess::pointers (old->uses ()).end ());
+      auto added
+        = insert_after (*original, op, {Operand ((temp).value ()), Operand (old->reg ())}, {old});
+      if (!(added).has_value ()) return added.error ();
+      expression.temporary = output ((added).value ());
+      number ((added).value ()) = number (*original);
       checked = rewriter.replace_uses (users, *expression.temporary);
-      if (!checked) return checked;
-      expressions.try_emplace (key (**added), Expression{*added});
+      if (!(checked).has_value ()) return checked;
+      expressions.try_emplace (key ((added).value ()), ExpressionEntry{&(added).value ()});
     }
     auto added = insert_after (*i, op, {i->operands ()[0], Operand (expression.temporary->reg ())},
                                {expression.temporary});
-    if (!added) return added.error ();
-    checked = bind (*output (*i), *output (**added));
-    if (!checked) return checked;
-    number (**added) = number (*original);
-    expressions.try_emplace (key (**added), Expression{*added});
+    if (!(added).has_value ()) return added.error ();
+    checked = bind (*output (*i), *output ((added).value ()));
+    if (!(checked).has_value ()) return checked;
+    number ((added).value ()) = number (*original);
+    expressions.try_emplace (key ((added).value ()), ExpressionEntry{&(added).value ()});
     return {};
   }
   Result<void> run () {
@@ -735,7 +777,7 @@ struct State {
           while (!graph.outgoing[dead].empty ()) {
             auto id = graph.outgoing[dead][0], target = graph.edges[id].destination;
             auto checked = erase_edge (id);
-            if (!checked) return checked;
+            if (!(checked).has_value ()) return checked;
             if (target > 2 && graph.incoming[target].empty ()) pending.push_back (target);
           }
         }
@@ -748,21 +790,21 @@ struct State {
       }
       auto available = in[b];
       available.subtract (removed);
-      if (auto block = graph.blocks[b].ir) {
+      if (auto block = analysis::detail::NodeAccess::ir (graph.blocks[b])) {
         // PHIs belong to the block, not a duplicated instruction sequence.
-        auto phis = form.phis (*block);
+        auto phis = ir::detail::ReferenceAccess::pointers (form.phis (*block));
         std::vector<SSAPhi *> pending (phis.begin (), phis.end ());
         auto instruction = block->size ()
                              ? const_cast<Instruction *> (&*block->instructions ().begin ())
                              : nullptr;
         for (auto p : pending) {
           auto checked = phi (*p);
-          if (!checked) return checked;
+          if (!(checked).has_value ()) return checked;
         }
         for (; instruction;) {
           auto following = next (*instruction);
           auto checked = process (instruction, following, available, b);
-          if (!checked) return checked;
+          if (!(checked).has_value ()) return checked;
           instruction = following;
         }
       }
@@ -792,19 +834,24 @@ struct State {
 Result<GVNResult> GVNAnalysis::run (const ir::Function &function) {
   return invalid (function, "value numbering results require a completed GVN pass");
 }
-Result<PassResult> GVNPass::run (ir::Function &function,
+Result<PassResult> GVNPass::run (ir::MIRBuilder &edit,
                                  analysis::FunctionAnalysisManager &analyses) {
+  if (auto status = edit.status (); !status.has_value ()) return status.error ();
+  if (!edit.function ())
+    return Error{ErrorCode::InvalidArgument, "pass requires a selected function"};
+  auto &function = *edit.function ();
+
   if (&analyses.function () != &function) return invalid (function, "analysis owner mismatch");
   auto checked = function.verify ();
-  if (!checked) return checked.error ();
-  auto form = function.ssa_form ();
+  if (!(checked).has_value ()) return checked.error ();
+  auto form = function.ssa_form ().get ();
   if (!form || !form->renamed () || form->conventional ())
     return invalid (function, "requires renamed nonconventional SSA");
   for (auto &block : function.blocks ())
     for (auto &i : block.instructions ()) {
       unsigned memories = 0;
       for (auto &o : i.operands ())
-        if (auto m = o.get<Memory> ()) {
+        if (auto m = ir::detail::operand_access (o).get<Memory> ()) {
           ++memories;
           bool special
             = fixed (i)
@@ -812,8 +859,8 @@ Result<PassResult> GVNPass::run (ir::Function &function,
           bool conversion_move = sizeof (long double) == sizeof (double)
                                  && (i.opcode () == Opcode::D2LD || i.opcode () == Opcode::LD2D);
           if (!special
-              && (!m->base || m->index || m->displacement
-                  || (!load (i) && !store (i) && !conversion_move)))
+              && (!ir::detail::NodeAccess::base (*(m)) || ir::detail::NodeAccess::index (*(m))
+                  || m->displacement || (!load (i) && !store (i) && !conversion_move)))
             return invalid (function, "simplify must materialize memory operands before GVN");
         }
       if (!fixed (i) && memories > 1
@@ -822,34 +869,35 @@ Result<PassResult> GVNPass::run (ir::Function &function,
         return invalid (function, "simplify must split memory moves before GVN");
     }
   auto graph = analyses.get<analysis::FunctionGraphAnalysis> ();
-  if (!graph) return graph.error ();
+  if (!(graph).has_value ()) return graph.error ();
   auto dom = analyses.get<analysis::DominatorAnalysis> ();
-  if (!dom) return dom.error ();
-  State state (function, analyses, *const_cast<ir::SSAForm *> (form), **graph, **dom);
+  if (!(dom).has_value ()) return dom.error ();
+  State state (function, analyses, *const_cast<ir::SSAForm *> (form), (graph).value (),
+               (dom).value ());
   checked = state.run ();
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   // Persist GVN memory-location equivalence classes past SSA teardown. Only owning,
   // typed locations cross that boundary; SSA value pointers stay in analysis.
   std::unordered_map<std::size_t, const ir::MemoryLocation *> locations;
-  IRRewriter annotations (function);
+  InstructionRewriter annotations (function);
   for (auto &block : function.blocks ())
     for (auto &i : block.instructions ())
       for (std::size_t p = 0; p < i.operands ().size (); ++p)
-        if (i.operands ()[p].get<Memory> ()) {
+        if (ir::detail::operand_access (i.operands ()[p]).get<Memory> ()) {
           const ir::MemoryLocation *location = nullptr;
-          if (auto found = state.result.locations.find (&i);
-              found != state.result.locations.end ()) {
+          if (auto found = detail::AnalysisAccess::locations (state.result).find (&i);
+              found != detail::AnalysisAccess::locations (state.result).end ()) {
             auto [at, fresh] = locations.try_emplace (found->second);
             if (fresh) at->second = &annotations.create_memory_location ();
             location = at->second;
           }
           checked = state.rewriter.set_memory_location (i, p, location);
-          if (!checked) return checked.error ();
+          if (!(checked).has_value ()) return checked.error ();
         }
   checked = analyses.set<GVNAnalysis> (std::move (state.result));
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   checked = analyses.set<analysis::FunctionGraphAnalysis> (std::move (state.graph));
-  if (!checked) return checked.error ();
+  if (!(checked).has_value ()) return checked.error ();
   auto preserved = analysis::PreservedAnalyses::none ();
   preserved.preserve<GVNAnalysis> ();
   preserved.preserve<analysis::FunctionGraphAnalysis> ();

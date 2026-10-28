@@ -1,3 +1,5 @@
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/CheckedSSA.hpp"
 /* Licensed under the MIT License. Isolated checked SSA memory edit timings and ordinary
  * allocations. */
 #include "mirnext/Transforms/SSA.hpp"
@@ -29,29 +31,38 @@ int main () {
     std::vector<std::size_t> counts;
     std::uint64_t fingerprint = 0;
     for (unsigned rep = 0; rep < repetitions; ++rep) {
-      Context context;
-      auto module = context.create_module ("edits");
-      if (!module) return 1;
-      auto function
-        = (*module)->create_function ("entry", {{Type::i64 ()}, {Type::i64 (), Type::i64 ()}});
-      if (!function) return 1;
-      auto block = (*function)->create_block ();
-      if (!block) return 1;
-      IRBuilder builder (**block);
+      Program context;
+      auto module = mirnext::ir::detail::access (context).create_module ("edits");
+      if (!(module).has_value ()) return 1;
+      auto function = mirnext::ir::detail::access (((module)).value ())
+                        .create_function ("entry", {{Type::i64 ()}, {Type::i64 (), Type::i64 ()}});
+      if (!(function).has_value ()) return 1;
+      auto block = mirnext::ir::detail::access (((function)).value ()).create_block ();
+      if (!(block).has_value ()) return 1;
+      InstructionBuilder builder ((block).value ());
       for (unsigned n = 0; n < count; ++n)
-        if (!builder.emit (Opcode::Mov,
-                           {Operand (Memory{Type::i64 (), (*function)->arguments ()[0]}),
-                            Operand (*(*function)->arguments ()[1])}))
+        if (!(builder.emit (Opcode::Mov,
+                            {Operand (
+                               mirnext::ir::detail::NodeAccess::
+                                 make_Memory (Type::i64 (),
+                                              mirnext::ir::detail::ReferenceAccess::pointers (
+                                                function.value ().arguments ())[0])),
+                             Operand (*mirnext::ir::detail::ReferenceAccess::pointers (
+                               function.value ().arguments ())[1])}))
+               .has_value ())
           return 1;
-      if (!builder.ret (Operand (*(*function)->arguments ()[1]))) return 1;
-      FunctionAnalysisManager analyses (**function);
+      if (!(builder.ret (Operand (
+              *mirnext::ir::detail::ReferenceAccess::pointers (function.value ().arguments ())[1])))
+             .has_value ())
+        return 1;
+      FunctionAnalysisManager analyses ((function).value ());
       FunctionPassManager passes;
       passes.add<BuildSSAPass> ();
       passes.add<ConventionalSSAPass> ();
-      if (!passes.run (**function, analyses)) return 1;
-      auto form = (*function)->ssa_form ();
-      auto rewriter = SSARewriter::get (**function);
-      if (!rewriter) return 1;
+      if (!(passes.run ((function).value (), analyses)).has_value ()) return 1;
+      auto form = function.value ().ssa_form ().get ();
+      auto rewriter = SSAUpdater::get ((function).value ());
+      if (!(rewriter).has_value ()) return 1;
       struct Site {
         Instruction *instruction;
         SSAValue *base;
@@ -59,32 +70,39 @@ int main () {
       };
       std::vector<Site> sites;
       sites.reserve (count);
-      for (auto &b : (*function)->blocks ())
+      for (auto &b : function.value ().blocks ())
         for (auto &i : b.instructions ())
           if (i.opcode () == Opcode::Mov)
             sites.push_back (
-              {&i, const_cast<SSAValue *> (&form->inputs (i)[0]->value ()), form->inputs (i)[1]});
+              {&i,
+               const_cast<SSAValue *> (
+                 &mirnext::ir::detail::ReferenceAccess::pointers (form->inputs (i))[0]->value ()),
+               mirnext::ir::detail::ReferenceAccess::pointers (form->inputs (i))[1]});
       if (sites.size () != count) return 1;
       allocations = 0;
       measuring = true;
       auto start = std::chrono::steady_clock::now ();
       for (auto site : sites) {
-        auto memory = *site.instruction->operands ()[0].get<Memory> ();
+        auto memory
+          = *mirnext::ir::detail::operand_access (site.instruction->operands ()[0]).get<Memory> ();
         memory.displacement = 3;
-        if (!rewriter->replace_memory (*site.instruction, 0, std::move (memory), site.base,
-                                       nullptr))
+        if (!(rewriter.value ().replace_memory (*site.instruction, 0, std::move (memory), site.base,
+                                                nullptr))
+               .has_value ())
           return 1;
       }
       auto end = std::chrono::steady_clock::now ();
       measuring = false;
-      if (!(*function)->verify ()) return 1;
+      if (!(function.value ().verify ()).has_value ()) return 1;
       for (auto site : sites)
         if (!site.unrelated->alive ()
-            || form->inputs (*site.instruction).front () != site.unrelated)
+            || mirnext::ir::detail::ReferenceAccess::pointers (form->inputs (*site.instruction))
+                   .front ()
+                 != site.unrelated)
           return 2;
       std::uint64_t hash = 14695981039346656037ULL;
-      for (unsigned char c : dump (**function)) hash = (hash ^ c) * 1099511628211ULL;
-      for (unsigned char c : dump_ssa (**function)) hash = (hash ^ c) * 1099511628211ULL;
+      for (unsigned char c : dump ((function).value ())) hash = (hash ^ c) * 1099511628211ULL;
+      for (unsigned char c : dump_ssa ((function).value ())) hash = (hash ^ c) * 1099511628211ULL;
       if (rep && fingerprint != hash) return 2;
       fingerprint = hash;
       times.push_back (std::chrono::duration<double, std::milli> (end - start).count ());

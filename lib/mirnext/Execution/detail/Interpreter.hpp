@@ -1,6 +1,6 @@
 /* Licensed under the MIT License. Derived interpreter cache and invocation frames. */
 #pragma once
-#include "mirnext/Execution/Interpreter.hpp"
+#include "mirnext/Execution/Session.hpp"
 #include "mirnext/Execution/detail/ProgramImage.hpp"
 #include "mirnext/Execution/detail/Values.hpp"
 #include "mirnext/Execution/detail/NativeCalls.hpp"

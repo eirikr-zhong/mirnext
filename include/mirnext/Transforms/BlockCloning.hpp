@@ -5,6 +5,6 @@ namespace mirnext::transforms {
 class BlockCloningPass final : public FunctionPass {
  public:
   std::string_view name () const noexcept override { return "clone-blocks"; }
-  Result<PassResult> run (ir::Function &, analysis::FunctionAnalysisManager &) override;
+  Result<PassResult> run (ir::MIRBuilder &, analysis::FunctionAnalysisManager &) override;
 };
 }  // namespace mirnext::transforms

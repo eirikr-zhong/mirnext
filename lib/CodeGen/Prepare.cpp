@@ -1,4 +1,8 @@
 /* Licensed under the MIT License. Direct canonical IR to owning machine IR. */
+#include "mirnext/CodeGen/Stages.hpp"
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 #include "mirnext/CodeGen/MachineIR.hpp"
 #include <algorithm>
 #include <unordered_map>
@@ -27,8 +31,8 @@ MachineSymbol symbol (const ir::Symbol &source, const target::TargetMachine &tar
   MachineSymbol result{std::string (source.module ().name ()),
                        std::string (source.name ()),
                        kind,
-                       source.signature ()
-                         ? std::optional (signature (*source.signature (), target))
+                       source.signature ().get ()
+                         ? std::optional (signature (*source.signature ().get (), target))
                          : std::nullopt,
                        source.exported (),
                        {}};
@@ -45,24 +49,26 @@ MachineSymbol symbol (const ir::Symbol &source, const target::TargetMachine &tar
   return result;
 }
 }  // namespace
-Result<std::unique_ptr<MachineFunction>> prepare_machine_ir (const ir::Function &source,
-                                                             const target::TargetMachine &target) {
+Result<MachineFunction> prepare_machine_ir (const ir::Function &source,
+                                            const target::TargetMachine &target) {
   auto error = [&] (std::string why) {
     return Error{ErrorCode::InvalidOperand, std::string (source.module ().name ()) + "/"
                                               + std::string (source.symbol ().name ()) + " ["
                                               + std::string (target.name ())
                                               + ", prepare-machine-ir]: " + std::move (why)};
   };
-  auto valid = source.verify ();
-  if (!valid) return error (valid.error ().message);
+  auto valid = source.module ().program ().status ();
+  if (!(valid).has_value ()) return error (valid.error ().message);
+  valid = source.verify ();
+  if (!(valid).has_value ()) return error (valid.error ().message);
   auto phase = source.require_register_ir ();
-  if (!phase) return error (phase.error ().message);
+  if (!(phase).has_value ()) return error (phase.error ().message);
   if (source.needs_materialization ())
     return error ("stack scopes must be materialized before machine preparation");
-  auto result = std::make_unique<MachineFunction> (std::string (source.module ().name ()),
-                                                   std::string (source.symbol ().name ()),
-                                                   signature (source.signature (), target), target);
-  auto &function = *result;
+  Result<MachineFunction> result (std::in_place, std::string (source.module ().name ()),
+                                  std::string (source.symbol ().name ()),
+                                  signature (source.signature (), target), target);
+  auto &function = (result).value ();
   MachineRewriter rewriter (function);
   // A hardware declaration reserves a module-wide observable register even
   // in functions that do not themselves declare or read that binding.
@@ -72,113 +78,139 @@ Result<std::unique_ptr<MachineFunction>> prepare_machine_ir (const ir::Function 
       for (auto &reg : f.registers ())
         if (!reg.hardware_binding ().empty ()) {
           auto physical = target.find_register (reg.hardware_binding ());
-          if (!physical) return error (physical.error ().message);
-          if (std::find (global_registers.begin (), global_registers.end (), *physical)
+          if (!(physical).has_value ()) return error (physical.error ().message);
+          if (std::find (global_registers.begin (), global_registers.end (), (physical).value ())
               == global_registers.end ())
-            global_registers.push_back (*physical);
+            global_registers.push_back ((physical).value ());
         }
     }
   auto globals = rewriter.set_global_registers (global_registers);
-  if (!globals) return globals.error ();
+  if (!(globals).has_value ()) return globals.error ();
   std::unordered_map<const ir::Register *, const MachineVirtualRegister *> registers;
   std::vector<MachineOperand> hardware_uses;
   auto add_register = [&] (const ir::Register &reg) -> Result<void> {
     std::optional<target::PhysicalRegister> binding;
     if (!reg.hardware_binding ().empty ()) {
       auto found = target.find_register (reg.hardware_binding ());
-      if (!found) return error (found.error ().message);
-      binding = *found;
+      if (!(found).has_value ()) return error (found.error ().message);
+      binding = (found).value ();
     }
     auto added
-      = function.create_register (abi_type (reg.type (), target), std::string (reg.name ()),
-                                  reg.is_argument (), reg.is_memory_backed (), binding);
-    if (!added) return error (added.error ().message);
-    registers.emplace (&reg, *added);
-    if (binding && !reg.is_memory_backed ()) hardware_uses.emplace_back (**added);
+      = detail::access (function).create_register (abi_type (reg.type (), target),
+                                                   std::string (reg.name ()), reg.is_argument (),
+                                                   reg.is_memory_backed (), binding);
+    if (!(added).has_value ()) return error (added.error ().message);
+    registers.emplace (&reg, &(added).value ());
+    if (binding && !reg.is_memory_backed ()) hardware_uses.emplace_back ((added).value ());
     return {};
   };
-  for (auto reg : source.arguments ()) {
+  for (auto reg : ir::detail::ReferenceAccess::pointers (source.arguments ())) {
     auto added = add_register (*reg);
-    if (!added) return added.error ();
+    if (!(added).has_value ()) return added.error ();
   }
   for (auto &reg : source.registers ())
     if (!reg.is_argument ()) {
       auto added = add_register (reg);
-      if (!added) return added.error ();
+      if (!(added).has_value ()) return added.error ();
     }
   std::unordered_map<const ir::BasicBlock *, MachineBasicBlock *> blocks;
   MachineBasicBlock *prologue = nullptr;
-  if (!source.blocks ().begin ()->labels ().empty ()) prologue = &function.create_block ();
+  if (!ir::detail::ReferenceAccess::pointers (source.blocks ().begin ()->labels ()).empty ())
+    prologue = &detail::access (function).create_block ();
   for (auto &block : source.blocks ())
-    blocks.emplace (&block, &function.create_block (std::string (block.name ())));
+    blocks.emplace (&block, &detail::access (function).create_block (std::string (block.name ())));
   // Preserve the generator's leading address anchor separately from public
   // labels, including an empty prologue before an already labelled first block.
   auto entry
-    = function.create_label (prologue ? *prologue : *blocks.at (&*source.blocks ().begin ()), {},
-                             false, {}, true);
-  if (!entry) return entry.error ();
+    = detail::access (function).create_label (prologue ? *prologue
+                                                       : *blocks.at (&*source.blocks ().begin ()),
+                                              {}, false, {}, true);
+  if (!(entry).has_value ()) return entry.error ();
   std::unordered_set<const ir::Label *> address_taken;
-  for (auto data : source.label_data_uses ())
+  for (auto data : ir::detail::ReferenceAccess::pointers (source.label_data_uses ()))
     if (auto ref = std::get_if<ir::LabelReference> (&data->initializer ())) {
-      if (&ref->label->function () == &source) address_taken.insert (ref->label);
-      if (ref->base && &ref->base->function () == &source) address_taken.insert (ref->base);
+      if (&ir::detail::NodeAccess::label (*(ref))->function () == &source)
+        address_taken.insert (ir::detail::NodeAccess::label (*(ref)));
+      if (ir::detail::NodeAccess::base (*(ref))
+          && &ir::detail::NodeAccess::base (*(ref))->function () == &source)
+        address_taken.insert (ir::detail::NodeAccess::base (*(ref)));
     }
   for (auto &block : source.blocks ())
     for (auto &insn : block.instructions ())
       if (insn.opcode () == ir::Opcode::LAddr)
-        address_taken.insert (*insn.operands ()[1].get<const ir::Label *> ());
+        address_taken.insert (
+          *ir::detail::operand_access (insn.operands ()[1]).get<const ir::Label *> ());
   std::unordered_map<const ir::Label *, const MachineLabel *> labels;
   std::unordered_map<const ir::Label *, std::size_t> label_ordinals;
   for (auto &label : source.labels ()) label_ordinals.emplace (&label, label_ordinals.size ());
   for (auto &block : source.blocks ())
-    for (auto label : block.labels ()) {
+    for (auto label : ir::detail::ReferenceAccess::pointers (block.labels ())) {
       auto created
-        = function.create_label (*blocks.at (&block), std::string (label->name ()),
-                                 address_taken.contains (label), label_ordinals.at (label));
-      if (!created) return created.error ();
-      labels.emplace (label, *created);
+        = detail::access (function).create_label (*blocks.at (&block), std::string (label->name ()),
+                                                  address_taken.contains (label),
+                                                  label_ordinals.at (label));
+      if (!(created).has_value ()) return created.error ();
+      labels.emplace (label, &(created).value ());
     }
   std::unordered_map<const ir::Symbol *, const MachineSymbol *> symbols;
   std::unordered_map<const ir::MemoryLocation *, const MachineMemoryLocation *> locations;
   auto convert = [&] (const ir::Operand &operand) -> Result<MachineOperand> {
-    if (auto reg = operand.get<const ir::Register *> ())
-      return MachineOperand (*registers.at (*reg));
-    if (auto label = operand.get<const ir::Label *> ()) return MachineOperand (*labels.at (*label));
-    if (auto reference = operand.get<ir::SymbolReference> ()) {
-      auto [at, fresh] = symbols.try_emplace (reference->symbol);
+    if (auto reg = ir::detail::operand_access (operand).get<const ir::Register *> ())
+      return detail::NodeAccess::make_MachineOperand (*registers.at (*reg));
+    if (auto label = ir::detail::operand_access (operand).get<const ir::Label *> ())
+      return detail::NodeAccess::make_MachineOperand (*labels.at (*label));
+    if (auto reference = ir::detail::operand_access (operand).get<ir::SymbolReference> ()) {
+      auto [at, fresh] = symbols.try_emplace (ir::detail::NodeAccess::symbol (*(reference)));
       if (fresh) {
-        auto interned = function.intern_symbol (symbol (*reference->symbol, target));
-        if (!interned) return interned.error ();
-        at->second = *interned;
+        auto interned = detail::access (function).intern_symbol (
+          symbol (*ir::detail::NodeAccess::symbol (*(reference)), target));
+        if (!(interned).has_value ()) return interned.error ();
+        at->second = &(interned).value ();
       }
-      return MachineOperand (MachineSymbolReference{at->second, reference->displacement});
+      return detail::NodeAccess::make_MachineOperand (
+        detail::NodeAccess::make_MachineSymbolReference (at->second, reference->displacement));
     }
-    if (auto m = operand.get<ir::Memory> ()) {
+    if (auto m = ir::detail::operand_access (operand).get<ir::Memory> ()) {
       const MachineMemoryLocation *location = nullptr;
-      if (m->location ()) {
-        auto [at, fresh] = locations.try_emplace (m->location ());
-        if (fresh) at->second = &function.create_memory_location ();
+      if (m->location ().get ()) {
+        auto [at, fresh] = locations.try_emplace (m->location ().get ());
+        if (fresh) at->second = &detail::access (function).create_memory_location ();
         location = at->second;
       }
       auto type = abi_type (m->type, target);
       if (type.kind () == ir::Type::Kind::Pointer) type = ir::Type::i64 ();
-      return MachineOperand (
-        MachineMemory{type,
-                      m->base ? std::optional<MachineRegister> (registers.at (m->base))
-                              : std::nullopt,
-                      m->index ? std::optional<MachineRegister> (registers.at (m->index))
-                               : std::nullopt,
-                      m->displacement, m->index ? m->scale : 1, m->alias, m->nonalias, location});
+      return detail::NodeAccess::make_MachineOperand (
+        detail::NodeAccess::make_MachineMemory (type,
+                                                ir::detail::NodeAccess::base (*(m))
+                                                  ? detail::NodeAccess::optional_register (
+                                                      detail::NodeAccess::make_MachineRegister (
+                                                        registers.at (
+                                                          ir::detail::NodeAccess::base (*(m)))))
+                                                  : std::nullopt,
+                                                ir::detail::NodeAccess::index (*(m))
+                                                  ? detail::NodeAccess::optional_register (
+                                                      detail::NodeAccess::make_MachineRegister (
+                                                        registers.at (
+                                                          ir::detail::NodeAccess::index (*(m)))))
+                                                  : std::nullopt,
+                                                m->displacement,
+                                                ir::detail::NodeAccess::index (*(m)) ? m->scale : 1,
+                                                m->alias, m->nonalias,
+                                                ::mirnext::detail::borrow_optional (location)));
     }
-    if (auto v = operand.get<std::int64_t> ()) return MachineOperand (*v);
-    if (auto v = operand.get<std::uint64_t> ()) return MachineOperand (*v);
-    if (auto v = operand.get<float> ()) return MachineOperand (*v);
-    if (auto v = operand.get<double> ()) return MachineOperand (*v);
-    if (auto v = operand.get<long double> ()) {
+    if (auto v = ir::detail::operand_access (operand).get<std::int64_t> ())
+      return detail::NodeAccess::make_MachineOperand (*v);
+    if (auto v = ir::detail::operand_access (operand).get<std::uint64_t> ())
+      return detail::NodeAccess::make_MachineOperand (*v);
+    if (auto v = ir::detail::operand_access (operand).get<float> ())
+      return detail::NodeAccess::make_MachineOperand (*v);
+    if (auto v = ir::detail::operand_access (operand).get<double> ())
+      return detail::NodeAccess::make_MachineOperand (*v);
+    if (auto v = ir::detail::operand_access (operand).get<long double> ()) {
       if constexpr (sizeof (long double) == sizeof (double))
-        return MachineOperand (static_cast<double> (*v));
+        return detail::NodeAccess::make_MachineOperand (static_cast<double> (*v));
       else
-        return MachineOperand (*v);
+        return detail::NodeAccess::make_MachineOperand (*v);
     }
     return error ("string operands must be simplified before machine preparation");
   };
@@ -187,23 +219,23 @@ Result<std::unique_ptr<MachineFunction>> prepare_machine_ir (const ir::Function 
       auto &destination = *blocks.at (&block);
       if (insn.opcode () == ir::Opcode::Ret && !hardware_uses.empty ()) {
         auto use = rewriter.append (destination, MachinePseudoOpcode::Use, hardware_uses);
-        if (!use) return use.error ();
+        if (!(use).has_value ()) return use.error ();
       }
       std::vector<MachineOperand> operands;
       operands.reserve (insn.operands ().size ());
       for (auto &operand : insn.operands ()) {
         auto converted = convert (operand);
-        if (!converted) return converted.error ();
-        operands.push_back (std::move (*converted));
+        if (!(converted).has_value ()) return converted.error ();
+        operands.push_back (std::move ((converted).value ()));
       }
       auto added
         = rewriter.append (destination, target.opcode (insn.opcode ()), std::move (operands));
-      if (!added) return added.error ();
+      if (!(added).has_value ()) return added.error ();
     }
   // CFG construction verifies the complete machine function once. Repeating
   // that same ownership/type walk here would double symbol checks on large IR.
   auto cfg = MachineControlFlow::build (function);
-  if (!cfg) return cfg.error ();
-  return result;
+  if (!(cfg).has_value ()) return cfg.error ();
+  return std::move ((result).value ());
 }
 }  // namespace mirnext::codegen

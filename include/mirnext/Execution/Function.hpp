@@ -36,7 +36,7 @@ class FunctionHandle {
   std::optional<BlockCompilationStatistics> block_statistics () const;
   // Available only for a whole-function compiled definition, not BBV. Runtime
   // state belongs to this handle's loaded program, never to a copied engine-specific handle.
-  const codegen::CompiledFunction *artifact () const;
+  OptionalRef<const codegen::CompiledFunction> artifact () const;
   // Checked calls and generated adapters retain their loaded program, even
   // after the creating session has been destroyed. Mutation requires external
   // synchronization across all handles to the same program.
@@ -44,7 +44,16 @@ class FunctionHandle {
   Result<std::int64_t> call_i64 (std::span<const std::int64_t> = {}) const;
   Result<std::uint64_t> call_u64 (std::span<const std::uint64_t> = {}) const;
   Result<double> call_double (std::span<const double> = {}) const;
+#define MIRNEXT_FUNCTION_LIST_CALL(name, type)                         \
+  Result<type> name (std::initializer_list<type> args) const {         \
+    return name (std::span<const type> (args.begin (), args.size ())); \
+  }
+  MIRNEXT_FUNCTION_LIST_CALL (call_i64, std::int64_t)
+  MIRNEXT_FUNCTION_LIST_CALL (call_u64, std::uint64_t)
+  MIRNEXT_FUNCTION_LIST_CALL (call_double, double)
+#undef MIRNEXT_FUNCTION_LIST_CALL
   Result<NativeEntry> native_entry () const;
+  std::uintptr_t address () const;
 
  private:
   friend class ExecutionSession;

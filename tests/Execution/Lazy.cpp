@@ -1,4 +1,6 @@
 /* Licensed under the MIT License. Owning lazy JIT tests. */
+#include "mirnext/IR/Access.hpp"
+#include "mirnext/IR/Checked.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/Execution/Session.hpp"
@@ -12,9 +14,11 @@ using namespace mirnext;
 using namespace mirnext::ir;
 using namespace mirnext::execution;
 namespace {
-bool windows () { return target::TargetMachine::native ()->abi () == target::ABI::X86Windows; }
+bool windows () {
+  return target::TargetMachine::native ().value ().abi () == target::ABI::X86Windows;
+}
 auto parse (std::string text) {
-  if (target::TargetMachine::native ()->architecture () == target::Architecture::X86_64) {
+  if (target::TargetMachine::native ().value ().architecture () == target::Architecture::X86_64) {
     for (const auto &[from, to] :
          {std::pair{":r5", ":r9"}, std::pair{":v20", ":xmm3"}, std::pair{":r19", ":r12"}})
       for (auto position = text.find (from); position != std::string::npos;
@@ -22,11 +26,11 @@ auto parse (std::string text) {
         text.replace (position, std::string_view (from).size (), to);
   }
   auto c = serialization::parse_text (text);
-  INFO ((c ? "" : c.error ().message));
-  REQUIRE (c);
-  return std::move (*c);
+  INFO (((c).has_value () ? "" : c.error ().message));
+  REQUIRE ((c).has_value ());
+  return std::move ((c).value ());
 }
-ExecutionSession lazy (const Context &c, unsigned level = 2, LinkOptions options = {}) {
+ExecutionSession lazy (const Program &c, unsigned level = 2, LinkOptions options = {}) {
   options.compilation = JITCompilation::Lazy;
   auto s = ExecutionSession::
     create (c,
@@ -34,20 +38,20 @@ ExecutionSession lazy (const Context &c, unsigned level = 2, LinkOptions options
              = transforms::OptimizationOptions{.level = static_cast<transforms::OptimizationLevel> (
                                                  level)},
              .link = std::move (options)});
-  INFO ((s ? "" : s.error ().message));
-  REQUIRE (s);
-  return std::move (*s);
+  INFO (((s).has_value () ? "" : s.error ().message));
+  REQUIRE ((s).has_value ());
+  return std::move ((s).value ());
 }
 FunctionHandle find (const ExecutionSession &s, std::string_view module, std::string_view name) {
   auto f = s.find_function (module, name);
-  REQUIRE (f);
-  return *f;
+  REQUIRE ((f).has_value ());
+  return (f).value ();
 }
 auto call (const FunctionHandle &f, std::span<const ExecutionArgument> args = {}) {
   auto r = f.call (args);
-  INFO ((r ? "" : r.error ().message));
-  REQUIRE (r);
-  return std::move (*r);
+  INFO (((r).has_value () ? "" : r.error ().message));
+  REQUIRE ((r).has_value ());
+  return std::move ((r).value ());
 }
 }  // namespace
 TEST_CASE (
@@ -65,32 +69,32 @@ TEST_CASE (
     }});
     retained = find (s, "consumer", "entry");
     auto e = retained->native_entry ();
-    REQUIRE (e);
-    entry = std::move (*e);
+    REQUIRE ((e).has_value ());
+    entry = std::move ((e).value ());
     CHECK (retained->compilation_state () == FunctionCompilationState::Uncompiled);
-    CHECK_FALSE (retained->artifact ());
+    CHECK_FALSE ((retained->artifact ()).has_value ());
     CHECK (s.statistics ().compiled_functions == 0);
     CHECK (compilations == 0);
     CHECK (s.statistics ().code_batches == 1);
   }
   auto address = entry->address ();
   auto result = retained->call_i64 ();
-  INFO ((result ? "" : result.error ().message));
-  REQUIRE (result);
-  CHECK (*result == 42);
+  INFO (((result).has_value () ? "" : result.error ().message));
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == 42);
   CHECK (retained->compilation_state () == FunctionCompilationState::Compiled);
-  REQUIRE (retained->artifact ());
-  auto artifact = retained->artifact ();
-  REQUIRE (retained->compile ());
-  CHECK (retained->artifact () == artifact);
+  REQUIRE ((retained->artifact ()).has_value ());
+  auto artifact = retained->artifact ().get ();
+  REQUIRE ((retained->compile ()).has_value ());
+  CHECK (retained->artifact ().get () == artifact);
   CHECK (compilations == 1);
   auto another = retained->native_entry ();
-  REQUIRE (another);
-  CHECK (another->address () == address);
+  REQUIRE ((another).has_value ());
+  CHECK (another.value ().address () == address);
   retained.reset ();
   ExecutionInvocation invocation;
   CHECK (reinterpret_cast<std::int64_t (*) ()> (address) () == 64);
-  CHECK (invocation.status ());
+  CHECK ((invocation.status ()).has_value ());
   CHECK (compilations == 1);
 }
 TEST_CASE (
@@ -122,7 +126,7 @@ TEST_CASE (
         }
         if (windows () && kind == test::CallExample::MultipleResults) {
           auto unsupported = f.call (args);
-          REQUIRE_FALSE (unsupported);
+          REQUIRE_FALSE ((unsupported).has_value ());
           CHECK (
             unsupported.error ().message.find ("Windows does not support multiple return values")
             != std::string::npos);
@@ -136,11 +140,11 @@ TEST_CASE (
           CHECK (bytes[0] == 42);
         } else if (kind == test::CallExample::MultipleResults) {
           REQUIRE (values.size () == 2);
-          CHECK (*values[0].as_i64 () == 20);
-          CHECK (*values[1].as_i64 () == 22);
+          CHECK ((values[0].as_i64 ()).value () == 20);
+          CHECK ((values[1].as_i64 ()).value () == 22);
         } else {
           REQUIRE (values.size () == 1);
-          CHECK (*values[0].as_i64 () == 42);
+          CHECK ((values[0].as_i64 ()).value () == 42);
         }
       }
       if (windows () && kind == test::CallExample::MultipleResults) {
@@ -149,10 +153,10 @@ TEST_CASE (
       }
       CHECK (s.statistics ().compiled_functions == 1);
       // Compile a different record without invalidating an already borrowed artifact.
-      auto artifact = f.artifact ();
-      REQUIRE (find (s, "calls", "entry").compile ());
-      CHECK (f.artifact () == artifact);
-      REQUIRE (artifact->verify ());
+      auto artifact = f.artifact ().get ();
+      REQUIRE ((find (s, "calls", "entry").compile ()).has_value ());
+      CHECK (f.artifact ().get () == artifact);
+      REQUIRE ((artifact->verify ()).has_value ());
     }
 }
 TEST_CASE (
@@ -163,44 +167,47 @@ TEST_CASE (
     "h,20\ndmov v,22.0\ncall p,address,r\nret r\nendfunc\nunused:func i64\nret "
     "99\nendfunc\nendmodule\n");
   for (unsigned level = 0; level < 4; ++level) {
-    auto s = lazy (*c, level);
+    auto s = lazy (c, level);
     auto f = find (s, "m", "f"), callee = find (s, "m", "callee"), unused = find (s, "m", "unused");
     auto entry = callee.native_entry ();
-    REQUIRE (entry);
-    std::array args{ExecutionArgument (ScalarValue::pointer (entry->address ()))};
-    CHECK (*call (f, args)[0].as_i64 () == 42);
+    REQUIRE ((entry).has_value ());
+    std::array args{ExecutionArgument (ScalarValue::pointer (entry.value ().address ()))};
+    CHECK ((call (f, args)[0].as_i64 ()).value () == 42);
     CHECK (s.statistics ().compiled_functions == 2);
     CHECK (unused.compilation_state () == FunctionCompilationState::Uncompiled);
-    CHECK_FALSE (unused.artifact ());
-    CHECK (*call (f, args)[0].as_i64 () == 42);
+    CHECK_FALSE ((unused.artifact ()).has_value ());
+    CHECK ((call (f, args)[0].as_i64 ()).value () == 42);
     CHECK (s.statistics ().compiled_functions == 2);
   }
 }
 TEST_CASE (
   "lazy JIT preserves cold scalar register banks stack arguments and floating bit patterns") {
   for (unsigned count : {1u, 8u, 9u, 17u}) {
-    Context c;
-    auto m = c.create_module ("m");
-    REQUIRE (m);
-    auto f = (*m)->create_function ("f", {{Type (Type::Kind::F64)},
-                                          std::vector<Type> (count, Type (Type::Kind::F64))});
-    REQUIRE (f);
-    auto block = (*f)->create_block ();
-    REQUIRE (block);
-    IRBuilder b (**block);
-    REQUIRE (b.ret (Operand (*(*f)->arguments ().back ())));
+    Program c;
+    auto m = mirnext::ir::detail::access (c).create_module ("m");
+    REQUIRE ((m).has_value ());
+    auto f = mirnext::ir::detail::access (((m)).value ())
+               .create_function ("f", {{Type (Type::Kind::F64)},
+                                       std::vector<Type> (count, Type (Type::Kind::F64))});
+    REQUIRE ((f).has_value ());
+    auto block = mirnext::ir::detail::access (((f)).value ()).create_block ();
+    REQUIRE ((block).has_value ());
+    InstructionBuilder b ((block).value ());
+    REQUIRE ((b.ret (Operand (
+                *mirnext::ir::detail::ReferenceAccess::pointers (f.value ().arguments ()).back ())))
+               .has_value ());
     auto s = lazy (c);
     auto entry = find (s, "m", "f");
     const auto bits = UINT64_C (0xfff8000000012345);
     std::vector<double> args (count, 1);
     args.back () = std::bit_cast<double> (bits);
     auto result = entry.call_double (args);
-    REQUIRE (result);
-    CHECK (std::bit_cast<std::uint64_t> (*result) == bits);
+    REQUIRE ((result).has_value ());
+    CHECK (std::bit_cast<std::uint64_t> ((result).value ()) == bits);
     args.back () = 42;
     result = entry.call_double (args);
-    REQUIRE (result);
-    CHECK (*result == 42);
+    REQUIRE ((result).has_value ());
+    CHECK ((result).value () == 42);
     CHECK (s.statistics ().compiled_functions == 1);
   }
 }
@@ -211,41 +218,42 @@ TEST_CASE ("lazy JIT cold entries preserve all five block ABI classes and mixed 
       auto c = parse (
         "m:module\nf:func i64," + type
         + ":16(a)\nlocal i64:r\nmov r,i64:0(a)\nmov i64:0(a),99\nret r\nendfunc\nendmodule\n");
-      auto s = lazy (*c, level);
+      auto s = lazy (c, level);
       auto f = find (s, "m", "f");
       std::array<std::int64_t, 2> bytes{42, 7};
       auto data = std::as_bytes (std::span (bytes));
       const auto abi = static_cast<Type::BlockClass> (category);
       std::array invalid{ExecutionArgument::block (data.first (8), abi)};
-      CHECK_FALSE (f.call (invalid));
+      CHECK_FALSE ((f.call (invalid)).has_value ());
       CHECK (f.compilation_state () == FunctionCompilationState::Uncompiled);
       CHECK (s.host_entry_count () == 0);
       std::array args{ExecutionArgument::block (data, abi)};
-      CHECK (*call (f, args)[0].as_i64 () == 42);
+      CHECK ((call (f, args)[0].as_i64 ()).value () == 42);
       CHECK (bytes[0] == 42);
       CHECK (s.statistics ().compiled_functions == 1);
     }
     auto c = parse (
       "m:module\nf:func i64,d,f,ld,i8:x,u16:y,d:a,f:b,ld:c\nlocal i64:r\nadd r,x,y\nret "
       "r,a,b,c\nendfunc\nendmodule\n");
-    auto s = lazy (*c, level);
+    auto s = lazy (c, level);
     const auto bits = UINT64_C (0x7ff8000000000042);
     std::array args{ExecutionArgument (255), ExecutionArgument (UINT64_C (0xffff)),
                     ExecutionArgument (std::bit_cast<double> (bits)), ExecutionArgument (-0.0f),
                     ExecutionArgument (2.5L)};
     if (windows ()) {
       auto failed = find (s, "m", "f").call (args);
-      REQUIRE_FALSE (failed);
+      REQUIRE_FALSE ((failed).has_value ());
       CHECK (failed.error ().message.find ("Windows does not support multiple return values")
              != std::string::npos);
       continue;
     }
     auto values = call (find (s, "m", "f"), args);
     REQUIRE (values.size () == 4);
-    CHECK (*values[0].as_i64 () == 65534);
-    CHECK (std::bit_cast<std::uint64_t> (*values[1].as_double ()) == bits);
-    CHECK (std::bit_cast<std::uint32_t> (*values[2].as_float ()) == UINT32_C (0x80000000));
-    CHECK (*values[3].as_long_double () == 2.5L);
+    CHECK ((values[0].as_i64 ()).value () == 65534);
+    CHECK (std::bit_cast<std::uint64_t> ((values[1].as_double ()).value ()) == bits);
+    CHECK (std::bit_cast<std::uint32_t> ((values[2].as_float ()).value ())
+           == UINT32_C (0x80000000));
+    CHECK ((values[3].as_long_double ()).value () == 2.5L);
   }
 }
 TEST_CASE ("caller-clobbered module bindings remain implicit native call inputs at every level") {
@@ -259,20 +267,19 @@ TEST_CASE ("caller-clobbered module bindings remain implicit native call inputs 
   for (auto policy : {JITCompilation::Eager, JITCompilation::Lazy})
     for (unsigned level = 0; level < 4; ++level) {
       auto s = ExecutionSession::
-        create (*c,
-                {.optimization
-                 = transforms::OptimizationOptions{.level
-                                                   = static_cast<transforms::OptimizationLevel> (
-                                                     level)},
-                 .link = {.compilation = policy}});
-      INFO ((s ? "" : s.error ().message));
-      REQUIRE (s);
-      auto f = find (*s, "m", "entry");
+        create (c, {.optimization
+                    = transforms::OptimizationOptions{.level
+                                                      = static_cast<transforms::OptimizationLevel> (
+                                                        level)},
+                    .link = {.compilation = policy}});
+      INFO (((s).has_value () ? "" : s.error ().message));
+      REQUIRE ((s).has_value ());
+      auto f = find ((s).value (), "m", "entry");
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         auto result = f.call_i64 ();
-        INFO ((result ? "" : result.error ().message));
-        REQUIRE (result);
-        CHECK (*result == 42);
+        INFO (((result).has_value () ? "" : result.error ().message));
+        REQUIRE ((result).has_value ());
+        CHECK ((result).value () == 42);
       }
     }
 }
@@ -284,28 +291,28 @@ TEST_CASE (
     "previous,n,1\ncall p,fact,result,previous\nmul result,result,n\nret result\ndone:ret "
     "1\nendfunc\nendmodule\n");
   for (unsigned level = 0; level < 4; ++level) {
-    auto s = lazy (*c, level);
+    auto s = lazy (c, level);
     auto alias = find (s, "a", "fact"), definition = find (s, "b", "fact");
     auto a = alias.native_entry (), b = definition.native_entry ();
-    REQUIRE (a);
-    REQUIRE (b);
-    CHECK (a->address () == b->address ());
+    REQUIRE ((a).has_value ());
+    REQUIRE ((b).has_value ());
+    CHECK (a.value ().address () == b.value ().address ());
     auto slot = s.find_data ("a", "slot");
-    REQUIRE (slot);
+    REQUIRE ((slot).has_value ());
     std::uintptr_t address;
-    std::memcpy (&address, slot->bytes ().data (), sizeof address);
-    CHECK (address == a->address ());
+    std::memcpy (&address, slot.value ().bytes ().data (), sizeof address);
+    CHECK (address == a.value ().address ());
     CHECK (s.statistics ().compiled_functions == 0);
     std::array<std::int64_t, 1> args{6};
     auto value = alias.call_i64 (args);
-    REQUIRE (value);
-    CHECK (*value == 720);
+    REQUIRE ((value).has_value ());
+    CHECK ((value).value () == 720);
     CHECK (definition.compilation_state () == FunctionCompilationState::Compiled);
-    CHECK (alias.artifact () == definition.artifact ());
+    CHECK (alias.artifact ().get () == definition.artifact ().get ());
     CHECK (s.statistics ().compiled_functions == 1);
     ExecutionInvocation invocation;
     CHECK (reinterpret_cast<std::int64_t (*) (std::int64_t)> (address) (5) == 120);
-    CHECK (invocation.status ());
+    CHECK ((invocation.status ()).has_value ());
     CHECK (s.statistics ().compiled_functions == 1);
   }
 }
@@ -317,21 +324,21 @@ TEST_CASE (
                    "continuation\nendfunc\nentry:func i64\nglobal i64:continuation:r19\nladdr "
                    "continuation,done\njcall p,callee\nret -1\ndone:ret 42\nendfunc\n")
       + (label_data ? "slot:lref done,0\n" : "") + "endmodule\n");
-    auto s = lazy (*c);
+    auto s = lazy (c);
     auto callee = find (s, "m", "callee"), entry = find (s, "m", "entry");
     CHECK (callee.compilation_state () == FunctionCompilationState::Compiled);
-    CHECK_FALSE (callee.native_entry ());
+    CHECK_FALSE ((callee.native_entry ()).has_value ());
     CHECK (
       entry.compilation_state ()
       == (label_data ? FunctionCompilationState::Compiled : FunctionCompilationState::Uncompiled));
     if (label_data) {
       auto data = s.find_data ("m", "slot");
-      REQUIRE (data);
+      REQUIRE ((data).has_value ());
       std::uintptr_t address;
-      std::memcpy (&address, data->bytes ().data (), sizeof address);
+      std::memcpy (&address, data.value ().bytes ().data (), sizeof address);
       auto gate = entry.native_entry ();
-      REQUIRE (gate);
-      const auto artifact = entry.artifact ();
+      REQUIRE ((gate).has_value ());
+      const auto artifact = entry.artifact ().get ();
       REQUIRE (artifact);
       bool found = false;
       for (auto &label : artifact->labels ())
@@ -340,28 +347,28 @@ TEST_CASE (
           CHECK (std::memcmp (reinterpret_cast<const void *> (address),
                               artifact->bytes ().data () + label.offset, 4)
                  == 0);
-          CHECK (address != gate->address () + label.offset);
+          CHECK (address != gate.value ().address () + label.offset);
           found = true;
         }
       CHECK (found);
     }
     auto result = entry.call_i64 ();
-    INFO ((result ? "" : result.error ().message));
-    REQUIRE (result);
-    CHECK (*result == 42);
+    INFO (((result).has_value () ? "" : result.error ().message));
+    REQUIRE ((result).has_value ());
+    CHECK ((result).value () == 42);
     CHECK (s.statistics ().compiled_functions == 2);
   }
 }
 TEST_CASE ("lazy JIT expression initializers materialize only their required native execution") {
   for (unsigned level = 0; level < 4; ++level) {
-    auto c = test::variable_example (test::VariableExample::Expression);
+    auto c = test::variable_example (test::VariableExample::ExpressionInitializer);
     auto s = lazy (*c, level);
     CHECK (s.statistics ().expressions == 1);
     auto entry = find (s, "consumer", "entry");
     CHECK (entry.compilation_state () == FunctionCompilationState::Uncompiled);
     auto result = entry.call_i64 ();
-    REQUIRE (result);
-    CHECK (*result == 42);
+    REQUIRE ((result).has_value ());
+    CHECK ((result).value () == 42);
   }
 }
 TEST_CASE ("lazy JIT propagates nested cold failures and retries only the missing callee") {
@@ -370,32 +377,34 @@ TEST_CASE ("lazy JIT propagates nested cold failures and retries only the missin
     "i64:r\ncall p,address,r\nret r\nendfunc\nendmodule\n");
   bool reject = true;
   unsigned attempts = 0;
-  auto s = lazy (*c, 2, {.compilation_observer = [&] (auto &event) -> Result<void> {
-    if (event.function.name () == "callee"
-        && event.stage == codegen::CompilationStage::PrepareMachineIR) {
-      ++attempts;
-      if (reject) return Error{ErrorCode::UnknownName, "nested lazy compilation failed"};
-    }
-    return {};
-  }});
+  auto s = lazy (c, 2, {.compilation_observer = [&] (auto &event) -> Result<void> {
+                   if (event.function.name () == "callee"
+                       && event.stage == codegen::CompilationStage::PrepareMachineIR) {
+                     ++attempts;
+                     if (reject)
+                       return Error{ErrorCode::UnknownName, "nested lazy compilation failed"};
+                   }
+                   return {};
+                 }});
   auto entry = find (s, "m", "entry"), callee = find (s, "m", "callee");
   auto gate = callee.native_entry ();
-  REQUIRE (gate);
-  std::array<std::int64_t, 1> args{std::bit_cast<std::int64_t> (std::uint64_t (gate->address ()))};
+  REQUIRE ((gate).has_value ());
+  std::array<std::int64_t, 1> args{
+    std::bit_cast<std::int64_t> (std::uint64_t (gate.value ().address ()))};
   auto failed = entry.call_i64 (args);
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("nested lazy compilation failed") != std::string::npos);
   CHECK (s.statistics ().compiled_functions == 1);
   CHECK (entry.compilation_state () == FunctionCompilationState::Compiled);
   CHECK (callee.compilation_state () == FunctionCompilationState::Uncompiled);
-  auto artifact = entry.artifact ();
+  auto artifact = entry.artifact ().get ();
   reject = false;
   auto result = entry.call_i64 (args);
-  REQUIRE (result);
-  CHECK (*result == 42);
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == 42);
   CHECK (attempts == 2);
   CHECK (s.statistics ().compiled_functions == 2);
-  CHECK (entry.artifact () == artifact);
+  CHECK (entry.artifact ().get () == artifact);
 }
 TEST_CASE (
   "lazy JIT compilation failures retain cold state release mappings and retry without user "
@@ -426,7 +435,7 @@ TEST_CASE (
   bool reject = true;
   unsigned attempts = 0;
   std::optional<FunctionHandle> f;
-  std::optional<LinkedData> data;
+  std::optional<mirnext::execution::DataHandle> data;
   {
     auto c = test::variable_example (test::VariableExample::Initialized);
     auto s = lazy (*c, 2,
@@ -437,7 +446,7 @@ TEST_CASE (
                         ++attempts;
                         CHECK (f->compilation_state () == FunctionCompilationState::Compiling);
                         auto recursive = f->compile ();
-                        REQUIRE_FALSE (recursive);
+                        REQUIRE_FALSE ((recursive).has_value ());
                         CHECK (recursive.error ().message.find ("recursive compilation")
                                != std::string::npos);
                         if (reject)
@@ -447,8 +456,8 @@ TEST_CASE (
                     }});
     f = find (s, "consumer", "entry");
     auto d = s.find_data ("consumer", "value");
-    REQUIRE (d);
-    data = std::move (*d);
+    REQUIRE ((d).has_value ());
+    data = std::move ((d).value ());
   }
   auto read = [&] {
     std::int64_t v;
@@ -456,18 +465,18 @@ TEST_CASE (
     return v;
   };
   auto failed = f->call_i64 ();
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("lazy observer failure") != std::string::npos);
   CHECK (read () == 20);
   CHECK (f->compilation_state () == FunctionCompilationState::Uncompiled);
-  CHECK_FALSE (f->artifact ());
+  CHECK_FALSE ((f->artifact ()).has_value ());
   CHECK (attempts == 1);
   CHECK (provider->maps == 2);
   CHECK (provider->unmaps == 0);
   reject = false;
   provider->fail = true;
   failed = f->call_i64 ();
-  REQUIRE_FALSE (failed);
+  REQUIRE_FALSE ((failed).has_value ());
   CHECK (failed.error ().message.find ("lazy publication failure") != std::string::npos);
   CHECK (read () == 20);
   CHECK (f->compilation_state () == FunctionCompilationState::Uncompiled);
@@ -475,12 +484,12 @@ TEST_CASE (
   CHECK (provider->unmaps == 1);
   provider->fail = false;
   auto result = f->call_i64 ();
-  REQUIRE (result);
-  CHECK (*result == 42);
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == 42);
   CHECK (attempts == 3);
   result = f->call_i64 ();
-  REQUIRE (result);
-  CHECK (*result == 64);
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == 64);
   CHECK (attempts == 3);
   CHECK (provider->maps == 4);
   f.reset ();
@@ -488,16 +497,19 @@ TEST_CASE (
   CHECK (provider->unmaps == provider->maps);
 }
 TEST_CASE ("lazy JIT rejects interpreter policies and invalid entry addresses") {
-  Context c;
+  Program c;
   auto s = ExecutionSession::create (c, {.mode = ExecutionMode::Interpreter,
                                          .link = {.compilation = JITCompilation::Lazy}});
-  CHECK_FALSE (s);
-  CHECK_FALSE (InterpretedProgram::create (c, {.link = {.compilation = JITCompilation::Lazy}}));
+  CHECK_FALSE ((s).has_value ());
+  CHECK_FALSE ((ExecutionSession::create (c, {.mode = ExecutionMode::Interpreter,
+                                              .link = {.compilation = JITCompilation::Lazy}}))
+                 .has_value ());
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
-  CHECK_FALSE (codegen::make_lazy_entry (*target, {0, 0, 0}));
-  auto p = LinkedProgram::create (c, {.link = {.compilation = static_cast<JITCompilation> (99)}});
-  CHECK_FALSE (p);
+  REQUIRE ((target).has_value ());
+  CHECK_FALSE ((codegen::make_lazy_entry ((target).value (), {0, 0, 0})).has_value ());
+  auto p
+    = ExecutionSession::create (c, {.link = {.compilation = static_cast<JITCompilation> (99)}});
+  CHECK_FALSE ((p).has_value ());
 }
 TEST_CASE (
   "lazy failures preserve zero one and two long-double result stacks across repeated retries") {
@@ -517,36 +529,37 @@ TEST_CASE (
       auto c = parse (text);
       bool reject = true;
       unsigned attempts = 0;
-      auto s = lazy (*c, level, {.compilation_observer = [&] (auto &event) -> Result<void> {
-        if (event.function.name () == "f"
-            && event.stage == codegen::CompilationStage::PrepareMachineIR) {
-          ++attempts;
-          if (reject) return Error{ErrorCode::InvalidArgument, "cold extended-result failure"};
-        }
-        return {};
-      }});
+      auto s = lazy (c, level, {.compilation_observer = [&] (auto &event) -> Result<void> {
+                       if (event.function.name () == "f"
+                           && event.stage == codegen::CompilationStage::PrepareMachineIR) {
+                         ++attempts;
+                         if (reject)
+                           return Error{ErrorCode::InvalidArgument, "cold extended-result failure"};
+                       }
+                       return {};
+                     }});
       auto f = find (s, "m", "f");
       if (windows () && count == 2) {
         auto failed = f.call ();
-        REQUIRE_FALSE (failed);
+        REQUIRE_FALSE ((failed).has_value ());
         CHECK (failed.error ().message.find ("Windows does not support multiple return values")
                != std::string::npos);
         continue;
       }
       for (unsigned n = 0; n < 20; ++n) {
         auto failed = f.call ();
-        REQUIRE_FALSE (failed);
+        REQUIRE_FALSE ((failed).has_value ());
         CHECK (failed.error ().message.find ("cold extended-result failure") != std::string::npos);
         CHECK (f.compilation_state () == FunctionCompilationState::Uncompiled);
-        CHECK_FALSE (f.artifact ());
+        CHECK_FALSE ((f.artifact ()).has_value ());
       }
       CHECK (attempts == 20);
       reject = false;
       for (unsigned repeat = 0; repeat < 2; ++repeat) {
         auto values = call (f);
         REQUIRE (values.size () == count);
-        if (count) CHECK (*values[0].as_long_double () == 2.5L);
-        if (count == 2) CHECK (*values[1].as_long_double () == 3.5L);
+        if (count) CHECK ((values[0].as_long_double ()).value () == 2.5L);
+        if (count == 2) CHECK ((values[1].as_long_double ()).value () == 3.5L);
       }
       CHECK (attempts == 21);
       CHECK (f.compilation_state () == FunctionCompilationState::Compiled);
@@ -555,15 +568,16 @@ TEST_CASE (
 TEST_CASE (
   "lazy JIT publishes one shared resolver rather than duplicating register saves per function") {
   constexpr unsigned count = 128;
-  Context c;
-  auto m = c.create_module ("many");
-  REQUIRE (m);
+  Program c;
+  auto m = mirnext::ir::detail::access (c).create_module ("many");
+  REQUIRE ((m).has_value ());
   for (unsigned n = 0; n < count; ++n) {
-    auto f = (*m)->create_function ("f" + std::to_string (n), {{Type::i64 ()}, {}});
-    REQUIRE (f);
-    auto b = (*f)->create_block ();
-    REQUIRE (b);
-    REQUIRE (IRBuilder (**b).ret (std::int64_t (n)));
+    auto f = mirnext::ir::detail::access (((m)).value ())
+               .create_function ("f" + std::to_string (n), {{Type::i64 ()}, {}});
+    REQUIRE ((f).has_value ());
+    auto b = mirnext::ir::detail::access (((f)).value ()).create_block ();
+    REQUIRE ((b).has_value ());
+    REQUIRE ((InstructionBuilder ((b).value ()).ret (std::int64_t (n))).has_value ());
   }
   auto s = lazy (c);
   CHECK (s.statistics ().functions == count);
@@ -572,8 +586,8 @@ TEST_CASE (
   CHECK (s.statistics ().code_bytes <= count * 64 + 1024);
   auto f = find (s, "many", "f127");
   auto result = f.call_i64 ();
-  REQUIRE (result);
-  CHECK (*result == 127);
+  REQUIRE ((result).has_value ());
+  CHECK ((result).value () == 127);
   CHECK (s.statistics ().compiled_functions == 1);
   CHECK (find (s, "many", "f0").compilation_state () == FunctionCompilationState::Uncompiled);
 }

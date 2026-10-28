@@ -1,4 +1,5 @@
 /* Licensed under the MIT License. Live block state across native cold entries. */
+#include "mirnext/CodeGen/Access.hpp"
 #define DOCTEST_CONFIG_NO_EXCEPTIONS_BUT_WITH_ALL_ASSERTS
 #include <doctest/doctest.h>
 #include "mirnext/CodeGen/BlockEntry.hpp"
@@ -17,9 +18,9 @@ TEST_CASE (
   "x86 block resolver frames protect red zones and recover arbitrary incoming stack alignment") {
   for (auto abi : {target::ABI::X86SysV, target::ABI::X86Windows}) {
     auto layout = codegen::detail::x86_block_resolver_frame (abi);
-    REQUIRE (layout);
-    auto &f = layout->saved;
-    CHECK (layout->red_zone_bytes == (abi == target::ABI::X86SysV ? 128 : 0));
+    REQUIRE ((layout).has_value ());
+    auto &f = layout.value ().saved;
+    CHECK (layout.value ().red_zone_bytes == (abi == target::ABI::X86SysV ? 128 : 0));
     CHECK (f.frame_bytes % 16 == 0);
     CHECK (f.fx_offset % 16 == 0);
     CHECK (f.metadata_offset + 8 <= f.frame_bytes);
@@ -30,15 +31,16 @@ TEST_CASE (
       for (unsigned n = 0; n < 8; ++n) CHECK (occupied.insert (save.offset + n).second);
     for (unsigned n = 0; n < 8; ++n) CHECK (occupied.insert (f.metadata_offset + n).second);
     for (auto original : {0x100000000ull, 0x100000008ull}) {
-      auto flags_sp = original - layout->red_zone_bytes - 8;
+      auto flags_sp = original - layout.value ().red_zone_bytes - 8;
       auto callback_sp = (flags_sp & ~15ull) - f.frame_bytes;
       CHECK (callback_sp % 16 == 0);
       CHECK (callback_sp + f.frame_bytes <= flags_sp);
-      CHECK (flags_sp + 8 + layout->red_zone_bytes == original);
-      CHECK (flags_sp + 8 <= original - layout->red_zone_bytes);
+      CHECK (flags_sp + 8 + layout.value ().red_zone_bytes == original);
+      CHECK (flags_sp + 8 <= original - layout.value ().red_zone_bytes);
     }
   }
-  CHECK_FALSE (codegen::detail::x86_block_resolver_frame (target::ABI::AArch64Linux));
+  CHECK_FALSE (
+    (codegen::detail::x86_block_resolver_frame (target::ABI::AArch64Linux)).has_value ());
 }
 namespace {
 struct alignas (16) State {
@@ -87,11 +89,11 @@ std::uintptr_t resolve_block (Descriptor *d) {
   if (d->fail) return 0;
   if (d->compile) {
     auto compiled = d->compile ();
-    if (!compiled) {
+    if (!(compiled).has_value ()) {
       d->error = compiled.error ();
       return 0;
     }
-    return d->destination = *compiled;
+    return d->destination = (compiled).value ();
   }
   return d->destination = d->target;
 }
@@ -246,13 +248,13 @@ TEST_CASE (
   "native block entries preserve full live state dynamic stacks flags and red zones on cold warm "
   "failure and retry") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   struct Restore {
     std::fenv_t env;
     Restore () { std::fegetenv (&env); }
     ~Restore () { std::fesetenv (&env); }
   } restore;
-  const bool arm = target->architecture () == target::Architecture::AArch64;
+  const bool arm = target.value ().architecture () == target::Architecture::AArch64;
   for (unsigned extra : (arm ? std::array{0u, 16u, 96u, 112u} : std::array{0u, 8u, 96u, 104u})) {
     CAPTURE (extra);
     Probe probe;
@@ -260,41 +262,44 @@ TEST_CASE (
     for (unsigned n = 0; n < 32; ++n)
       probe.before.vectors[n] = {0x3ff0000000000000ull + n, 0x1234567800000000ull + n};
     auto make_probe = [&] (std::uintptr_t gate) {
-      return arm ? aarch64_probe (*target, probe, gate, extra)
-                 : x86_probe (*target, probe, gate, extra);
+      return arm ? aarch64_probe ((target).value (), probe, gate, extra)
+                 : x86_probe ((target).value (), probe, gate, extra);
     };
     auto p = make_probe (4);
-    auto r = make_block_resolver (*target, reinterpret_cast<std::uintptr_t> (&resolve_block), 4);
-    REQUIRE (r);
-    const std::array sizes{p.bytes.size (), r->size (), block_entry_bytes};
+    auto r = make_block_resolver ((target).value (),
+                                  reinterpret_cast<std::uintptr_t> (&resolve_block), 4);
+    REQUIRE ((r).has_value ());
+    const std::array sizes{p.bytes.size (), r.value ().size (), block_entry_bytes};
     auto reserved = CodeMemory ().reserve (sizes);
-    REQUIRE (reserved);
-    auto probe_address = reserved->address (0), resolver_address = reserved->address (1),
-         gate_address = reserved->address (2);
-    REQUIRE (probe_address);
-    REQUIRE (resolver_address);
-    REQUIRE (gate_address);
-    descriptor.target = *probe_address + p.success;
-    descriptor.destination = *gate_address + block_entry_cold_offset;
-    p = make_probe (*gate_address);
-    r = make_block_resolver (*target, reinterpret_cast<std::uintptr_t> (&resolve_block),
-                             *probe_address + p.failure);
-    REQUIRE (r);
-    auto gate
-      = make_block_entry (*target,
-                          {reinterpret_cast<std::uintptr_t> (&descriptor.destination),
-                           reinterpret_cast<std::uintptr_t> (&descriptor), *resolver_address});
-    REQUIRE (gate);
-    CHECK (gate->size () == block_entry_bytes);
-    const std::array<std::span<const std::uint8_t>, 3> bytes{p.bytes, *r, *gate};
-    auto code = reserved->publish (bytes);
-    REQUIRE (code);
-    auto call = reinterpret_cast<void (*) ()> ((*code)[0].address ());
+    REQUIRE ((reserved).has_value ());
+    auto probe_address = reserved.value ().address (0),
+         resolver_address = reserved.value ().address (1),
+         gate_address = reserved.value ().address (2);
+    REQUIRE ((probe_address).has_value ());
+    REQUIRE ((resolver_address).has_value ());
+    REQUIRE ((gate_address).has_value ());
+    descriptor.target = (probe_address).value () + p.success;
+    descriptor.destination = (gate_address).value () + block_entry_cold_offset;
+    p = make_probe ((gate_address).value ());
+    r = make_block_resolver ((target).value (), reinterpret_cast<std::uintptr_t> (&resolve_block),
+                             (probe_address).value () + p.failure);
+    REQUIRE ((r).has_value ());
+    auto gate = make_block_entry ((target).value (),
+                                  {reinterpret_cast<std::uintptr_t> (&descriptor.destination),
+                                   reinterpret_cast<std::uintptr_t> (&descriptor),
+                                   (resolver_address).value ()});
+    REQUIRE ((gate).has_value ());
+    CHECK (gate.value ().size () == block_entry_bytes);
+    const std::array<std::span<const std::uint8_t>, 3> bytes{p.bytes, (r).value (),
+                                                             (gate).value ()};
+    auto code = reserved.value ().publish (bytes);
+    REQUIRE ((code).has_value ());
+    auto call = reinterpret_cast<void (*) ()> (((code).value ())[0].address ());
     // Cold, warm, failure (still cold), successful retry, then warm again.
     for (unsigned iteration = 0; iteration < 5; ++iteration) {
       CAPTURE (iteration);
       if (iteration == 2) {
-        descriptor.destination = *gate_address + block_entry_cold_offset;
+        descriptor.destination = (gate_address).value () + block_entry_cold_offset;
         descriptor.fail = true;
       }
       if (iteration == 3) descriptor.fail = false;
@@ -315,9 +320,9 @@ TEST_CASE (
         // values that are live across the callback rather than ABI results.
         CHECK (std::equal (probe.before.floating.begin (), probe.before.floating.begin () + 160,
                            probe.after.floating.begin ()));
-        if (target->abi () == target::ABI::X86SysV) CHECK (probe.before.floating[4] != 0);
+        if (target.value ().abi () == target::ABI::X86SysV) CHECK (probe.before.floating[4] != 0);
       }
-      for (auto &info : target->registers ())
+      for (auto &info : target.value ().registers ())
         if (info.bank == target::RegisterBank::Integer && !info.reserved) {
           auto n = info.reg.encoding ();
           CAPTURE (n);
@@ -327,36 +332,37 @@ TEST_CASE (
         CAPTURE (n);
         CHECK (probe.before.vectors[n] == probe.after.vectors[n]);
       }
-      if (target->abi () == target::ABI::X86SysV)
+      if (target.value ().abi () == target::ABI::X86SysV)
         for (unsigned n = 0; n < 16; ++n) CHECK (probe.red_zone[n] == 0x7654321000000000ull + n);
       CHECK (std::fegetround () == FE_TONEAREST);
       CHECK (std::fetestexcept (FE_INEXACT) == 0);
       CHECK (descriptor.destination
-             == (iteration == 2 ? *gate_address + block_entry_cold_offset : descriptor.target));
+             == (iteration == 2 ? (gate_address).value () + block_entry_cold_offset
+                                : descriptor.target));
     }
   }
 }
 TEST_CASE (
   "block entry validation rejects missing and misaligned recovery and dispatch addresses") {
   auto t = target::TargetMachine::native ();
-  REQUIRE (t);
-  CHECK_FALSE (make_block_resolver (*t, 0, 4));
-  CHECK_FALSE (make_block_resolver (*t, 4, 0));
-  if (t->architecture () == target::Architecture::AArch64) {
-    CHECK_FALSE (make_block_resolver (*t, 4, 3));
-    CHECK_FALSE (make_block_resolver (*t, 3, 4));
+  REQUIRE ((t).has_value ());
+  CHECK_FALSE ((make_block_resolver ((t).value (), 0, 4)).has_value ());
+  CHECK_FALSE ((make_block_resolver ((t).value (), 4, 0)).has_value ());
+  if (t.value ().architecture () == target::Architecture::AArch64) {
+    CHECK_FALSE ((make_block_resolver ((t).value (), 4, 3)).has_value ());
+    CHECK_FALSE ((make_block_resolver ((t).value (), 3, 4)).has_value ());
   }
   for (auto a : {BlockEntryAddresses{0, 8, 4}, BlockEntryAddresses{1, 8, 4},
                  BlockEntryAddresses{8, 0, 4}, BlockEntryAddresses{8, 8, 0}})
-    CHECK_FALSE (make_block_entry (*t, a));
-  if (t->architecture () == target::Architecture::AArch64)
-    CHECK_FALSE (make_block_entry (*t, {8, 8, 3}));
+    CHECK_FALSE ((make_block_entry ((t).value (), a)).has_value ());
+  if (t.value ().architecture () == target::Architecture::AArch64)
+    CHECK_FALSE ((make_block_entry ((t).value (), {8, 8, 3})).has_value ());
 }
 TEST_CASE (
   "native BBV cold callbacks encode publish and redirect independently selected stack-using "
   "fragments once") {
   auto target = target::TargetMachine::native ();
-  REQUIRE (target);
+  REQUIRE ((target).has_value ());
   struct Restore {
     std::fenv_t env;
     Restore () { std::fegetenv (&env); }
@@ -373,25 +379,27 @@ TEST_CASE (
         "m:module\nf:func i64,i64:x\nlocal p:stack,i64:r\nalloca stack,64\nmov i64:(stack),x\nbt "
         "yes,x\nmov r,i64:(stack)\nadd r,r,17\njmp done\nyes:mov r,i64:(stack)\nadd "
         "r,r,41\ndone:ret r\nendfunc\nendmodule\n");
-      REQUIRE (c);
-      auto p = BBVPreparation::prepare (*(*c)->modules ().begin ()->functions ().begin (), *target,
-                                        {.optimization_level = level});
-      INFO ((p ? "" : p.error ().message));
-      REQUIRE (p);
-      return std::move (*p);
+      REQUIRE ((c).has_value ());
+      auto p = BBVPreparation::prepare (*c.value ().modules ().begin ()->functions ().begin (),
+                                        (target).value (), {.optimization_level = level});
+      INFO (((p).has_value () ? "" : p.error ().message));
+      REQUIRE ((p).has_value ());
+      return std::move ((p).value ());
     }();
     auto program = BBVProgram::create (std::move (prep));
-    REQUIRE (program);
-    auto props = BBVProperties::create (program->preparation ().function ());
-    REQUIRE (props);
+    REQUIRE ((program).has_value ());
+    auto props = BBVProperties::create (program.value ().preparation ().function ());
+    REQUIRE ((props).has_value ());
     auto version
-      = program->request_version (*program->preparation ().blocks ().begin (), *props, true);
-    REQUIRE (version);
-    auto first = encode_bbv (*program, *version->version);
-    REQUIRE (first);
+      = program.value ().request_version (*program.value ().preparation ().blocks ().begin (),
+                                          (props).value (), true);
+    REQUIRE ((version).has_value ());
+    auto first = encode_bbv ((program).value (),
+                             *mirnext::codegen::detail::NodeAccess::version (((version)).value ()));
+    REQUIRE ((first).has_value ());
     std::size_t count = 0;
     const BBVBlock *terminal = nullptr;
-    for (auto &b : program->preparation ().blocks ()) {
+    for (auto &b : program.value ().preparation ().blocks ()) {
       ++count;
       terminal = &b;
     }
@@ -399,40 +407,48 @@ TEST_CASE (
     // The explicit common epilogue is a safe test-only recovery continuation.
     // This fixture has no properties, so reserving its version early has no
     // effect on specialization. General session recovery is separate work.
-    auto recovery_version = program->request_version (*terminal, *props);
-    REQUIRE (recovery_version);
-    auto recovery = encode_bbv (*program, *recovery_version->version);
-    REQUIRE (recovery);
-    REQUIRE (recovery->successors ().empty ());
-    auto resolver
-      = make_block_resolver (*target, reinterpret_cast<std::uintptr_t> (&resolve_block), 4);
-    REQUIRE (resolver);
-    std::vector<std::size_t> sizes{first->bytes ().size (), resolver->size (),
-                                   recovery->bytes ().size ()};
+    auto recovery_version = program.value ().request_version (*terminal, (props).value ());
+    REQUIRE ((recovery_version).has_value ());
+    auto recovery
+      = encode_bbv ((program).value (),
+                    *mirnext::codegen::detail::NodeAccess::version (((recovery_version)).value ()));
+    REQUIRE ((recovery).has_value ());
+    REQUIRE (recovery.value ().successors ().empty ());
+    auto resolver = make_block_resolver ((target).value (),
+                                         reinterpret_cast<std::uintptr_t> (&resolve_block), 4);
+    REQUIRE ((resolver).has_value ());
+    std::vector<std::size_t> sizes{first.value ().bytes ().size (), resolver.value ().size (),
+                                   recovery.value ().bytes ().size ()};
     sizes.resize (3 + count, block_entry_bytes);
     auto reserve = CodeMemory ().reserve (sizes);
-    REQUIRE (reserve);
+    REQUIRE ((reserve).has_value ());
     std::vector<std::uintptr_t> addresses (sizes.size ());
     for (unsigned n = 0; n < addresses.size (); ++n) {
-      auto a = reserve->address (n);
-      REQUIRE (a);
-      addresses[n] = *a;
+      auto a = reserve.value ().address (n);
+      REQUIRE ((a).has_value ());
+      addresses[n] = (a).value ();
     }
     std::vector<Descriptor> descriptors (count);
     std::vector<ExecutableCode> generated;
     std::vector<const BBVVersion *> versions (count);
     auto remember = [&] (const BBVVersion &v) -> Result<void> {
-      if (!v.id ().same_program (first->version ()) || v.id ().index () >= count)
+      if (!v.id ().same_program (first.value ().version ()) || v.id ().index () >= count)
         return Error{ErrorCode::InvalidArgument, "unexpected test BBV version"};
       versions[v.id ().index ()] = &v;
       return {};
     };
-    REQUIRE (remember (*version->version));
-    REQUIRE (remember (*recovery_version->version));
-    for (auto &edge : version->version->specialization ()->successors ())
-      REQUIRE (remember (*edge.version));
+    REQUIRE ((remember (*mirnext::codegen::detail::NodeAccess::version (((version)).value ())))
+               .has_value ());
+    REQUIRE (
+      (remember (*mirnext::codegen::detail::NodeAccess::version (((recovery_version)).value ())))
+        .has_value ());
+    for (auto &edge : mirnext::codegen::detail::NodeAccess::version (((version)).value ())
+                        ->specialization ()
+                        .get ()
+                        ->successors ())
+      REQUIRE ((remember (*mirnext::codegen::detail::NodeAccess::version (edge))).has_value ());
     BlockAddressResolver resolve = [&] (const BlockVersionId &id) -> Result<std::uint64_t> {
-      if (!id.same_program (first->version ()) || id.index () >= count)
+      if (!id.same_program (first.value ().version ()) || id.index () >= count)
         return Error{ErrorCode::UnknownName, "unexpected test BBV successor"};
       return addresses[3 + id.index ()];
     };
@@ -442,46 +458,49 @@ TEST_CASE (
       d.destination = addresses[3 + n] + block_entry_cold_offset;
       d.compile = [&, n] () -> Result<std::uintptr_t> {
         if (!versions[n]) return Error{ErrorCode::UnknownName, "test block has not been selected"};
-        auto block = encode_bbv (*program, *versions[n]);
-        if (!block) return block.error ();
-        for (auto &edge : versions[n]->specialization ()->successors ()) {
-          auto saved = remember (*edge.version);
-          if (!saved) return saved.error ();
+        auto block = encode_bbv ((program).value (), *versions[n]);
+        if (!(block).has_value ()) return block.error ();
+        for (auto &edge : versions[n]->specialization ().get ()->successors ()) {
+          auto saved = remember (*mirnext::codegen::detail::NodeAccess::version (edge));
+          if (!(saved).has_value ()) return saved.error ();
         }
-        const std::array sizes{block->bytes ().size ()};
+        const std::array sizes{block.value ().bytes ().size ()};
         auto slot = CodeMemory ().reserve (sizes);
-        if (!slot) return slot.error ();
-        auto a = slot->address (0);
-        if (!a) return a.error ();
-        auto bytes = block->relocate (*a, resolve);
-        if (!bytes) return bytes.error ();
-        const std::array<std::span<const std::uint8_t>, 1> views{*bytes};
-        auto code = slot->publish (views);
-        if (!code) return code.error ();
-        generated.push_back (std::move (code->front ()));
+        if (!(slot).has_value ()) return slot.error ();
+        auto a = slot.value ().address (0);
+        if (!(a).has_value ()) return a.error ();
+        auto bytes = block.value ().relocate ((a).value (), resolve);
+        if (!(bytes).has_value ()) return bytes.error ();
+        const std::array<std::span<const std::uint8_t>, 1> views{(bytes).value ()};
+        auto code = slot.value ().publish (views);
+        if (!(code).has_value ()) return code.error ();
+        generated.push_back (std::move (code.value ().front ()));
         return generated.back ().address ();
       };
-      auto gate = make_block_entry (*target, {reinterpret_cast<std::uintptr_t> (&d.destination),
-                                              reinterpret_cast<std::uintptr_t> (&d), addresses[1]});
-      REQUIRE (gate);
-      storage[3 + n] = std::move (*gate);
+      auto gate = make_block_entry ((target).value (),
+                                    {reinterpret_cast<std::uintptr_t> (&d.destination),
+                                     reinterpret_cast<std::uintptr_t> (&d), addresses[1]});
+      REQUIRE ((gate).has_value ());
+      storage[3 + n] = std::move ((gate).value ());
     }
-    descriptors[first->version ().index ()].destination = addresses[0];
-    auto entry = first->relocate (addresses[0], resolve);
-    REQUIRE (entry);
-    storage[0] = std::move (*entry);
-    resolver = make_block_resolver (*target, reinterpret_cast<std::uintptr_t> (&resolve_block),
-                                    addresses[2]);
-    REQUIRE (resolver);
-    storage[1] = std::move (*resolver);
-    auto fallback = recovery->relocate (addresses[2], {});
-    REQUIRE (fallback);
-    storage[2] = std::move (*fallback);
+    descriptors[first.value ().version ().index ()].destination = addresses[0];
+    auto entry = first.value ().relocate (addresses[0], resolve);
+    REQUIRE ((entry).has_value ());
+    storage[0] = std::move ((entry).value ());
+    resolver
+      = make_block_resolver ((target).value (), reinterpret_cast<std::uintptr_t> (&resolve_block),
+                             addresses[2]);
+    REQUIRE ((resolver).has_value ());
+    storage[1] = std::move ((resolver).value ());
+    auto fallback = recovery.value ().relocate (addresses[2], {});
+    REQUIRE ((fallback).has_value ());
+    storage[2] = std::move ((fallback).value ());
     std::vector<std::span<const std::uint8_t>> views;
     for (auto &bytes : storage) views.push_back (bytes);
-    auto published = reserve->publish (views);
-    REQUIRE (published);
-    auto call = reinterpret_cast<std::int64_t (*) (std::int64_t)> (published->front ().address ());
+    auto published = reserve.value ().publish (views);
+    REQUIRE ((published).has_value ());
+    auto call
+      = reinterpret_cast<std::int64_t (*) (std::int64_t)> (published.value ().front ().address ());
     unsigned iteration = 0;
     std::size_t after_first = 0, after_second = 0;
     for (auto input : {0, 0, 1, 1, 2, 0}) {
@@ -509,7 +528,8 @@ TEST_CASE (
     }
     CHECK (generated.size () == count - 1);
     for (unsigned n = 0; n < storage.size (); ++n)
-      CHECK (std::equal (storage[n].begin (), storage[n].end (), (*published)[n].bytes ().begin (),
-                         (*published)[n].bytes ().end ()));
+      CHECK (std::equal (storage[n].begin (), storage[n].end (),
+                         ((published).value ())[n].bytes ().begin (),
+                         ((published).value ())[n].bytes ().end ()));
   }
 }

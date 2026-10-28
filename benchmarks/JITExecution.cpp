@@ -1,5 +1,5 @@
 /* Licensed under the MIT License. Warm generated-code throughput and compilation amortization. */
-#include "mirnext/Execution/Linker.hpp"
+#include "mirnext/Execution/Session.hpp"
 #include "JITExecutionReference.hpp"
 #include "../tests/Fixtures/ClassicPrograms.hpp"
 #include <algorithm>
@@ -18,7 +18,7 @@ double ns (Clock::time_point a, Clock::time_point b) {
 }
 struct Workload {
   std::string name, module, function;
-  std::unique_ptr<ir::Context> context;
+  ir::Program context;
   NativeFunction reference;
   std::uint64_t base, mask;
   std::vector<std::uint64_t> expected;
@@ -40,11 +40,11 @@ Result<Workload> workload (std::string name, std::string text, RuntimeWorkload k
                            std::uint64_t base = 0, std::uint64_t mask = 255,
                            std::string module = "bench", std::string function = "f") {
   auto context = serialization::parse_text (text);
-  if (!context) return context.error ();
+  if (!(context).has_value ()) return context.error ();
   Workload w{std::move (name),
              std::move (module),
              std::move (function),
-             std::move (*context),
+             std::move ((context).value ()),
              reference_function (kind),
              base,
              mask};
@@ -75,25 +75,25 @@ Result<Workload> branches () {
 }
 Result<void> sample (Workload &w, unsigned engine, int trial, double target_ns) {
   NativeFunction function = w.reference;
-  std::optional<LinkedProgram> owner;
+  std::optional<ExecutionSession> owner;
   double compilation_us = 0;
   std::size_t bytes = 0;
   if (engine < 4) {
     auto begin = Clock::now ();
-    auto program
-      = LinkedProgram::create (*w.context,
-                               {.optimization
-                                = {.level = static_cast<transforms::OptimizationLevel> (engine)}});
+    ExecutionOptions options;
+    options.optimization = transforms::OptimizationOptions{
+      .level = static_cast<transforms::OptimizationLevel> (engine)};
+    auto program = ExecutionSession::create (w.context, std::move (options));
     auto end = Clock::now ();
-    if (!program) return program.error ();
+    if (!(program).has_value ()) return program.error ();
     compilation_us = ns (begin, end) / 1000;
-    bytes = program->statistics ().code_bytes;
-    owner.emplace (std::move (*program));
+    bytes = program.value ().statistics ().code_bytes;
+    owner.emplace (std::move ((program).value ()));
     auto entry = owner->find_function (w.module, w.function);
-    if (!entry) return entry.error ();
-    if (!entry->address ())
+    if (!(entry).has_value ()) return entry.error ();
+    if (!entry.value ().address ())
       return Error{ErrorCode::InvalidOperand, "missing runtime benchmark code"};
-    function = reinterpret_cast<NativeFunction> (entry->address ());
+    function = reinterpret_cast<NativeFunction> (entry.value ().address ());
   }
   // Validate all input patterns and warm the code/data/branch predictor before
   // measuring. Reference functions are compiled in a separate TU without LTO.
@@ -118,10 +118,10 @@ Result<void> sample (Workload &w, unsigned engine, int trial, double target_ns) 
     calls = 1;
     for (;;) {
       auto elapsed = run (calls);
-      if (!elapsed) return elapsed.error ();
-      if (*elapsed >= target_ns / 4) {
-        calls
-          = std::max<std::uint64_t> (1, static_cast<std::uint64_t> (calls * target_ns / *elapsed));
+      if (!(elapsed).has_value ()) return elapsed.error ();
+      if ((elapsed).value () >= target_ns / 4) {
+        calls = std::max<std::uint64_t> (1, static_cast<std::uint64_t> (calls * target_ns
+                                                                        / (elapsed).value ()));
         break;
       }
       if (calls > UINT64_MAX / 4)
@@ -130,11 +130,11 @@ Result<void> sample (Workload &w, unsigned engine, int trial, double target_ns) 
     }
   }
   auto elapsed = run (calls);
-  if (!elapsed) return elapsed.error ();
+  if (!(elapsed).has_value ()) return elapsed.error ();
   if (trial >= 0)
     std::cout << w.name << ',' << (engine == 4 ? "cpp" : "O" + std::to_string (engine)) << ','
-              << trial << ',' << calls << ',' << *elapsed / 1e6 << ',' << *elapsed / calls << ','
-              << compilation_us << ',' << bytes << '\n';
+              << trial << ',' << calls << ',' << (elapsed).value () / 1e6 << ','
+              << (elapsed).value () / calls << ',' << compilation_us << ',' << bytes << '\n';
   return {};
 }
 }  // namespace
@@ -166,11 +166,11 @@ int main (int argc, char **argv) {
   }
   std::vector<Workload> workloads;
   auto append = [&] (Result<Workload> w) {
-    if (!w) {
+    if (!(w).has_value ()) {
       std::cerr << w.error ().message << '\n';
       return false;
     }
-    workloads.push_back (std::move (*w));
+    workloads.push_back (std::move ((w).value ()));
     return true;
   };
   if (!append (workload ("tiny",
@@ -214,12 +214,12 @@ int main (int argc, char **argv) {
       }))
     return 1;
   auto target = target::TargetMachine::native ();
-  if (!target) {
+  if (!(target).has_value ()) {
     std::cerr << target.error ().message << '\n';
     return 1;
   }
-  std::cout << "# target=" << target->name () << " trials=" << trials << " warmups=" << warmups
-            << " target_batch_ms=" << milliseconds
+  std::cout << "# target=" << target.value ().name () << " trials=" << trials
+            << " warmups=" << warmups << " target_batch_ms=" << milliseconds
             << " reference=separate-TU-Release input=periodic-varying scalar_call=direct\n"
             << "workload,engine,trial,calls,batch_ms,ns_per_call,compile_us,code_bytes\n"
             << std::fixed << std::setprecision (4);
@@ -229,7 +229,7 @@ int main (int argc, char **argv) {
         if (!selected.empty () && selected != w.name) continue;
         auto engine = (n + static_cast<unsigned> (trial + warmups)) % 5;
         auto result = sample (w, engine, trial, double (milliseconds) * 1e6);
-        if (!result) {
+        if (!(result).has_value ()) {
           std::cerr << w.name << " engine=" << engine << ": " << result.error ().message << '\n';
           return 1;
         }

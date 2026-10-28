@@ -1,3 +1,6 @@
+#include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Checked.hpp"
+#include "mirnext/IR/Access.hpp"
 /* Target rules derived from MIR, Copyright (C) 2018-2024 Vladimir Makarov.
    Licensed under the MIT License. Direct lowering of owning machine IR. */
 #include "mirnext/CodeGen/Detail/TargetLowering.hpp"
@@ -31,8 +34,9 @@ std::optional<Opcode> extension (Type t) {
   }
 }
 std::optional<MachineRegister> register_value (const Operand &o) {
-  if (auto v = o.get<const MachineVirtualRegister *> ()) return *v;
-  if (auto p = o.get<target::PhysicalRegister> ()) return *p;
+  if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+    return detail::NodeAccess::make_MachineRegister (*v);
+  if (auto p = detail::operand_access (o).get<target::PhysicalRegister> ()) return *p;
   return {};
 }
 std::int64_t variadic_tag (Type t) {
@@ -96,39 +100,41 @@ class X86Lowering {
                       + std::string (f.target ().name ()) + ", machinize]: " + std::move (why)};
   }
   void checked (Result<void> result) {
-    if (!result) fail (result.error ().message);
+    if (!(result).has_value ()) fail (result.error ().message);
   }
-  Operand integer (std::size_t n) { return Operand (static_cast<std::int64_t> (n)); }
+  Operand integer (std::size_t n) {
+    return detail::NodeAccess::make_MachineOperand (static_cast<std::int64_t> (n));
+  }
   target::PhysicalRegister physical_register (R n) {
     return f.target ().registers ()[static_cast<unsigned> (n)].reg;
   }
-  Operand physical (R n) { return Operand (physical_register (n)); }
+  Operand physical (R n) { return detail::NodeAccess::make_MachineOperand (physical_register (n)); }
   Operand temporary (Type t = Type::i64 ()) {
-    if (error) return Operand (std::int64_t (0));
-    auto reg = f.create_register (t);
-    if (!reg) {
+    if (error) return detail::NodeAccess::make_MachineOperand (std::int64_t (0));
+    auto reg = detail::access (f).create_register (t);
+    if (!(reg).has_value ()) {
       fail (reg.error ().message);
-      return Operand (std::int64_t (0));
+      return detail::NodeAccess::make_MachineOperand (std::int64_t (0));
     }
-    return Operand (**reg);
+    return detail::NodeAccess::make_MachineOperand ((reg).value ());
   }
   Instruction *before (Instruction &at, MachineOpcode code, std::vector<Operand> operands) {
     if (error) return &at;
     auto result = rw.insert_before (at, code, std::move (operands));
-    if (!result) {
+    if (!(result).has_value ()) {
       fail (result.error ().message);
       return &at;
     }
-    return *result;
+    return &(result).value ();
   }
   Instruction *after (Instruction &at, MachineOpcode code, std::vector<Operand> operands) {
     if (error) return &at;
     auto result = rw.insert_after (at, code, std::move (operands));
-    if (!result) {
+    if (!(result).has_value ()) {
       fail (result.error ().message);
       return &at;
     }
-    return *result;
+    return &(result).value ();
   }
   void replace (Instruction &at, MachineOpcode code, std::vector<Operand> operands) {
     if (!error) checked (rw.replace (at, code, std::move (operands)));
@@ -142,7 +148,8 @@ class X86Lowering {
       fail ("memory base must be a register");
       return integer (0);
     }
-    return Operand (MachineMemory{t, *reg, {}, offset, 1, {}, {}});
+    return detail::NodeAccess::make_MachineOperand (
+      detail::NodeAccess::make_MachineMemory (t, *reg, {}, offset, 1, {}, {}));
   }
   Operand block_marker (const Operand &base, std::int64_t offset = 0, Type t = Type (K::Undef)) {
     return memory (t, offset, base);
@@ -152,21 +159,22 @@ class X86Lowering {
       fail ("block argument needs a base register");
       return integer (0);
     }
-    return std::visit ([] (auto value) { return Operand (value); }, *m.base);
+    return std::visit ([] (auto value) { return detail::NodeAccess::make_MachineOperand (value); },
+                       detail::NodeAccess::storage (*m.base));
   }
   const MachineSymbol *prototype (const BuiltinDescription &b) {
-    auto p = f.intern_symbol ({"$builtin",
-                               std::string (b.name) + ".p",
-                               MachineSymbol::Kind::BuiltinPrototype,
-                               b.signature,
-                               false,
-                               {},
-                               b.id});
-    if (!p) {
+    auto p = detail::access (f).intern_symbol ({"$builtin",
+                                                std::string (b.name) + ".p",
+                                                MachineSymbol::Kind::BuiltinPrototype,
+                                                b.signature,
+                                                false,
+                                                {},
+                                                b.id});
+    if (!(p).has_value ()) {
       fail (p.error ().message);
       return nullptr;
     }
-    return *p;
+    return &(p).value ();
   }
   Type argument_type (const ir::Signature &, std::size_t, const Operand &) const;
   Result<target::X86ArgumentLayout> call_layout (const Instruction &) const;
@@ -180,15 +188,19 @@ class X86Lowering {
 Type X86Lowering::argument_type (const ir::Signature &signature, std::size_t n,
                                  const Operand &o) const {
   if (n < signature.parameters.size ()) return signature.parameters[n];
-  if (auto m = o.get<MachineMemory> ()) return m->type;
-  if (auto r = o.get<const MachineVirtualRegister *> ()) return (*r)->type ();
-  if (auto p = o.get<target::PhysicalRegister> ())
-    return f.target ().register_info (*p)->bank == target::RegisterBank::Integer ? Type::i64 ()
-                                                                                 : Type (K::F64);
+  if (auto m = detail::operand_access (o).get<MachineMemory> ()) return m->type;
+  if (auto r = detail::operand_access (o).get<const MachineVirtualRegister *> ())
+    return (*r)->type ();
+  if (auto p = detail::operand_access (o).get<target::PhysicalRegister> ())
+    return f.target ().register_info (*p).get ()->bank == target::RegisterBank::Integer
+             ? Type::i64 ()
+             : Type (K::F64);
   return Type::i64 ();
 }
 Result<target::X86ArgumentLayout> X86Lowering::call_layout (const Instruction &at) const {
-  auto &s = *at.operands ()[0].get<MachineSymbolReference> ()->symbol->signature;
+  auto &s = *detail::NodeAccess::symbol (
+               *(detail::operand_access (at.operands ()[0]).get<MachineSymbolReference> ()))
+               ->signature;
   std::vector<Type> types;
   for (std::size_t n = 2 + s.results.size (); n < at.operands ().size (); ++n)
     types.push_back (argument_type (s, n - 2 - s.results.size (), at.operands ()[n]));
@@ -196,7 +208,7 @@ Result<target::X86ArgumentLayout> X86Lowering::call_layout (const Instruction &a
 }
 Result<void> X86Lowering::preflight () {
   auto valid = f.verify ();
-  if (!valid) {
+  if (!(valid).has_value ()) {
     fail (valid.error ().message);
     return *error;
   }
@@ -205,9 +217,9 @@ Result<void> X86Lowering::preflight () {
     return *error;
   }
   auto args = target::layout_x86_arguments (abi, f.signature ().parameters);
-  if (!args) fail (args.error ().message);
+  if (!(args).has_value ()) fail (args.error ().message);
   auto results = target::layout_x86_results (abi, f.signature ().results);
-  if (!results) fail (results.error ().message);
+  if (!(results).has_value ()) fail (results.error ().message);
   for (auto &b : f.blocks ())
     for (auto &i : b.instructions ()) {
       auto code = i.opcode ();
@@ -218,21 +230,23 @@ Result<void> X86Lowering::preflight () {
           fail ("call is already lowered");
           continue;
         }
-        auto &s = *i.operands ()[0].get<MachineSymbolReference> ()->symbol->signature;
+        auto &s = *detail::NodeAccess::symbol (
+                     *(detail::operand_access (i.operands ()[0]).get<MachineSymbolReference> ()))
+                     ->signature;
         auto returns = target::layout_x86_results (abi, s.results);
-        if (!returns) fail (returns.error ().message);
+        if (!(returns).has_value ()) fail (returns.error ().message);
         auto layout = call_layout (i);
-        if (!layout) {
+        if (!(layout).has_value ()) {
           fail (layout.error ().message);
           continue;
         }
         std::size_t copy_bytes
-          = win ? std::max<std::size_t> (32, layout->arguments.size () * 8) : 0;
+          = win ? std::max<std::size_t> (32, layout.value ().arguments.size () * 8) : 0;
         for (std::size_t n = 2 + s.results.size (); n < i.operands ().size (); ++n) {
           auto &o = i.operands ()[n];
           auto type = argument_type (s, n - 2 - s.results.size (), o);
           if (type.is_block ()) {
-            auto m = o.get<MachineMemory> ();
+            auto m = detail::operand_access (o).get<MachineMemory> ();
             if (!m || !m->base || m->index || m->displacement)
               fail ("block arguments require a base register without an offset or index");
             if (win && type.kind () == K::Block && type.block_size () > 8) {
@@ -258,15 +272,16 @@ Result<void> X86Lowering::preflight () {
 }
 void X86Lowering::parameters (Instruction &anchor) {
   auto layout = target::layout_x86_arguments (abi, f.signature ().parameters);
-  if (!layout) {
+  if (!(layout).has_value ()) {
     fail (layout.error ().message);
     return;
   }
   Instruction *front = &anchor;
-  for (std::size_t n = 0; n < layout->arguments.size () && !error; ++n) {
-    auto &loc = layout->arguments[n];
+  for (std::size_t n = 0; n < layout.value ().arguments.size () && !error; ++n) {
+    auto &loc = layout.value ().arguments[n];
     auto type = f.signature ().parameters[n];
-    auto arg = Operand (*f.arguments ()[n]);
+    auto arg = detail::NodeAccess::make_MachineOperand (
+      *ir::detail::ReferenceAccess::pointers (f.arguments ())[n]);
     Instruction *first = nullptr;
     auto emit = [&] (Opcode code, std::vector<Operand> operands) {
       auto i = before (*front, code, std::move (operands));
@@ -301,14 +316,16 @@ void X86Lowering::parameters (Instruction &anchor) {
   }
 }
 void X86Lowering::lower_call (Instruction &at) {
-  auto &s = *at.operands ()[0].get<MachineSymbolReference> ()->symbol->signature;
+  auto &s = *detail::NodeAccess::symbol (
+               *(detail::operand_access (at.operands ()[0]).get<MachineSymbolReference> ()))
+               ->signature;
   auto layout = call_layout (at);
-  if (!layout) {
+  if (!(layout).has_value ()) {
     fail (layout.error ().message);
     return;
   }
   auto results = target::layout_x86_results (abi, s.results);
-  if (!results) {
+  if (!(results).has_value ()) {
     fail (results.error ().message);
     return;
   }
@@ -323,16 +340,16 @@ void X86Lowering::lower_call (Instruction &at) {
   auto early = [&] (Opcode code, std::vector<Operand> args) {
     return after (*boundary, code, std::move (args));
   };
-  auto stack_bytes = layout->stack_bytes;
-  auto copy_offset = win ? std::max<std::size_t> (32, layout->arguments.size () * 8) : 0;
-  if (!register_value (ops[1]) && !ops[1].get<MachineSymbolReference> ()
-      && !ops[1].get<BuiltinReference> ()) {
+  auto stack_bytes = layout.value ().stack_bytes;
+  auto copy_offset = win ? std::max<std::size_t> (32, layout.value ().arguments.size () * 8) : 0;
+  if (!register_value (ops[1]) && !detail::operand_access (ops[1]).get<MachineSymbolReference> ()
+      && !detail::operand_access (ops[1]).get<BuiltinReference> ()) {
     auto target = temporary ();
     before (at, Opcode::Mov, {target, ops[1]});
     ops[1] = target;
   }
-  for (std::size_t n = 0; n < layout->arguments.size () && !error; ++n) {
-    auto &loc = layout->arguments[n];
+  for (std::size_t n = 0; n < layout.value ().arguments.size () && !error; ++n) {
+    auto &loc = layout.value ().arguments[n];
     auto type = argument_type (s, n, ops[start + n]);
     auto source = ops[start + n];
     std::optional<std::pair<Opcode, Operand>> extend;
@@ -350,7 +367,7 @@ void X86Lowering::lower_call (Instruction &at) {
       }
     };
     if (loc.aggregate && !win && loc.register_count) {
-      auto base = address (*source.get<MachineMemory> ());
+      auto base = address (*detail::operand_access (source).get<MachineMemory> ());
       for (unsigned p = 0; p < loc.register_count; ++p) {
         auto scalar = static_cast<unsigned> (loc.registers[p]) >= static_cast<unsigned> (R::XMM0)
                         ? Type (K::F64)
@@ -358,15 +375,15 @@ void X86Lowering::lower_call (Instruction &at) {
         before (at, move (scalar), {physical (loc.registers[p]), memory (scalar, p * 8, base)});
         add_extra (loc.registers[p]);
       }
-      auto marker = *source.get<MachineMemory> ();
+      auto marker = *detail::operand_access (source).get<MachineMemory> ();
       marker.type = Type (K::Undef);
       marker.base.reset ();
       marker.displacement = static_cast<std::int64_t> (type.block_size ());
-      ops[start + n] = Operand (std::move (marker));
+      ops[start + n] = detail::NodeAccess::make_MachineOperand (std::move (marker));
       continue;
     }
     if (loc.aggregate) {
-      auto base = address (*source.get<MachineMemory> ());
+      auto base = address (*detail::operand_access (source).get<MachineMemory> ());
       if (win && loc.by_value) {
         auto t = temporary ();
         early (Opcode::Mov, {t, memory (Type::i64 (), 0, base)});
@@ -396,13 +413,16 @@ void X86Lowering::lower_call (Instruction &at) {
           auto r0 = *target::x86_integer_argument_register (abi, 0),
                r1 = *target::x86_integer_argument_register (abi, 1),
                r2 = *target::x86_integer_argument_register (abi, 2);
-          auto call = early (Opcode::Call, {Operand (MachineSymbolReference{proto}), callee,
-                                            physical (r0), physical (r1), physical (r2)});
+          auto call
+            = early (Opcode::Call, {detail::NodeAccess::make_MachineOperand (
+                                      detail::NodeAccess::make_MachineSymbolReference (proto)),
+                                    callee, physical (r0), physical (r1), physical (r2)});
           early (Opcode::Mov, {physical (r2), integer (loc.size)});
           early (Opcode::Mov, {physical (r1), base});
           early (Opcode::Mov, {physical (r0), dest});
           early (Opcode::Add, {dest, physical (R::SP), integer (destination)});
-          early (Opcode::Mov, {callee, Operand (BuiltinReference{b.id})});
+          early (Opcode::Mov,
+                 {callee, detail::NodeAccess::make_MachineOperand (BuiltinReference{b.id})});
           if (!error)
             checked (rw.lower_call (*call, Opcode::Call,
                                     std::vector<Operand> (call->operands ().begin (),
@@ -419,7 +439,7 @@ void X86Lowering::lower_call (Instruction &at) {
       emit_extension (true);
       auto reg = physical (loc.registers[0]);
       if (type.kind () == K::ReturnBlock) {
-        auto base = address (*source.get<MachineMemory> ());
+        auto base = address (*detail::operand_access (source).get<MachineMemory> ());
         before (at, Opcode::Mov, {reg, base});
         ops[start + n] = block_marker (reg, static_cast<std::int64_t> (type.block_size ()), type);
       } else {
@@ -436,7 +456,8 @@ void X86Lowering::lower_call (Instruction &at) {
                 {physical (integer_reg), memory (Type::i64 (), 8, physical (R::SP))});
       }
     } else {
-      if (type.kind () == K::ReturnBlock) source = address (*source.get<MachineMemory> ());
+      if (type.kind () == K::ReturnBlock)
+        source = address (*detail::operand_access (source).get<MachineMemory> ());
       auto scalar = type.is_float () ? type : Type::i64 ();
       auto dest = memory (scalar, loc.stack_offset, physical (R::SP));
       // Windows aggregate loads/copies are inserted at the early boundary.
@@ -451,11 +472,11 @@ void X86Lowering::lower_call (Instruction &at) {
   }
   if (!win && s.variadic) {
     add_extra (R::AX);
-    before (at, Opcode::Mov, {physical (R::AX), integer (layout->variadic_xmm_count)});
+    before (at, Opcode::Mov, {physical (R::AX), integer (layout.value ().variadic_xmm_count)});
   }
   // Each insert-after is anchored at the call, matching reverse result order.
   for (std::size_t n = 0; n < s.results.size () && !error; ++n) {
-    auto destination = ops[2 + n], source = physical ((*results)[n]);
+    auto destination = ops[2 + n], source = physical (((results).value ())[n]);
     auto copy = after (at, move (s.results[n]), {destination, source});
     ops[2 + n] = source;
     if (auto ext = extension (s.results[n])) after (*copy, *ext, {destination, destination});
@@ -478,13 +499,13 @@ void X86Lowering::lower_call (Instruction &at) {
 }
 void X86Lowering::lower_return (Instruction &at) {
   auto regs = target::layout_x86_results (abi, f.signature ().results);
-  if (!regs) {
+  if (!(regs).has_value ()) {
     fail (regs.error ().message);
     return;
   }
   std::vector<Operand> ops (at.operands ().begin (), at.operands ().end ());
   for (std::size_t n = 0; n < ops.size (); ++n) {
-    auto r = physical ((*regs)[n]);
+    auto r = physical (((regs).value ())[n]);
     before (at, move (f.signature ().results[n]), {r, ops[n]});
     ops[n] = r;
   }
@@ -495,11 +516,16 @@ void X86Lowering::lower_builtin (Instruction &at, Opcode code, const BuiltinDesc
   if (!proto) return;
   auto ops = std::vector<Operand> (at.operands ().begin (), at.operands ().end ());
   auto callee = temporary ();
-  before (at, Opcode::Mov, {callee, Operand (BuiltinReference{b.id})});
-  std::vector<Operand> args{Operand (MachineSymbolReference{proto}), callee};
+  before (at, Opcode::Mov,
+          {callee, detail::NodeAccess::make_MachineOperand (BuiltinReference{b.id})});
+  std::vector<Operand> args{detail::NodeAccess::make_MachineOperand (
+                              detail::NodeAccess::make_MachineSymbolReference (proto)),
+                            callee};
   if (code == Opcode::VaArg) {
     auto tag = temporary ();
-    before (at, Opcode::Mov, {tag, Operand (variadic_tag (ops[2].get<MachineMemory> ()->type))});
+    before (at, Opcode::Mov,
+            {tag, detail::NodeAccess::make_MachineOperand (
+                    variadic_tag (detail::operand_access (ops[2]).get<MachineMemory> ()->type))});
     args.insert (args.end (), {ops[0], ops[1], tag});
   } else
     args.insert (args.end (), ops.begin (), ops.end ());
@@ -510,7 +536,9 @@ void X86Lowering::lower_builtin (Instruction &at, Opcode code, const BuiltinDesc
 void X86Lowering::lower_variadic_start (Instruction &at) {
   auto temp = temporary (), va = at.operands ()[0];
   if (win) {
-    before (at, Opcode::Add, {temp, physical (R::BP), integer (16 + f.arguments ().size () * 8)});
+    before (at, Opcode::Add,
+            {temp, physical (R::BP),
+             integer (16 + ir::detail::ReferenceAccess::pointers (f.arguments ()).size () * 8)});
     before (at, Opcode::Mov, {memory (Type::i64 (), 0, va), temp});
   } else {
     std::size_t gp = 0, fp = 48, overflow = 0;
@@ -533,14 +561,16 @@ void X86Lowering::lower_variadic_start (Instruction &at) {
     before (at, Opcode::Mov, {memory (Type (K::U32), 4, va), integer (fp)});
     before (at, Opcode::Add, {temp, physical (R::BP), integer (16 + overflow)});
     before (at, Opcode::Mov, {memory (Type::i64 (), 8, va), temp});
-    before (at, Opcode::Add, {temp, physical (R::BP), Operand (std::int64_t (-176))});
+    before (at, Opcode::Add,
+            {temp, physical (R::BP),
+             detail::NodeAccess::make_MachineOperand (std::int64_t (-176))});
     before (at, Opcode::Mov, {memory (Type::i64 (), 16, va), temp});
   }
   erase (at);
 }
 Result<void> X86Lowering::run () {
   auto valid = preflight ();
-  if (!valid) return valid;
+  if (!(valid).has_value ()) return valid;
   state.has_block_arguments = false;
   state.requires_frame_pointer = f.signature ().variadic;
   std::get<MachineFunctionState::X86> (state.target).initial_sp_from_bp = 8;
@@ -548,12 +578,12 @@ Result<void> X86Lowering::run () {
     = !win && f.signature ().variadic ? 176 : 0;
   auto &entry = *f.blocks ().begin ();
   auto anchor = rw.append (entry, MachinePseudoOpcode::Use, {});
-  if (!anchor) return anchor.error ();
-  checked (rw.set_entry_setup (**anchor));
+  if (!(anchor).has_value ()) return anchor.error ();
+  checked (rw.set_entry_setup ((anchor).value ()));
   auto first = &*entry.instructions ().begin ();
-  if (first != *anchor) checked (rw.move_before (**anchor, *first));
-  parameters (**anchor);
-  erase (**anchor);
+  if (first != &(anchor).value ()) checked (rw.move_before ((anchor).value (), *first));
+  parameters ((anchor).value ());
+  erase ((anchor).value ());
   if (error) return *error;
   state.uses_alloca = false;
   state.is_leaf = true;
@@ -625,7 +655,7 @@ Result<void> X86Lowering::run () {
       break;
     }
     default: {
-      auto desc = ir::instruction_descriptor (code);
+      auto desc = ir::instruction_descriptor (code).get ();
       if (desc->roles == "Iii" || desc->roles == "Iff" || desc->roles == "Idd") {
         const bool comparison = code >= Opcode::Eq && code <= Opcode::DGe;
         if (comparison) after (*at, Opcode::UExt8, {ops[0], ops[0]});

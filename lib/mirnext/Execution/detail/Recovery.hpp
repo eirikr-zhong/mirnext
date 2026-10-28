@@ -48,7 +48,7 @@ class NativeRecovery {
     } else {
       auto result = entry (adapter, arg0, arg1, &state);
       auto status = invocation.status ();
-      if (!status) return status.error ();
+      if (!(status).has_value ()) return status.error ();
       return result;
     }
   }
