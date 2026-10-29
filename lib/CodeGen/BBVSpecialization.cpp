@@ -40,7 +40,7 @@ bool call (const MachineInstruction &i) {
 bool move (const MachineInstruction &i) {
   // Private vector saves were UNSPEC in MIR, outside its property-copy cases.
   return is (i, Opcode::Mov) || is (i, Opcode::FMov) || is (i, Opcode::DMov)
-         || is (i, Opcode::LDMov);
+         || is (i, Opcode::LDMov) || is (i, Opcode::VMov);
 }
 bool aliases (const MachineMemory &a, const MachineMemory &b) {
   return (a.alias.empty () || b.alias.empty () || a.alias == b.alias)

@@ -7,6 +7,8 @@ function(mirnext_add_example target name source)
   endif()
 endfunction()
 
+mirnext_add_example(mirnext_native_simd_example mirnext-native-simd-example native-simd.cpp)
+
 mirnext_add_example(mirnext_custom_code_memory_example mirnext_custom_code_memory_example
   custom-code-memory.cpp)
 mirnext_add_example(mirnext_native_scope_example mirnext_native_scope_example

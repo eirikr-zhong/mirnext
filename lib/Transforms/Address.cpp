@@ -15,18 +15,19 @@ bool address (Opcode code) {
 }
 bool move (Opcode code) {
   return code == Opcode::Mov || code == Opcode::FMov || code == Opcode::DMov
-         || code == Opcode::LDMov;
+         || code == Opcode::LDMov || code == Opcode::VMov;
 }
 bool copy (const Instruction &i) {
   return move (i.opcode ())
          && ir::detail::operand_access (i.operands ()[0]).get<const Register *> ()
          && ir::detail::operand_access (i.operands ()[1]).get<const Register *> ();
 }
-Type scalar (Type type) { return type.is_float () ? type : Type::i64 (); }
+Type scalar (Type type) { return type.is_float () || type.is_vector () ? type : Type::i64 (); }
 Opcode move_code (Type type) {
   return type.kind () == Type::Kind::F32          ? Opcode::FMov
          : type.kind () == Type::Kind::F64        ? Opcode::DMov
          : type.kind () == Type::Kind::LongDouble ? Opcode::LDMov
+         : type.is_vector ()                      ? Opcode::VMov
                                                   : Opcode::Mov;
 }
 std::optional<Opcode> extension (Type type) {

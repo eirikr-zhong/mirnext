@@ -2,6 +2,7 @@
 #include "mirnext/CodeGen/Access.hpp"
 #pragma once
 #include "mirnext/CodeGen/MachineIR.hpp"
+#include "mirnext/CodeGen/Detail/NativeVector.hpp"
 namespace mirnext::codegen::detail {
 inline bool is_call (MachineOpcode code) {
   auto op = std::get_if<ir::Opcode> (&code);
@@ -9,6 +10,8 @@ inline bool is_call (MachineOpcode code) {
 }
 inline bool operand_is_output (const MachineInstruction &i, std::size_t p) {
   auto code = i.opcode ();
+  if (auto native = native_vector_descriptor (code))
+    return native->roles[p] >= 'A' && native->roles[p] <= 'Z';
   if (auto pseudo = std::get_if<MachinePseudoOpcode> (&code))
     return (*pseudo == MachinePseudoOpcode::X86Mov128
             || *pseudo == MachinePseudoOpcode::X86Mov128Unaligned)

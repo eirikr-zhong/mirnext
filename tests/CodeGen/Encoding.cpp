@@ -774,3 +774,48 @@ TEST_CASE ("machine compilation edits and observer failures obey stage boundarie
   CHECK (compilation.value ().function ().dump () == before);
   CHECK (observed == 3);
 }
+TEST_CASE ("native NEON lane fields match assembler instruction words") {
+  if (!arm ()) return;
+  using P = MachinePseudoOpcode;
+  struct Sample {
+    P code;
+    unsigned form, immediate;
+    std::uint32_t word;
+  };
+  const Sample samples[]{{P::A64VectorDupGP, 0, 1, 0x4e010c20},
+                         {P::A64VectorDupLane, 1, 28, 0x4e1c0420},
+                         {P::A64VectorExtract, 2, 31, 0x0e1f3c20},
+                         {P::A64VectorExtract, 2, 24, 0x4e183c20},
+                         {P::A64VectorExtractSigned, 2, 28, 0x4e1c2c20},
+                         {P::A64VectorInsertGP, 3, 28, 0x4e1c1c40},
+                         {P::A64VectorInsertFP, 4, 28, 0x6e1c0440},
+                         {P::A64VectorTable, 5, 0, 0x4e020020},
+                         {P::A64VectorExt, 6, 7, 0x6e023820},
+                         {P::A64VectorRev32, 7, 0, 0x4ea00820},
+                         {P::A64VectorFEq32, 5, 0, 0x4e22e420}};
+  for (auto sample : samples) {
+    CAPTURE (opcode_name (sample.code));
+    Fixture f;
+    std::vector<MachineOperand> operands;
+    switch (sample.form) {
+    case 0: operands = {f.reg (32), f.reg (1), f.imm (sample.immediate)}; break;
+    case 1: operands = {f.reg (32), f.reg (33), f.imm (sample.immediate)}; break;
+    case 2: operands = {f.reg (0), f.reg (33), f.imm (sample.immediate)}; break;
+    case 3: operands = {f.reg (32), f.reg (32), f.reg (2), f.imm (sample.immediate)}; break;
+    case 4: operands = {f.reg (32), f.reg (32), f.reg (34), f.imm (sample.immediate)}; break;
+    case 5: operands = {f.reg (32), f.reg (33), f.reg (34)}; break;
+    case 6: operands = {f.reg (32), f.reg (33), f.reg (34), f.imm (sample.immediate)}; break;
+    default: operands = {f.reg (32), f.reg (33)}; break;
+    }
+    REQUIRE (f.rw.append (f.entry, sample.code, operands).has_value ());
+    if (sample.form != 2)
+      REQUIRE (f.rw.append (f.entry, P::A64VectorExtract, {f.reg (0), f.reg (32), f.imm (8)})
+                 .has_value ());
+    f.add (Opcode::Ret, {f.reg (0)});
+    auto compiled = f.run ();
+    bool found = false;
+    for (unsigned at = 0; at + 4 <= compiled.bytes ().size (); at += 4)
+      found |= word (compiled.bytes (), at) == sample.word;
+    CHECK (found);
+  }
+}

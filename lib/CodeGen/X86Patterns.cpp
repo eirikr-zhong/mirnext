@@ -3,6 +3,8 @@
    Licensed under the MIT License. Symbol addresses remain unresolved. */
 #include "mirnext/CodeGen/Detail/X86Patterns.hpp"
 #include "mirnext/CodeGen/Detail/X86Encoding.hpp"
+#include "mirnext/CodeGen/Detail/Vector.hpp"
+#include "mirnext/CodeGen/Detail/NativeVector.hpp"
 #include <array>
 #include <bit>
 #include <climits>
@@ -18,16 +20,24 @@ enum class PatternCode {
 #undef MIRNEXT_OPCODE
   AlignedMove,
   UnalignedMove,
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding) name,
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
   Count
 };
 struct Pattern {
   PatternCode code;
   std::string_view constraints, encoding;
+  unsigned vector_shape = 0;
 };
 #define MIRNEXT_X86_OPCODE(name) PatternCode::name
 #define MIRNEXT_X86_PRIVATE(name) PatternCode::name
+#define MIRNEXT_X86_NATIVE(name) PatternCode::name
 #define MIRNEXT_X86_TABLE static constexpr Pattern patterns[]
 #include "mirnext/Target/X86Patterns.def"
+#undef MIRNEXT_X86_NATIVE
 #undef MIRNEXT_X86_TABLE
 #undef MIRNEXT_X86_PRIVATE
 #undef MIRNEXT_X86_OPCODE
@@ -83,6 +93,7 @@ constexpr Constraint decode (std::string_view token) {
   if (tag == "f") return {C::Memory, type_bit (K::F32)};
   if (tag == "d") return {C::Memory, type_bit (K::F64)};
   if (tag == "ld") return {C::Memory, type_bit (K::LongDouble)};
+  if (tag == "v") return {C::Memory, type_bit (K::Vector)};
   bool signed_ok = true, unsigned_ok = true;
   if (!tag.empty () && (tag.front () == 'u' || tag.front () == 's')) {
     signed_ok = tag.front () != 'u';
@@ -155,7 +166,15 @@ constexpr auto descriptions = [] {
     auto code = p.code == PatternCode::AlignedMove ? MachineOpcode (MachinePseudoOpcode::X86Mov128)
                 : p.code == PatternCode::UnalignedMove
                   ? MachineOpcode (MachinePseudoOpcode::X86Mov128Unaligned)
-                  : MachineOpcode (static_cast<Opcode> (p.code));
+                  : [&] () -> MachineOpcode {
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding) \
+  if (p.code == PatternCode::name) return MachinePseudoOpcode::name;
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
+      return static_cast<Opcode> (p.code);
+    }();
     out[n] = {n, p.constraints, p.encoding, code};
   }
   return out;
@@ -273,7 +292,20 @@ bool x86_operands_equal (const MachineOperand &a, const MachineOperand &b) {
 std::optional<X86InstructionPattern> x86_instruction_pattern (
   MachineOpcode code, std::span<const MachineOperand> operands, X86PatternOptions options) {
   unsigned wanted;
-  if (auto op = std::get_if<Opcode> (&code)) {
+  if (auto native = detail::native_vector_descriptor (code)) {
+    if (native->architecture != target::Architecture::X86_64
+        || !detail::native_vector_operands (*native, operands))
+      return {};
+    switch (native->opcode) {
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding) \
+  case MachinePseudoOpcode::name: wanted = static_cast<unsigned> (PatternCode::name); break;
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
+    default: return {};
+    }
+  } else if (auto op = std::get_if<Opcode> (&code)) {
     wanted = static_cast<unsigned> (*op);
     if (wanted >= static_cast<unsigned> (PatternCode::AlignedMove)) return {};
   } else if (std::get<MachinePseudoOpcode> (code) == MachinePseudoOpcode::X86Mov128)
@@ -283,8 +315,10 @@ std::optional<X86InstructionPattern> x86_instruction_pattern (
   else
     return {};
   if (wanted >= code_count) return {};
+  auto shape = options.vector_shape ? options.vector_shape : detail::vector_shape (operands);
   for (unsigned n = table.offsets[wanted]; n < table.offsets[wanted + 1]; ++n) {
     auto row = table.indexes[n];
+    if (shape && patterns[row].vector_shape && shape != patterns[row].vector_shape) continue;
     auto candidate = options;
     if (candidate.encoding_layout && candidate.branch_range)
       candidate.branch_range->maximum_instruction_size = x86_encoding_recipe (row)->maximum_size;
@@ -340,7 +374,12 @@ bool x86_inout_opcode (Opcode code) {
   case Opcode::Mulo:
   case Opcode::Mulos:
   case Opcode::UMulo:
-  case Opcode::UMulos: return true;
+  case Opcode::UMulos:
+  case Opcode::VAdd:
+  case Opcode::VSub:
+  case Opcode::VAnd:
+  case Opcode::VOr:
+  case Opcode::VXor: return true;
   default: return false;
   }
 }

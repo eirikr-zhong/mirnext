@@ -65,6 +65,28 @@ MIRNEXT_A64_TABLE = {
   {MIRNEXT_A64_OPCODE (DMov), "r Md", "fd400000:ffc00000 vd0 M"},  /* ldr Dd,[Rn,{,#imm12}] */
   {MIRNEXT_A64_OPCODE (DMov), "Md r", "fd000000:ffc00000 vd1 M"},  /* str Dd,[Rn,Rm{,#imm12}] */
 
+  {MIRNEXT_A64_OPCODE (VMov), "r r",
+   "4ea01c00:ffe0fc00 vd0 vm1 vn1"}, /* orr Qd.16b,Qm.16b,Qn.16b */
+  {MIRNEXT_A64_OPCODE (VMov), "r mv", "3ce00800:ffe00c00 vd0 m"},
+  {MIRNEXT_A64_OPCODE (VMov), "mv r", "3ca00800:ffe00c00 vd1 m"},
+  {MIRNEXT_A64_OPCODE (VMov), "r Mv", "3dc00000:ffc00000 vd0 M"},
+  {MIRNEXT_A64_OPCODE (VMov), "Mv r", "3d800000:ffc00000 vd1 M"},
+  {MIRNEXT_A64_OPCODE (VAdd), "r r r", "4e208400:ffe0fc00 vd0 vn1 vm2", 1},
+  {MIRNEXT_A64_OPCODE (VAdd), "r r r", "4e608400:ffe0fc00 vd0 vn1 vm2", 2},
+  {MIRNEXT_A64_OPCODE (VAdd), "r r r", "4ea08400:ffe0fc00 vd0 vn1 vm2", 3},
+  {MIRNEXT_A64_OPCODE (VAdd), "r r r", "4ee08400:ffe0fc00 vd0 vn1 vm2", 4},
+  {MIRNEXT_A64_OPCODE (VAdd), "r r r", "4e20d400:ffe0fc00 vd0 vn1 vm2", 5},
+  {MIRNEXT_A64_OPCODE (VAdd), "r r r", "4e60d400:ffe0fc00 vd0 vn1 vm2", 6},
+  {MIRNEXT_A64_OPCODE (VSub), "r r r", "6e208400:ffe0fc00 vd0 vn1 vm2", 1},
+  {MIRNEXT_A64_OPCODE (VSub), "r r r", "6e608400:ffe0fc00 vd0 vn1 vm2", 2},
+  {MIRNEXT_A64_OPCODE (VSub), "r r r", "6ea08400:ffe0fc00 vd0 vn1 vm2", 3},
+  {MIRNEXT_A64_OPCODE (VSub), "r r r", "6ee08400:ffe0fc00 vd0 vn1 vm2", 4},
+  {MIRNEXT_A64_OPCODE (VSub), "r r r", "4ea0d400:ffe0fc00 vd0 vn1 vm2", 5},
+  {MIRNEXT_A64_OPCODE (VSub), "r r r", "4ee0d400:ffe0fc00 vd0 vn1 vm2", 6},
+  {MIRNEXT_A64_OPCODE (VAnd), "r r r", "4e201c00:ffe0fc00 vd0 vn1 vm2"},
+  {MIRNEXT_A64_OPCODE (VOr), "r r r", "4ea01c00:ffe0fc00 vd0 vn1 vm2"},
+  {MIRNEXT_A64_OPCODE (VXor), "r r r", "6e201c00:ffe0fc00 vd0 vn1 vm2"},
+
   {MIRNEXT_A64_OPCODE (LDMov), "r r",
    "4ea01c00:ffe0fc00 vd0 vm1 vn1"},                                /* orr Qd.16b,Qm.16b,Qn.16b */
   {MIRNEXT_A64_OPCODE (LDMov), "r mld", "3ce00800:ffe00c00 vd0 m"}, /* ldr Qd,[Rn,Rm{,#4}] */
@@ -538,6 +560,14 @@ MIRNEXT_A64_TABLE = {
   /* [u]mulo[s] insns uses zero flag to check overflow: */
   {MIRNEXT_A64_OPCODE (MultiplyOverflow), "l", BNE},   /* b.ne */
   {MIRNEXT_A64_OPCODE (MultiplyNoOverflow), "l", BEQ}, /* b.eq */
+#ifdef MIRNEXT_A64_NATIVE
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding) \
+  {MIRNEXT_A64_NATIVE (name), constraints, encoding},
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
+#endif
 };
 
 #undef CMPR

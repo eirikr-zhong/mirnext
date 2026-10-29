@@ -50,7 +50,10 @@ enum Tag : unsigned {
   EOI = 61,
   EOFILE = 62,
   ALIAS_DISP = 63,
-  ALIAS_LAST = 69
+  ALIAS_LAST = 69,
+  // MIRNext v128 extensions. The legacy scalar tags above remain unchanged.
+  VECTOR_TYPE = 70,
+  VECTOR_LITERAL = 71
 };
 #if defined(__x86_64__) && !defined(_WIN32)
 inline constexpr std::size_t long_double_bytes = 10;

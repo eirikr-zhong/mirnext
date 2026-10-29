@@ -95,6 +95,31 @@ TEST_CASE ("x86 ABI scalar register banks exhaust independently on SysV and shar
   CHECK (layout (ABI::X86Windows, {}).stack_bytes == 32);
   CHECK (layout (ABI::X86SysV, {}).stack_bytes == 0);
 }
+
+TEST_CASE ("x86 v128 uses SysV XMM and aligned stack slots or Windows indirect copies") {
+  auto type = Type::vector128 (Type::VectorElement::F32, 4);
+  std::vector<Type> arguments (8, type);
+  arguments.push_back (Type::i64 ());
+  for (unsigned n = 0; n < 7; ++n) arguments.push_back (Type::i64 ());
+  arguments.push_back (type);
+  auto sysv = layout_x86_arguments (ABI::X86SysV, arguments);
+  REQUIRE (sysv.has_value ());
+  for (unsigned n = 0; n < 8; ++n) {
+    location (sysv.value ().arguments[n], {static_cast<R> (unsigned (R::XMM0) + n)});
+    CHECK_FALSE (sysv.value ().arguments[n].indirect);
+  }
+  location (sysv.value ().arguments.back (), {}, 16);
+  CHECK (sysv.value ().stack_bytes == 32);
+  auto win = layout (ABI::X86Windows, {type, Type::i64 (), type, type, type});
+  location (win.arguments[0], {R::CX});
+  location (win.arguments[1], {R::DX});
+  location (win.arguments[2], {R::R8});
+  location (win.arguments[3], {R::R9});
+  location (win.arguments[4], {}, 32);
+  for (unsigned n : {0, 2, 3, 4}) CHECK (win.arguments[n].indirect);
+  CHECK_FALSE (win.arguments[1].indirect);
+  CHECK (win.stack_bytes == 40);
+}
 TEST_CASE ("x86 ABI all five block classifications retain ordered register pieces") {
   for (std::size_t size : {1u, 8u, 9u, 16u}) {
     auto a = layout (ABI::X86SysV, {Type::block (size, Type::BlockClass::Class1),

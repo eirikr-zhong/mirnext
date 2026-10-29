@@ -134,6 +134,7 @@ class InstructionBuilder {
 
  private:
   friend class ::mirnext::ir::detail::ExpressionState;
+  friend class MIRBuilder;
   Error fail (Error);
   Function *function_;
   BasicBlock *block_ = nullptr;

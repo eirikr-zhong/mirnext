@@ -37,7 +37,7 @@ const Register *input_register (const Function &function, const Instruction &ins
 Type scalar (Type type) {
   if (sizeof (long double) == sizeof (double) && type.kind () == Type::Kind::LongDouble)
     return Type (Type::Kind::F64);
-  return type.is_float () ? type : Type::i64 ();
+  return type.is_float () || type.is_vector () ? type : Type::i64 ();
 }
 struct Input {
   std::size_t operand;
@@ -734,6 +734,7 @@ Result<SSAValue &> SSAUpdater::coalesce_copy (Instruction &instruction) {
   if (&instruction.function () != &form_.function_
       || (instruction.opcode () != Opcode::Mov && instruction.opcode () != Opcode::FMov
           && instruction.opcode () != Opcode::DMov && instruction.opcode () != Opcode::LDMov
+          && instruction.opcode () != Opcode::VMov
           && !(sizeof (long double) == sizeof (double)
                && (instruction.opcode () == Opcode::D2LD || instruction.opcode () == Opcode::LD2D)))
       || !detail::operand_access (instruction.operands ()[0]).get<const Register *> ()

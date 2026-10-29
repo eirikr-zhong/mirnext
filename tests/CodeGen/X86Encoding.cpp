@@ -175,7 +175,7 @@ TEST_CASE ("x86 address fields reconstruct every base index scale and signed dis
 }
 TEST_CASE ("all x86 declarations have precompiled bounded encoding recipes") {
   auto rows = x86_instruction_patterns ();
-  REQUIRE (rows.size () == 732);
+  REQUIRE (rows.size () == 810);
   std::array<bool, static_cast<unsigned> (X86EncodingKind::Literal32) + 1> kinds{};
   for (auto &row : rows) {
     CAPTURE (row.index);
@@ -562,4 +562,48 @@ TEST_CASE ("native x86 encoder diagnoses rounded stack immediates and stale fram
   auto framed = t.frame ();
   REQUIRE ((mirnext::codegen::detail::access (t.f).create_label (t.entry)).has_value ());
   CHECK_FALSE ((encode_machine (t.f, framed)).has_value ());
+}
+TEST_CASE ("native SSE2 lane operations encode the expected instruction bytes") {
+  if (!x86 ()) return;
+  using P = MachinePseudoOpcode;
+  struct Sample {
+    P code;
+    unsigned form, immediate;
+    std::vector<std::uint8_t> bytes;
+  };
+  const Sample samples[]{{P::X86VectorFromGP, 0, 0, {0x66, 0x48, 0x0f, 0x6e, 0xc1}},
+                         {P::X86VectorToGP, 1, 0, {0x66, 0x48, 0x0f, 0x7e, 0xc8}},
+                         {P::X86Shuffle32, 2, 0x1b, {0x66, 0x0f, 0x70, 0xc1, 0x1b}},
+                         {P::X86VectorLeft, 3, 7, {0x66, 0x0f, 0x73, 0xf8, 7}},
+                         {P::X86VectorEq32, 4, 0, {0x66, 0x0f, 0x76, 0xc1}},
+                         {P::X86CompareF64, 5, 4, {0x66, 0x0f, 0xc2, 0xc1, 4}}};
+  for (auto &sample : samples) {
+    CAPTURE (opcode_name (sample.code));
+    Fixture f;
+    std::vector<MachineOperand> operands;
+    switch (sample.form) {
+    case 0: operands = {f.reg (R::XMM0), f.reg (R::CX)}; break;
+    case 1: operands = {f.reg (R::AX), f.reg (R::XMM1)}; break;
+    case 2:
+      operands
+        = {f.reg (R::XMM0), f.reg (R::XMM1), MachineOperand (std::uint64_t (sample.immediate))};
+      break;
+    case 3:
+      operands
+        = {f.reg (R::XMM0), f.reg (R::XMM0), MachineOperand (std::uint64_t (sample.immediate))};
+      break;
+    case 4: operands = {f.reg (R::XMM0), f.reg (R::XMM0), f.reg (R::XMM1)}; break;
+    default:
+      operands = {f.reg (R::XMM0), f.reg (R::XMM0), f.reg (R::XMM1),
+                  MachineOperand (std::uint64_t (sample.immediate))};
+      break;
+    }
+    f.add (sample.code, operands);
+    if (sample.form != 1) f.add (P::X86VectorToGP, {f.reg (R::AX), f.reg (R::XMM0)});
+    f.add (Opcode::Ret, {f.reg (R::AX)});
+    auto compiled = f.run ();
+    CHECK (std::search (compiled.bytes ().begin (), compiled.bytes ().end (), sample.bytes.begin (),
+                        sample.bytes.end ())
+           != compiled.bytes ().end ());
+  }
 }

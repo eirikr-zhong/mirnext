@@ -30,6 +30,109 @@ AArch64 has a complete owning machine-code pipeline connected to the interpreter
 linker and execution session, including eager/lazy JIT and native ABI adapters.
 Linux and macOS retain their separate ABI rules.
 
+MIRNext exposes fixed-width 128-bit vectors through `Type::vector128(element, lanes)`:
+signed/unsigned 8-, 16-, 32- and 64-bit integer lanes, `f32x4` and `f64x2`.
+The operation inventory is fixed to [WebAssembly Core 2.0 SIMD128](https://webassembly.github.io/spec/versions/core/WebAssembly-2.0.pdf).
+All 236 standard instruction entries are mapped by the test adapter to typed MIR
+operations or checked Builder sequences. This adds arithmetic capabilities to MIR;
+it does not add Wasm loading, linear memory or sandboxing. There are no 256-bit,
+Relaxed SIMD, SSE4/SSSE3/AVX, FMA or runtime feature-dispatch requirements.
+
+| Group | Supported lane combinations and operations |
+| --- | --- |
+| Existing core | All ten types: unaligned load/store, add/subtract, bitwise operations, comparisons, splat, lane extraction/insertion, constant two-input shuffle |
+| Integer arithmetic | 16/32/64-bit multiply; integer negation; signed abs; shifts modulo lane width; signed/unsigned 8/16/32-bit min/max |
+| Saturation and counts | Signed/unsigned 8/16-bit saturating add/subtract; unsigned rounded average; byte population count |
+| Widening | Signed/unsigned low/high 8→16, 16→32, 32→64 extension and multiplication; pairwise 8→16 and 16→32 addition |
+| Narrowing and products | Signed 16→8 and 32→16 inputs narrowed with signed/unsigned saturation; signed i16 dot→i32; signed Q15 rounded saturating multiply |
+| Floating point | f32/f64 multiply/divide, sqrt, abs/neg, canonical NaN-propagating min/max, comparison-select pmin/pmax, ceil/floor/trunc/nearest |
+| Masks and rearrangement | Bitcast, AND-NOT, arbitrary-bit bitselect, any-true, integer all-true/bitmask, byte swizzle with out-of-range indices producing zero |
+| Conversion | Signed/unsigned i32→f32, low i32→f64, low f32→f64, f64→f32 with upper half zero, saturating f32→i32 and f64→i32 with upper half zero |
+| Narrow memory | 8-byte widening loads, 1/2/4/8-byte splat loads, 4/8-byte zero loads, 1/2/4/8-byte lane loads/stores |
+
+`MIRBuilder` uses explicit methods such as `create_mul`, `create_add_sat`,
+`create_extend(value, VectorHalf::High)`, `create_narrow_sat(a, b, type)`,
+`create_bitselect(mask, yes, no)` and `create_load_lane`.
+Conversions and bitcasts use `(value, destination_type)` order. The signedness of
+typed integer lanes selects signed/unsigned operations; unsigned narrowing still
+interprets its wider input as signed. Unsupported combinations fail before IR is
+appended. See [the SIMD example](examples/native-simd.cpp).
+
+Comparisons produce unsigned masks. Floating min/max return canonical quiet NaNs;
+min selects −0 and max selects +0 when both inputs are zero. `pmin/pmax` preserve
+the selected operand bits, including NaN payloads and signed zero. Abs/neg and
+rearrangements preserve payload bits. Nearest uses ties-to-even independently of
+the host rounding mode; ordinary arithmetic uses the existing default FP environment.
+
+NEON uses direct instructions where available. SSE2 operations without a direct
+instruction use vector and GP/scalar-FP register sequences: this includes 64-bit
+integer multiply/comparison, dynamic swizzle, Q15, rounding and some conversions.
+NEON 64-bit integer multiplication also uses a vector sequence: low-word widening
+products and shifted cross products, without GP lane extraction. These sequences
+are not advertised as single hardware instructions. Lowering
+creates no temporary stack objects for vector assembly; ABI stack arguments and
+actual allocation spills remain supported. Constants are constructed in registers
+and reused within a basic block. Narrow memory methods compose scalar accesses
+with vector operations and retain the exact defined access width.
+
+Vector types/constants and all new opcodes round-trip through MIR text and binary
+formats; previous protocol numbers remain unchanged. Vectors can be function
+parameters/results and module variables. Unnamed vector varargs and vector
+`va_arg` retain explicit diagnostics.
+
+The offline test inventory and 22,632 official literal cases are pinned to
+`WebAssembly/spec` tag `wg-2.0` (revision
+`fffc6e12fa454e475455a7b58d3b5dc343980c10`); attribution and licenses are retained
+in [tests/SIMD/SOURCE](tests/SIMD/SOURCE). Memory, immediate-lane and compound cases
+also have native MIR tests, including protection pages, payload bits, altered
+rounding modes, mixed engines and register pressure. The normal build does not
+parse Wasm or regenerate fixtures.
+
+Native lowering was measured on Apple M1 (arm64 macOS, Release shared library).
+Earlier O2 measurements of the core migration compared the preserved scalar-stack
+implementation with register-only lowering, using identical programs and inputs:
+
+| Workload | JIT preparation, µs (before → after) | Generated bytes (before → after) | Stack-memory instructions (before → after) | ns/loop iteration (before → after) |
+| --- | --- | --- | --- | --- |
+| Unsigned 64-bit comparison | 591 → 406 | 176 → 80 | 13 → 0 | 7.58 → 1.19 |
+| Two-input byte shuffle | 518 → 422 | 240 → 160 | 39 → 0 | 7.09 → 1.70 |
+| 32-bit extract/insert/splat | 556 → 484 | 160 → 80 | 16 → 0 | 7.35 → 3.92 |
+
+The new arithmetic workloads also have equivalent scalar MIR implementations.
+On the same machine at O2 (scalar → SIMD128):
+
+| Workload | JIT preparation, µs | Generated bytes | Stack-memory instructions | ns/loop iteration |
+| --- | --- | --- | --- | --- |
+| Eight-lane signed Q15 multiply | 5,233 → 605 | 848 → 64 | 14 → 0 | 7.54 → 0.98 |
+| Eight-lane signed saturating addition | 6,151 → 526 | 1,072 → 64 | 14 → 0 | 9.98 → 0.61 |
+| Two-lane 64-bit integer multiplication | 712 → 634 | 96 → 96 | 0 → 0 | 1.08 → 3.11 |
+
+The 64-bit multiply sequence remains slower than two scalar multiplications in
+this dependent-loop workload on M1. SIMD128 support does not imply a speedup for
+every operation; NEON has no direct 64-bit lane multiply. The scalar Q15 and
+saturation kernels also incur real register-allocation spills.
+
+`mirnext_simd_benchmark` checks results against the interpreter, warms native
+entries, and reports medians of 31 samples after three warmups at every O0–O3
+level. Each runtime sample makes 100,000 native calls, each containing 128 loop
+iterations; session-call overhead is excluded. JIT preparation includes session
+creation, optimization, compilation and linking. Generated bytes are the session
+code total; instruction and stack-memory counts describe the machine-IR body,
+excluding the encoded prologue/epilogue. Each vector kernel has two user loads and
+one user store; scalar reference kernels have those accesses per lane. All remaining
+memory instructions count as stack accesses, including accesses through derived
+addresses.
+These are small dependent-loop workloads, not general application speedups.
+Raw timing results are not stored in the repository.
+
+The expanded operation set passes native macOS arm64 Debug/static and
+Release/shared suites (59/59 each), ASan core tests (32/32), a Release/static
+no-tests build, and installed CXX-only consumers of both static and shared libraries.
+The tests exercise O0–O3, interpreter, eager/lazy JIT and BBV; additional cases
+cover mixed engines and call-preserved vectors. Native x86_64, Linux AArch64 and
+Windows validation requires CI; standard SIMD128 completion is not claimed until
+platform acceptance is complete.
+
 The x86_64 backend implements instruction selection,
 ABI lowering, two-address legalization, allocation, spill rewriting and
 post-allocation optimization using the new machine objects. Frame plans preserve

@@ -81,30 +81,34 @@ OptionalRef<const PhysicalRegisterInfo> TargetMachine::register_info (PhysicalRe
 }
 bool TargetMachine::accepts (PhysicalRegister reg, ir::Type type) const {
   auto info = register_info (reg).get ();
-  if (!info || !type.valid () || (!type.is_scalar () && !type.is_block ())) return false;
+  if (!info || !type.valid () || (!type.is_scalar () && !type.is_vector () && !type.is_block ()))
+    return false;
   type = scalar_type (type);
   if (architecture_ == Architecture::X86_64 && type.kind () == ir::Type::Kind::LongDouble)
     return false;
-  return type.is_float () ? info->bank != RegisterBank::Integer
-                          : info->bank == RegisterBank::Integer;
+  return (type.is_float () || type.is_vector ()) ? info->bank == RegisterBank::Floating
+                                                 : info->bank == RegisterBank::Integer;
 }
 bool TargetMachine::call_clobbers (PhysicalRegister reg, ir::Type type) const {
   if (!register_info (reg).get ()) return false;
   const auto n = reg.encoding ();
   if (architecture_ == Architecture::AArch64)
     return n < 32 ? !(19 <= n && n <= 28)
-                  : type.kind () == ir::Type::Kind::LongDouble || !(40 <= n && n <= 47);
+                  : type.is_vector () || type.kind () == ir::Type::Kind::LongDouble
+                      || !(40 <= n && n <= 47);
   return !x86_callee_saved_register (abi_, static_cast<X86Register> (n));
 }
 ir::Type TargetMachine::scalar_type (ir::Type type) const {
+  if (type.is_vector ()) return type;
   if (type.is_integer () || type.is_block ()) return ir::Type::i64 ();
   if (type.kind () == ir::Type::Kind::LongDouble && sizeof (long double) == sizeof (double))
     return ir::Type (ir::Type::Kind::F64);
   return type;
 }
 Result<TypeLayout> TargetMachine::layout (ir::Type type) const {
-  if (!type.valid () || !type.is_scalar ())
-    return Error{ErrorCode::InvalidArgument, "layout requires a scalar type"};
+  if (!type.valid () || (!type.is_scalar () && !type.is_vector ()))
+    return Error{ErrorCode::InvalidArgument, "layout requires a scalar or vector type"};
+  if (type.is_vector ()) return TypeLayout{16, 16};
   using K = ir::Type::Kind;
   switch (type.kind ()) {
   case K::I8:

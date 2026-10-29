@@ -20,7 +20,7 @@ using namespace ir;
 bool digit (char c) { return c >= '0' && c <= '9'; }
 bool name_character (char c, bool first) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$' || c == '%'
-         || c == '.' || (!first && digit (c));
+         || c == '.' || c == '<' || c == '>' || (!first && digit (c));
 }
 bool identifier (std::string_view name) {
   if (name.empty () || !name_character (name[0], true)) return false;
@@ -32,6 +32,28 @@ std::optional<Type> named_type (std::string_view name) {
   for (unsigned n = 0; n < std::size (names); ++n)
     if (name == names[n]) return Type (static_cast<Type::Kind> (n));
   if (name == "undef") return Type (Type::Kind::Undef);
+  if (name.starts_with ("v128<") && name.ends_with ('>')) {
+    auto body = name.substr (5, name.size () - 6);
+    auto x = body.find ('x');
+    if (x != body.npos) {
+      unsigned lanes = 0;
+      auto [last, error]
+        = std::from_chars (body.data () + x + 1, body.data () + body.size (), lanes);
+      if (error == std::errc{} && last == body.data () + body.size ()) {
+        constexpr std::pair<std::string_view, Type::VectorElement>
+          elements[]{{"i8", Type::VectorElement::I8},   {"u8", Type::VectorElement::U8},
+                     {"i16", Type::VectorElement::I16}, {"u16", Type::VectorElement::U16},
+                     {"i32", Type::VectorElement::I32}, {"u32", Type::VectorElement::U32},
+                     {"i64", Type::VectorElement::I64}, {"u64", Type::VectorElement::U64},
+                     {"f32", Type::VectorElement::F32}, {"f64", Type::VectorElement::F64}};
+        for (auto [spelling, element] : elements)
+          if (body.substr (0, x) == spelling) {
+            auto type = Type::vector128 (element, lanes);
+            if (type.valid ()) return type;
+          }
+      }
+    }
+  }
   if (name == "rblk") return Type::return_block (0);
   if (name.starts_with ("blk")) {
     auto suffix = name.substr (3);
@@ -47,6 +69,12 @@ std::optional<Type> named_type (std::string_view name) {
 std::string type_name (Type type) {
   constexpr std::string_view names[]{"i64", "i8", "u8", "i16", "u16", "i32", "u32",  "i64",
                                      "u64", "f",  "d",  "ld",  "p",   "blk", "rblk", "undef"};
+  if (type.is_vector ()) {
+    constexpr std::string_view elements[]{"i8",  "u8",  "i16", "u16", "i32",
+                                          "u32", "i64", "u64", "f32", "f64"};
+    return "v128<" + std::string (elements[static_cast<unsigned> (type.vector_element ())]) + "x"
+           + std::to_string (type.vector_lanes ()) + ">";
+  }
   if (type.kind () == Type::Kind::Block && type.block_class () != Type::BlockClass::Default)
     return "blk" + std::to_string (static_cast<unsigned> (type.block_class ()));
   return std::string (names[static_cast<unsigned> (type.kind ())]);
@@ -241,6 +269,23 @@ class Lexer {
       if (single) return parse.template operator()<float> ();
       if (extended) return parse.template operator()<long double> ();
       return parse.template operator()<double> ();
+    }
+    if (hex && body.size () == 34) {
+      body.remove_prefix (2);
+      VectorConstant value{Type::vector128 (Type::VectorElement::I8, 16), {}};
+      for (unsigned n = 0; n < value.bytes.size (); ++n) {
+        auto high = body[n * 2], low = body[n * 2 + 1];
+        auto digit_value = [] (char c) -> unsigned {
+          if (c >= '0' && c <= '9') return unsigned (c - '0');
+          if (c >= 'a' && c <= 'f') return unsigned (c - 'a' + 10);
+          if (c >= 'A' && c <= 'F') return unsigned (c - 'A' + 10);
+          return 16;
+        };
+        auto h = digit_value (high), l = digit_value (low);
+        if (h > 15 || l > 15) return error ("invalid v128 literal", line, column);
+        value.bytes[n] = std::byte ((h << 4) | l);
+      }
+      return Operand (std::move (value));
     }
     unsigned base = hex ? 16 : body.size () > 1 && body[0] == '0' ? 8 : 10;
     if (hex) body.remove_prefix (2);
@@ -604,8 +649,9 @@ class Parser {
         while (!cursor.empty ()) {
           auto value = declaration (cursor, s.name == "global");
           if (!(value).has_value ()) return diagnose (value.error ());
-          if (value.value ().name.empty () || !value.value ().type.is_scalar ())
-            return invalid ("local/global variable must be named and scalar");
+          if (value.value ().name.empty ()
+              || (!value.value ().type.is_scalar () && !value.value ().type.is_vector ()))
+            return invalid ("local/global variable must be named and scalar or vector");
           auto reg = ir::detail::access (*(body.function))
                        .create_register (value.value ().type, value.value ().name,
                                          value.value ().hardware);
@@ -742,6 +788,17 @@ class Parser {
     if (cursor.take (Token::Kind::Colon)) {
       auto type = named_type ((name).value ());
       if (!type) return invalid ("unknown memory type");
+      if (type->is_vector () && cursor.peek () && cursor.peek ()->kind == Token::Kind::Literal
+          && ir::detail::operand_access (literals_[cursor.peek ()->literal])
+               .get<VectorConstant> ()) {
+        auto literal = cursor.literal ();
+        if (!(literal).has_value ()) return diagnose (literal.error ());
+        auto vector = ir::detail::operand_access ((literal).value ()).get<VectorConstant> ();
+        if (!vector) return invalid ("expected v128 literal");
+        auto value = *vector;
+        value.type = *type;
+        return Operand (std::move (value));
+      }
       return memory (cursor, *type, *body.function, builder);
     }
     auto descriptor = instruction_descriptor (opcode).get ();
@@ -878,11 +935,25 @@ class Parser {
       return DataInitializer (value);
     }
     auto type = named_type (kind);
-    if (!type || !type->is_scalar ()) return invalid ("invalid data type");
+    if (!type || (!type->is_scalar () && !type->is_vector ())) return invalid ("invalid data type");
     InitializedData value{*type, {}};
     while (!cursor.empty ()) {
+      if (type->is_vector ()) {
+        auto element_type = cursor.name ();
+        if (!element_type.has_value () || named_type (element_type.value ()) != type)
+          return invalid ("data vector and literal types differ");
+        auto colon = cursor.expect (Token::Kind::Colon, "expected vector literal colon");
+        if (!colon.has_value ()) return diagnose (colon.error ());
+      }
       auto element = cursor.literal ();
       if (!(element).has_value ()) return diagnose (element.error ());
+      if (type->is_vector ()) {
+        auto constant = ir::detail::operand_access (element.value ()).get<VectorConstant> ();
+        if (!constant) return invalid ("expected vector literal");
+        auto typed = *constant;
+        typed.type = *type;
+        element = Operand (typed);
+      }
       value.values.push_back (std::move ((element).value ()));
       if (cursor.empty ()) break;
       auto comma = cursor.expect (Token::Kind::Comma, "expected data comma");
@@ -1040,6 +1111,12 @@ class Formatter {
             out_ << ':' << value.alias;
             if (!value.nonalias.empty ()) out_ << ':' << value.nonalias;
           }
+        } else if constexpr (std::is_same_v<T, VectorConstant>) {
+          out_ << type_name (value.type) << ":0x" << std::hex;
+          for (auto byte : value.bytes)
+            out_ << std::setw (2) << std::setfill ('0')
+                 << static_cast<unsigned> (std::to_integer<unsigned char> (byte));
+          out_ << std::setfill (' ') << std::dec;
         } else if constexpr (std::is_same_v<T, std::uint64_t>)
           out_ << std::bit_cast<std::int64_t> (value);
         else

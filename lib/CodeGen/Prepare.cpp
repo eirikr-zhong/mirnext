@@ -1,9 +1,11 @@
+#include "mirnext/IR/Vector.hpp"
 /* Licensed under the MIT License. Direct canonical IR to owning machine IR. */
 #include "mirnext/CodeGen/Stages.hpp"
 #include "mirnext/CodeGen/Access.hpp"
 #include "mirnext/CodeGen/Checked.hpp"
 #include "mirnext/IR/Access.hpp"
 #include "mirnext/CodeGen/MachineIR.hpp"
+#include "mirnext/CodeGen/Detail/Vector.hpp"
 #include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
@@ -154,7 +156,14 @@ Result<MachineFunction> prepare_machine_ir (const ir::Function &source,
     }
   std::unordered_map<const ir::Symbol *, const MachineSymbol *> symbols;
   std::unordered_map<const ir::MemoryLocation *, const MachineMemoryLocation *> locations;
+  MachineBasicBlock *current_block = nullptr;
+  detail::VectorConstantCache vector_constants;
   auto convert = [&] (const ir::Operand &operand) -> Result<MachineOperand> {
+    if (auto constant = ir::detail::operand_access (operand).get<ir::VectorConstant> ()) {
+      if (!current_block) return error ("vector constant has no insertion block");
+      return detail::prepare_vector_constant (function, *current_block, *constant,
+                                              vector_constants);
+    }
     if (auto reg = ir::detail::operand_access (operand).get<const ir::Register *> ())
       return detail::NodeAccess::make_MachineOperand (*registers.at (*reg));
     if (auto label = ir::detail::operand_access (operand).get<const ir::Label *> ())
@@ -217,16 +226,39 @@ Result<MachineFunction> prepare_machine_ir (const ir::Function &source,
   for (auto &block : source.blocks ())
     for (auto &insn : block.instructions ()) {
       auto &destination = *blocks.at (&block);
+      if (current_block != &destination) {
+        vector_constants.clear ();
+        current_block = &destination;
+      }
       if (insn.opcode () == ir::Opcode::Ret && !hardware_uses.empty ()) {
         auto use = rewriter.append (destination, MachinePseudoOpcode::Use, hardware_uses);
         if (!(use).has_value ()) return use.error ();
       }
       std::vector<MachineOperand> operands;
       operands.reserve (insn.operands ().size ());
-      for (auto &operand : insn.operands ()) {
+      for (std::size_t n = 0; n < insn.operands ().size (); ++n) {
+        if (insn.opcode () == ir::Opcode::VShuffle && n == 3) continue;
+        auto &operand = insn.operands ()[n];
         auto converted = convert (operand);
         if (!(converted).has_value ()) return converted.error ();
         operands.push_back (std::move ((converted).value ()));
+      }
+      if (ir::detail::vector_opcode (insn.opcode ()) && insn.opcode () != ir::Opcode::VMov
+          && insn.opcode () != ir::Opcode::VAdd && insn.opcode () != ir::Opcode::VSub
+          && insn.opcode () != ir::Opcode::VAnd && insn.opcode () != ir::Opcode::VOr
+          && insn.opcode () != ir::Opcode::VXor) {
+        auto &operand = insn.operands ()[insn.opcode () == ir::Opcode::VSplat ? 0 : 1];
+        auto reg = ir::detail::operand_access (operand).get<const ir::Register *> ();
+        auto memory = ir::detail::operand_access (operand).get<ir::Memory> ();
+        auto constant = ir::detail::operand_access (operand).get<ir::VectorConstant> ();
+        auto type = reg ? (*reg)->type () : memory ? memory->type : constant->type;
+        auto mask = insn.opcode () == ir::Opcode::VShuffle
+                      ? ir::detail::operand_access (insn.operands ()[3]).get<ir::VectorConstant> ()
+                      : nullptr;
+        auto lowered = detail::prepare_vector_operation (function, destination, insn.opcode (),
+                                                         type, operands, vector_constants, mask);
+        if (!lowered.has_value ()) return error (lowered.error ().message);
+        continue;
       }
       auto added
         = rewriter.append (destination, target.opcode (insn.opcode ()), std::move (operands));

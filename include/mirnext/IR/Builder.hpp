@@ -97,6 +97,7 @@ class CallArgument {
   explicit CallArgument (Memory memory) : value_ (std::move (memory)) {}
   std::variant<Value, Memory> value_;
 };
+enum class VectorHalf { Low, High };
 class SSARewriter;
 // A batch owns insertion state and one diagnostic, never a second IR body.
 // Creation returns ordinary borrowed node pointers. After failure, later calls
@@ -190,6 +191,50 @@ class MIRBuilder {
     return create_instruction (op, std::span<const Operand> (operands.begin (), operands.size ()));
   }
   Value create_unary (Opcode, Value, std::string_view name = {});
+  Value constant_vector (Type, std::span<const std::byte>) const;
+  Value create_vector_splat (Type, Value);
+  Value create_extract_lane (Value, unsigned lane);
+  Value create_insert_lane (Value, Value element, unsigned lane);
+  Value create_shuffle (Value, Value, std::span<const unsigned> lanes);
+  Value create_shuffle (Value a, Value b, std::initializer_list<unsigned> lanes) {
+    return create_shuffle (a, b, std::span (lanes));
+  }
+  Value create_abs (Value);
+  Value create_sqrt (Value);
+  Value create_popcount (Value);
+  Value create_ceil (Value);
+  Value create_floor (Value);
+  Value create_trunc (Value);
+  Value create_nearest (Value);
+  Value create_any_true (Value);
+  Value create_all_true (Value);
+  Value create_bitmask (Value);
+  Value create_min (Value, Value);
+  Value create_max (Value, Value);
+  Value create_pmin (Value, Value);
+  Value create_pmax (Value, Value);
+  Value create_add_sat (Value, Value);
+  Value create_sub_sat (Value, Value);
+  Value create_avgr (Value, Value);
+  Value create_andnot (Value, Value);
+  Value create_bitcast (Value, Type);
+  Value create_bitselect (Value mask, Value if_true, Value if_false);
+  Value create_swizzle (Value, Value indices);
+  Value create_extend (Value, VectorHalf);
+  Value create_extmul (Value, Value, VectorHalf);
+  Value create_extadd_pairwise (Value);
+  Value create_narrow_sat (Value, Value, Type);
+  Value create_dot (Value, Value);
+  Value create_q15mulr_sat (Value, Value);
+  Value create_convert_low (Value, Type);
+  Value create_convert_zero (Value, Type);
+  Value create_trunc_sat (Value, Type);
+  Value create_trunc_sat_zero (Value, Type);
+  Value create_load_extend (Type, Value address, std::int64_t displacement = 0);
+  Value create_load_splat (Type, Memory);
+  Value create_load_zero (Type, Memory);
+  Value create_load_lane (Value, Memory, unsigned lane);
+  void create_store_lane (Memory, Value, unsigned lane);
   Value create_binary (Opcode, Value, Value, std::string_view name = {});
 #define MIRNEXT_EXPLICIT_BINARY(name) Value create_##name (Value, Value);
   MIRNEXT_EXPLICIT_BINARY (add)
@@ -310,6 +355,7 @@ class MIRBuilder {
   SSARewriter create_ssa ();
 
  private:
+  Value create_vector_operation (Opcode, Type, std::span<const Value>);
   friend struct detail::NativeAccess;
   struct Impl;
   std::unique_ptr<Impl> impl_;

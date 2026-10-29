@@ -67,6 +67,7 @@ enum class TestCode {
 struct pattern {
   TestCode code;
   const char *pattern, *replacement;
+  unsigned vector_shape = 0;
 };
 #define MIRNEXT_A64_OPCODE(name) TestCode::name
 #define MIRNEXT_A64_TABLE static const struct pattern patterns[]
@@ -113,12 +114,13 @@ TEST_CASE ("every shared AArch64 instruction pattern has a native matching examp
         operands.emplace_back ((label).value ());
       else if (token == "r") {
         char role = n < d->roles.size () ? d->roles[n] : 'i';
-        auto physical = f->target ()
-                          .registers ()[role == 'f' || role == 'F' || role == 'd' || role == 'D'
-                                            || role == 'e' || role == 'E'
-                                          ? 32
-                                          : 0]
-                          .reg;
+        auto physical
+          = f->target ()
+              .registers ()[role == 'f' || role == 'F' || role == 'd' || role == 'D' || role == 'e'
+                                || role == 'E' || role == 'v' || role == 'V'
+                              ? 32
+                              : 0]
+              .reg;
         operands.emplace_back (physical);
       } else if (token.front () == 'h') {
         unsigned n = 0;
@@ -133,6 +135,8 @@ TEST_CASE ("every shared AArch64 instruction pattern has a native matching examp
           type = Type (Type::Kind::F64);
         else if (tag == "ld")
           type = Type (Type::Kind::LongDouble);
+        else if (tag == "v")
+          type = Type::vector128 (Type::VectorElement::I8, 16);
         else {
           auto width = unsigned (tag.back () - '0');
           bool sign = tag.front () == 's';

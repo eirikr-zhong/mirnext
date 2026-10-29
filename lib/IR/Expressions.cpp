@@ -88,11 +88,21 @@ Opcode comparison_opcode (Type type, Comparison comparison, bool branch) {
   unsigned row = type.is_float () ? 4 + static_cast<unsigned> (type.kind ())
                                       - static_cast<unsigned> (Type::Kind::F32)
                                   : (narrow (type) ? 2 : 0) + unsigned_integer (type);
+  if (type.is_vector ())
+    return std::array{O::VEq, O::VNe, O::VLt, O::VLe, O::VGt, O::VGe}[static_cast<unsigned> (
+      comparison)];
   auto pair = table[row][static_cast<unsigned> (comparison)];
   return branch ? pair.branch : pair.value;
 }
 std::optional<Opcode> arithmetic_opcode (Type type, unsigned operation) {
   using O = Opcode;
+  if (type.is_vector ()) {
+    if (operation == 0) return O::VAdd;
+    if (operation == 1) return O::VSub;
+    if (operation >= 5 && operation <= 7)
+      return std::array{O::VAnd, O::VOr, O::VXor}[operation - 5];
+    return {};
+  }
   if (type.kind () == Type::Kind::Bool || type.kind () == Type::Kind::Pointer) {
     if (type.kind () == Type::Kind::Bool && operation >= 5 && operation <= 7)
       return std::array{O::And, O::Or, O::Xor}[operation - 5];
@@ -125,6 +135,7 @@ Opcode move_opcode (Type type) {
   return type.kind () == Type::Kind::F32          ? Opcode::FMov
          : type.kind () == Type::Kind::F64        ? Opcode::DMov
          : type.kind () == Type::Kind::LongDouble ? Opcode::LDMov
+         : type.kind () == Type::Kind::Vector     ? Opcode::VMov
                                                   : Opcode::Mov;
 }
 }  // namespace
@@ -136,7 +147,8 @@ detail::ExpressionState::ExpressionState (InstructionBuilder &builder, Type type
     std::visit (
       [&] (const auto &scalar) {
         using T = std::decay_t<decltype (scalar)>;
-        if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, const Register *>)
+        if constexpr (std::is_arithmetic_v<T> || std::is_same_v<T, VectorConstant>
+                      || std::is_same_v<T, const Register *>)
           value_.emplace (scalar);
       },
       detail::operand_access (*(value)).storage ());
@@ -161,8 +173,9 @@ Result<Operand> detail::ExpressionState::value () const {
 }
 detail::ExpressionState InstructionBuilder::expression (const Register &reg) {
   if ((function_->module ().error ()).has_value ()) return {*this, reg.type (), {}};
-  if (&reg.function () != function_ || !reg.type ().valid () || !reg.type ().is_scalar ()) {
-    fail (invalid ("expression requires a scalar register from this function"));
+  if (&reg.function () != function_ || !reg.type ().valid ()
+      || (!reg.type ().is_scalar () && !reg.type ().is_vector ())) {
+    fail (invalid ("expression requires a scalar or vector register from this function"));
     return {*this, reg.type (), {}};
   }
   return {*this, reg.type (), Operand (reg)};
@@ -185,22 +198,31 @@ detail::ExpressionState InstructionBuilder::expression (const GlobalVariable &va
                             : detail::ExpressionState (*this, variable.type (), {});
 }
 detail::ExpressionState InstructionBuilder::literal (Operand value) {
-  auto type = detail::operand_access (value).get<std::uint64_t> () ? Type (Type::Kind::U64)
-              : detail::operand_access (value).get<float> ()       ? Type (Type::Kind::F32)
-              : detail::operand_access (value).get<double> ()      ? Type (Type::Kind::F64)
-              : detail::operand_access (value).get<long double> () ? Type (Type::Kind::LongDouble)
-                                                                   : Type::i64 ();
+  auto type = detail::operand_access (value).get<VectorConstant> ()
+                ? detail::operand_access (value).get<VectorConstant> ()->type
+              : detail::operand_access (value).get<std::uint64_t> () ? Type (Type::Kind::U64)
+              : detail::operand_access (value).get<float> ()         ? Type (Type::Kind::F32)
+              : detail::operand_access (value).get<double> ()        ? Type (Type::Kind::F64)
+              : detail::operand_access (value).get<long double> ()   ? Type (Type::Kind::LongDouble)
+                                                                     : Type::i64 ();
   return literal (type, std::move (value));
 }
 detail::ExpressionState InstructionBuilder::literal (Type type, Operand value) {
   if ((function_->module ().error ()).has_value ()) return {*this, type, {}};
-  if (!type.valid () || !type.is_scalar ()
+  auto vector = detail::operand_access (value).get<VectorConstant> ();
+  if ((type.is_vector () && (!vector || vector->type != type))
+      || (vector && (!type.is_vector () || !vector->type.valid ()))) {
+    fail (invalid ("vector literal type mismatch"));
+    return {*this, type, {}};
+  }
+  if (!type.valid () || ((!type.is_scalar () && !type.is_vector ()))
       || (!detail::operand_access (value).get<std::int64_t> ()
           && !detail::operand_access (value).get<std::uint64_t> ()
           && !detail::operand_access (value).get<float> ()
           && !detail::operand_access (value).get<double> ()
-          && !detail::operand_access (value).get<long double> ())) {
-    fail (invalid ("literal requires a scalar type and an immediate number"));
+          && !detail::operand_access (value).get<long double> ()
+          && !detail::operand_access (value).get<VectorConstant> ())) {
+    fail (invalid ("literal requires a scalar or vector immediate"));
     return {*this, type, {}};
   }
   if (type.kind () == Type::Kind::Bool) {
@@ -259,7 +281,9 @@ detail::ExpressionState detail::ExpressionState::apply (Operation operation,
                                                         - static_cast<unsigned> (Operation::Equal)),
                                false))
         : arithmetic_opcode (type_, static_cast<unsigned> (operation));
-  auto type = comparison ? Type (Type::Kind::Bool) : type_;
+  auto type = comparison
+                ? (type_.is_vector () ? type_.vector_mask_type () : Type (Type::Kind::Bool))
+                : type_;
   if (!opcode) {
     builder_->fail (invalid ("operation is not defined for this expression type"));
     return {*builder_, type, {}};
@@ -287,6 +311,11 @@ detail::ExpressionState detail::ExpressionState::operator- () const {
                             : detail::ExpressionState (*builder_, type_, {});
 }
 detail::ExpressionState detail::ExpressionState::operator~() const {
+  if (type_.is_vector ()) {
+    VectorConstant mask{type_};
+    mask.bytes.fill (std::byte (255));
+    return apply (Operation::Xor, builder_->literal (type_, Operand (mask)));
+  }
   if (!type_.is_integer () || type_.kind () == Type::Kind::Bool
       || type_.kind () == Type::Kind::Pointer) {
     builder_->fail (invalid ("bitwise complement requires an integer expression"));

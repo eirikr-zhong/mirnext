@@ -1,3 +1,4 @@
+#include "mirnext/IR/Vector.hpp"
 /* Licensed under the MIT License. Owning interpreter preparation and dispatch. */
 #include "mirnext/IR/Access.hpp"
 #include "mirnext/Execution/detail/LoadedProgram.hpp"
@@ -47,6 +48,8 @@ Result<void> LoadedProgram::prepare () {
                     && op != O::PrBne;
           if (scalar)
             operation.scalar_inputs = static_cast<std::uint8_t> (i.operands ().size () - 1);
+          if (ir::detail::vector_opcode (op))
+            operation.vector_inputs = static_cast<std::uint8_t> (i.operands ().size () - 1);
           operation.operands.reserve (i.operands ().size ());
           for (auto &o : i.operands ()) {
             PreparedOperand p{&o};

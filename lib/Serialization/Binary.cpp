@@ -168,7 +168,14 @@ class Writer {
   Result<void> name (std::string_view value, unsigned first = wire::NAME1) {
     return string (value, first, true);
   }
-  void type (Type value) { byte (wire::TYPE + type_code (value)); }
+  void type (Type value) {
+    if (value.is_vector ()) {
+      byte (wire::VECTOR_TYPE);
+      byte (static_cast<unsigned> (value.vector_element ()));
+      byte (value.vector_lanes ());
+    } else
+      byte (wire::TYPE + type_code (value));
+  }
   Result<void> reg (const Register *value) { return name (registers_.at (value), wire::REG1); }
   Result<void> label (const Label *value, bool signed_number = false) {
     auto found = labels_.find (value);
@@ -235,7 +242,12 @@ class Writer {
           return reg (value);
         else if constexpr (std::is_same_v<T, const Label *>)
           return label (value);
-        else if constexpr (std::is_same_v<T, Memory>)
+        else if constexpr (std::is_same_v<T, VectorConstant>) {
+          byte (wire::VECTOR_LITERAL);
+          byte (static_cast<unsigned> (value.type.vector_element ()));
+          byte (value.type.vector_lanes ());
+          bytes_.insert (bytes_.end (), value.bytes.begin (), value.bytes.end ());
+        } else if constexpr (std::is_same_v<T, Memory>)
           return memory (value);
         else {
           if (value.displacement) return invalid ("unmaterialized symbol displacement");
@@ -770,6 +782,24 @@ class Reader {
       std::memcpy (result.extended.data (), bytes_.data () + position_, result.extended.size ());
       position_ += result.extended.size ();
       return result;
+    } else if ((tag).value () == wire::VECTOR_TYPE) {
+      auto element = byte ();
+      if (!(element).has_value ()) return element.error ();
+      auto lanes = byte ();
+      if (!(lanes).has_value ()) return lanes.error ();
+      result.bits = (std::uint64_t ((element).value ()) << 8) | lanes.value ();
+      return result;
+    } else if ((tag).value () == wire::VECTOR_LITERAL) {
+      auto element = byte ();
+      if (!(element).has_value ()) return element.error ();
+      auto lanes = byte ();
+      if (!(lanes).has_value ()) return lanes.error ();
+      if (bytes_.size () - position_ < result.extended.size ())
+        return invalid ("truncated v128 literal");
+      result.bits = (std::uint64_t ((element).value ()) << 8) | lanes.value ();
+      std::memcpy (result.extended.data (), bytes_.data () + position_, result.extended.size ());
+      position_ += result.extended.size ();
+      return result;
     } else if (((tag).value () >= wire::MEM_DISP && (tag).value () <= wire::EOFILE)
                || ((tag).value () >= wire::ALIAS_DISP && (tag).value () <= wire::ALIAS_LAST))
       return result;
@@ -815,6 +845,15 @@ class Reader {
     return name ((value).value ());
   }
   Result<Type> type (Token token, bool undef = false) {
+    if (token.tag == wire::VECTOR_TYPE) {
+      auto element = static_cast<unsigned> (token.bits >> 8);
+      auto lanes = static_cast<unsigned> (token.bits & 0xff);
+      if (element > static_cast<unsigned> (Type::VectorElement::F64) || lanes == 0)
+        return invalid ("invalid v128 type");
+      auto result = Type::vector128 (static_cast<Type::VectorElement> (element), lanes);
+      if (!result.valid ()) return invalid ("invalid v128 type");
+      return result;
+    }
     auto last = unsigned (undef ? wire::Type::Undef : wire::Type::ReturnBlock);
     if (token.tag < wire::TYPE || token.tag > wire::TYPE + last)
       return invalid ("invalid type tag");
@@ -837,7 +876,8 @@ class Reader {
     for (std::uint64_t n = 0; n < (count).value (); ++n) {
       auto result_type = type ();
       if (!(result_type).has_value ()) return result_type.error ();
-      if (!result_type.value ().is_scalar ()) return invalid ("function result must be scalar");
+      if (!result_type.value ().is_scalar () && !result_type.value ().is_vector ())
+        return invalid ("function result must be scalar or vector");
       result.signature.results.push_back ((result_type).value ());
     }
     for (;;) {
@@ -866,6 +906,15 @@ class Reader {
     return result;
   }
   Result<Operand> literal (Token token) {
+    if (token.tag == wire::VECTOR_LITERAL) {
+      auto element = static_cast<unsigned> (token.bits >> 8);
+      auto lanes = static_cast<unsigned> (token.bits & 0xff);
+      if (element > static_cast<unsigned> (Type::VectorElement::F64) || lanes == 0)
+        return invalid ("invalid v128 literal type");
+      auto type = Type::vector128 (static_cast<Type::VectorElement> (element), lanes);
+      if (!type.valid ()) return invalid ("invalid v128 literal type");
+      return Operand (VectorConstant{type, token.extended});
+    }
     if (token.tag <= wire::U8) return Operand (token.bits);
     if (token.tag <= wire::I8) return Operand (std::bit_cast<std::int64_t> (token.bits));
     if (token.tag == wire::F)
@@ -884,7 +933,8 @@ class Reader {
     return invalid ("expected literal");
   }
   Result<ParsedOperand> operand (Token value) {
-    if (value.tag <= wire::LD || (value.tag >= wire::STR1 && value.tag <= wire::STR4)) {
+    if (value.tag == wire::VECTOR_LITERAL || value.tag <= wire::LD
+        || (value.tag >= wire::STR1 && value.tag <= wire::STR4)) {
       auto l = literal (value);
       if (!(l).has_value ()) return l.error ();
       return ParsedOperand (std::move ((l).value ()));
@@ -990,15 +1040,18 @@ class Reader {
     }
     auto element_type = type ();
     if (!(element_type).has_value ()) return element_type.error ();
-    if (!element_type.value ().is_scalar ()) return invalid ("data type must be scalar");
+    if (!element_type.value ().is_scalar () && !element_type.value ().is_vector ())
+      return invalid ("data type must be scalar or vector");
     InitializedData result{(element_type).value (), {}};
     for (;;) {
       auto value = token ();
       if (!(value).has_value ()) return value.error ();
       if (value.value ().tag == wire::EOI) break;
-      unsigned number = type_code ((element_type).value ());
+      unsigned number = element_type.value ().is_vector () ? std::numeric_limits<unsigned>::max ()
+                                                           : type_code ((element_type).value ());
       bool valid
-        = number <= unsigned (wire::Type::U64)
+        = element_type.value ().is_vector () ? value.value ().tag == wire::VECTOR_LITERAL
+          : number <= unsigned (wire::Type::U64)
             ? ((number & 1) ? value.value ().tag <= wire::U8
                             : value.value ().tag >= wire::I1 && value.value ().tag <= wire::I8)
           : number == unsigned (wire::Type::F) ? value.value ().tag == wire::F
@@ -1008,6 +1061,11 @@ class Reader {
       if (!valid) return invalid ("data scalar and literal types differ");
       auto element = literal ((value).value ());
       if (!(element).has_value ()) return element.error ();
+      if (element_type.value ().is_vector ()) {
+        auto constant = ir::detail::operand_access (element.value ()).get<VectorConstant> ();
+        if (!constant || constant->type != element_type.value ())
+          return invalid ("data vector and literal types differ");
+      }
       result.values.push_back (std::move ((element).value ()));
     }
     return ParsedInitializer (std::move (result));
@@ -1066,7 +1124,8 @@ class Reader {
           if (value.value ().tag == wire::EOI) break;
           auto t = type ((value).value ());
           if (!(t).has_value ()) return t.error ();
-          if (!t.value ().is_scalar ()) return invalid ("local register must be scalar");
+          if (!t.value ().is_scalar () && !t.value ().is_vector ())
+            return invalid ("local register must be scalar or vector");
           auto n = name ();
           if (!(n).has_value ()) return n.error ();
           std::string_view hardware;

@@ -1,4 +1,7 @@
 include_directories(${PROJECT_SOURCE_DIR}/lib)
+add_executable(mirnext_simd_benchmark SIMD.cpp)
+target_link_libraries(mirnext_simd_benchmark PRIVATE MIRNext::MIRNext)
+mir_target_cxx_options(mirnext_simd_benchmark)
 add_executable(mirnext_format_io_benchmark FormatIO.cpp)
 target_link_libraries(mirnext_format_io_benchmark PRIVATE MIRNext::MIRNext)
 mir_target_cxx_options(mirnext_format_io_benchmark)

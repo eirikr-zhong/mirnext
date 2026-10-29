@@ -26,6 +26,7 @@ function(mirnext_add_test target name)
   endif()
   add_test(NAME ${name} COMMAND ${target})
 endfunction()
+mirnext_add_test(mirnext_simd_test mirnext-simd SOURCES Execution/SIMD.cpp Execution/SIMDStandard.cpp)
 
 if(MIRNEXT_BUILD_UTILITIES AND MIRNEXT_BUILD_SCRIPT_TESTS)
   add_subdirectory(Tools)
@@ -149,6 +150,7 @@ mirnext_add_test(mirnext_machine_ir_test mirnext-unified-machine-ir
     CodeGen/Lowering.cpp
     CodeGen/Legalization.cpp
     CodeGen/X86Patterns.cpp
+    CodeGen/NativeVector.cpp
     CodeGen/X86ABI.cpp
     CodeGen/X86Allocation.cpp
     CodeGen/X86Frame.cpp

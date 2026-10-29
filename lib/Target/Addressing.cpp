@@ -22,6 +22,9 @@ bool AddressingRules::accepts (ir::Type type, std::int64_t displacement, bool in
     return (!indexed || scale == 1 || scale == 2 || scale == 4 || scale == 8)
            && displacement >= std::numeric_limits<std::int32_t>::min ()
            && displacement <= std::numeric_limits<std::int32_t>::max ();
+  if (type.is_vector ())
+    return indexed ? displacement == 0 && (scale == 1 || scale == 16)
+                   : displacement >= 0 && displacement % 16 == 0 && displacement / 16 < 4096;
   std::size_t size = 0;
   switch (type.kind ()) {
   case ir::Type::Kind::I8:

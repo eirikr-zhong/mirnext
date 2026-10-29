@@ -15,7 +15,9 @@ Error invalid (const MachineFunction &f, std::string why) {
                                        + " [" + std::string (f.target ().name ())
                                        + ", machine-assignment]: " + std::move (why)};
 }
-unsigned stack_units (ir::Type type) { return type.kind () == ir::Type::Kind::LongDouble ? 2 : 1; }
+unsigned stack_units (ir::Type type) {
+  return type.is_vector () || type.kind () == ir::Type::Kind::LongDouble ? 2 : 1;
+}
 struct Gap {
   target::PhysicalRegister physical;
   std::size_t reg, range;

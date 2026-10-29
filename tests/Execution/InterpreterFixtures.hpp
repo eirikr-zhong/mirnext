@@ -2,6 +2,7 @@
 #include "mirnext/IR/Access.hpp"
 #include "mirnext/IR/Checked.hpp"
 #pragma once
+#include "mirnext/IR/Vector.hpp"
 #include <doctest/doctest.h>
 #include "mirnext/IR/IR.hpp"
 #include <bit>
@@ -19,6 +20,7 @@ inline std::unique_ptr<ir::Program> interpreter_scalars () {
                                               : Type::Kind::I64);
   };
   for (auto &d : instruction_descriptors ()) {
+    if (ir::detail::vector_opcode (d.opcode)) continue;
     bool compare = d.flow == ControlFlow::Branch && d.roles.size () == 3
                    && d.opcode != Opcode::PrBeq && d.opcode != Opcode::PrBne;
     bool numeric = d.count == OperandCount::Fixed && d.roles.size () >= 2
@@ -97,6 +99,7 @@ inline std::unique_ptr<ir::Program> interpreter_ieee () {
   for (bool wide : {false, true})
     for (unsigned variant = 0; variant < 3; ++variant) {
       for (auto &d : instruction_descriptors ()) {
+        if (ir::detail::vector_opcode (d.opcode)) continue;
         auto prefix = wide ? 'd' : 'f';
         bool comparison = d.name.size () >= 2 && d.name[0] == prefix && d.roles.size () == 3
                           && d.roles[1] == prefix

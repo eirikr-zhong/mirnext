@@ -44,7 +44,7 @@ struct X86ArgumentLocation {
   std::array<X86Register, 2> registers{};
   unsigned register_count = 0;
   std::size_t stack_offset = 0, size = 0;
-  bool aggregate = false, by_value = false;
+  bool aggregate = false, by_value = false, indirect = false;
 };
 struct X86ArgumentLayout {
   std::vector<X86ArgumentLocation> arguments;

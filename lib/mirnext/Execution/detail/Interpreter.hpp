@@ -28,6 +28,7 @@ struct OverflowFlags {
 };
 Result<std::optional<ScalarValue>> evaluate_scalar (ir::Opcode, std::span<const ScalarValue>,
                                                     OverflowFlags &);
+Result<ScalarValue> evaluate_vector (ir::Opcode, ir::Type, std::span<const ScalarValue>);
 Result<ScalarValue> load_scalar (ir::Type, std::uintptr_t);
 Result<void> store_scalar (ir::Type, std::uintptr_t, const ScalarValue &);
 struct PreparedOperand {
@@ -39,6 +40,7 @@ struct PreparedOperation {
   const ir::InstructionDescriptor *descriptor;
   std::vector<PreparedOperand> operands;
   std::uint8_t scalar_inputs = 0;
+  std::uint8_t vector_inputs = 0;
 };
 struct InterpreterBody {
   const ir::Function *source;

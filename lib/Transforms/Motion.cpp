@@ -13,7 +13,8 @@ namespace {
 using namespace ir;
 using namespace analysis;
 bool move (Opcode op) {
-  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov;
+  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov
+         || op == Opcode::VMov;
 }
 Result<void> validate (Function &f, FunctionAnalysisManager &a, std::string_view pass) {
   auto invalid = [&] (std::string reason) {

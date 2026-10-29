@@ -27,6 +27,47 @@ inline std::unique_ptr<ir::Program> public_instruction_example (
   auto label
     = mirnext::ir::detail::access (((function)).value ()).create_label ((exit).value (), "exit");
   REQUIRE ((label).has_value ());
+  auto vector_input = Type::vector128 (Type::VectorElement::I8, 16);
+  auto vector_output = vector_input;
+  using E = Type::VectorElement;
+  switch (descriptor.opcode) {
+  case Opcode::VMul:
+  case Opcode::VDot:
+  case Opcode::VQ15MulrSat:
+  case Opcode::VNarrowSat: vector_input = Type::vector128 (E::I16, 8); break;
+  case Opcode::VDiv:
+  case Opcode::VSqrt:
+  case Opcode::VPMin:
+  case Opcode::VPMax:
+  case Opcode::VCeil:
+  case Opcode::VFloor:
+  case Opcode::VTrunc:
+  case Opcode::VNearest:
+  case Opcode::VTruncSat: vector_input = Type::vector128 (E::F32, 4); break;
+  case Opcode::VConvert:
+  case Opcode::VConvertLow: vector_input = Type::vector128 (E::I32, 4); break;
+  case Opcode::VConvertZero:
+  case Opcode::VTruncSatZero: vector_input = Type::vector128 (E::F64, 2); break;
+  case Opcode::VAvgr:
+  case Opcode::VSwizzle: vector_input = Type::vector128 (E::U8, 16); break;
+  default: break;
+  }
+  vector_output = vector_input;
+  switch (descriptor.opcode) {
+  case Opcode::VExtendLow:
+  case Opcode::VExtendHigh:
+  case Opcode::VExtmulLow:
+  case Opcode::VExtmulHigh:
+  case Opcode::VExtaddPairwise: vector_output = Type::vector128 (E::I16, 8); break;
+  case Opcode::VDot:
+  case Opcode::VTruncSat:
+  case Opcode::VTruncSatZero: vector_output = Type::vector128 (E::I32, 4); break;
+  case Opcode::VNarrowSat: vector_output = Type::vector128 (E::I8, 16); break;
+  case Opcode::VConvert:
+  case Opcode::VConvertZero: vector_output = Type::vector128 (E::F32, 4); break;
+  case Opcode::VConvertLow: vector_output = Type::vector128 (E::F64, 2); break;
+  default: break;
+  }
   InstructionBuilder builder ((entry).value ());
   std::vector<Operand> operands;
   if (descriptor.opcode == Opcode::Bo || descriptor.opcode == Opcode::Bno
@@ -71,16 +112,25 @@ inline std::unique_ptr<ir::Program> public_instruction_example (
       auto role = descriptor.roles[n];
       if (role == 'l')
         operands.emplace_back ((label).value ());
-      else if (role == 'I' || role == 'F' || role == 'D' || role == 'E' || role == 'r'
+      else if (role == 'A' || role == 'I' || role == 'F' || role == 'D' || role == 'E'
+               || role == 'r' || role == 'V' || role == 'v'
                || (role == 'a' && descriptor.opcode == Opcode::PrSet)) {
-        auto type = role == 'F'   ? Type (Type::Kind::F32)
-                    : role == 'D' ? Type (Type::Kind::F64)
-                    : role == 'E' ? Type (Type::Kind::LongDouble)
-                                  : Type::i64 ();
+        auto type = role == 'F'                  ? Type (Type::Kind::F32)
+                    : role == 'D'                ? Type (Type::Kind::F64)
+                    : role == 'E'                ? Type (Type::Kind::LongDouble)
+                    : role == 'V' || role == 'v' ? (n == 0 ? vector_output : vector_input)
+                                                 : Type::i64 ();
+        if (n == 0 && descriptor.opcode >= Opcode::VEq && descriptor.opcode <= Opcode::VGe)
+          type = type.vector_mask_type ();
         auto reg = mirnext::ir::detail::access (((function)).value ()).create_register (type);
         REQUIRE ((reg).has_value ());
         operands.emplace_back ((reg).value ());
-      } else if (role == 'f')
+      } else if (descriptor.opcode == Opcode::VShuffle && n == 3)
+        operands.emplace_back (VectorConstant{Type::vector128 (Type::VectorElement::U8, 16)});
+      else if ((descriptor.opcode == Opcode::VExtract && n == 2)
+               || (descriptor.opcode == Opcode::VInsert && n == 3))
+        operands.push_back (integer (0));
+      else if (role == 'f')
         operands.emplace_back (1.0f);
       else if (role == 'd')
         operands.emplace_back (1.0);

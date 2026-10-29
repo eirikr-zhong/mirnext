@@ -11,6 +11,7 @@
 #include "InterpreterFixtures.hpp"
 #include <array>
 #include <bit>
+#include <cstring>
 using namespace mirnext;
 using namespace mirnext::ir;
 using namespace mirnext::execution;
@@ -443,4 +444,83 @@ TEST_CASE (
   REQUIRE ((b).has_value ());
   CHECK ((((a).value ())[0].as_long_double ()).value () == 1.25L);
   CHECK ((((b).value ())[0].as_double ()).value () == 2.5);
+}
+
+TEST_CASE ("owning interpreter executes v128 vector arithmetic and moves") {
+  auto c = parse (R"(m:module
+add:func v128<i32x4>
+local v128<i32x4>:x,v128<i32x4>:y
+vmov x,v128<i32x4>:0x01000000020000000300000004000000
+vadd y,x,x
+ret y
+endfunc
+sub:func v128<i32x4>
+local v128<i32x4>:x,v128<i32x4>:y
+vmov x,v128<i32x4>:0x01000000020000000300000004000000
+vsub y,x,x
+ret y
+endfunc
+band:func v128<i32x4>
+local v128<i32x4>:x,v128<i32x4>:y
+vmov x,v128<i32x4>:0x01000000020000000300000004000000
+vand y,x,x
+ret y
+endfunc
+bor:func v128<i32x4>
+local v128<i32x4>:x,v128<i32x4>:y
+vmov x,v128<i32x4>:0x01000000020000000300000004000000
+vor y,x,x
+ret y
+endfunc
+xor:func v128<i32x4>
+local v128<i32x4>:x,v128<i32x4>:y
+vmov x,v128<i32x4>:0x01000000020000000300000004000000
+vxor y,x,x
+ret y
+endfunc
+endmodule
+)");
+  auto p = program (*c);
+  std::array<std::byte, 16> input{};
+  std::uint32_t input_lanes[]{1, 2, 3, 4};
+  std::memcpy (input.data (), input_lanes, sizeof input_lanes);
+  std::array<std::byte, 16> doubled{};
+  std::uint32_t doubled_lanes[]{2, 4, 6, 8};
+  std::memcpy (doubled.data (), doubled_lanes, sizeof doubled_lanes);
+  for (auto [name, expected] :
+       {std::pair{"add", doubled}, std::pair{"sub", std::array<std::byte, 16>{}},
+        std::pair{"band", input}, std::pair{"bor", input},
+        std::pair{"xor", std::array<std::byte, 16>{}}}) {
+    auto result = p.call (find (p, "m", name));
+    REQUIRE ((result).has_value ());
+    REQUIRE ((result).value ().size () == 1);
+    auto bytes = (result).value ()[0].as_vector ();
+    REQUIRE (bytes.size () == 16);
+    CHECK (std::equal (bytes.begin (), bytes.end (), expected.begin (), expected.end ()));
+  }
+}
+
+TEST_CASE ("owning JIT executes the v128 i8x16 core") {
+  auto c = parse (R"(m:module
+f:func v128<i8x16>,v128<i8x16>:a
+local v128<i8x16>:r
+vadd r,a,a
+ret r
+endfunc
+endmodule
+)");
+  ExecutionOptions options;
+  options.mode = ExecutionMode::JIT;
+  auto session = ExecutionSession::create (std::move (*c), options);
+  REQUIRE ((session).has_value ());
+  std::array<std::byte, 16> bytes{};
+  for (unsigned n = 0; n < bytes.size (); ++n) bytes[n] = std::byte (n + 1);
+  auto input = ScalarValue::vector (Type::vector128 (Type::VectorElement::I8, 16), bytes);
+  REQUIRE ((input).has_value ());
+  std::array args{ExecutionArgument ((input).value ())};
+  auto result = (session).value ().call (find ((session).value (), "m", "f"), args);
+  REQUIRE ((result).has_value ());
+  REQUIRE ((result).value ().size () == 1);
+  for (unsigned n = 0; n < bytes.size (); ++n)
+    CHECK (result.value ()[0].as_vector ()[n] == std::byte (2 * (n + 1)));
 }

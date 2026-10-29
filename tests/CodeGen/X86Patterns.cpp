@@ -6,6 +6,8 @@
 #include <doctest/doctest.h>
 #include "Navigation.hpp"
 #include "mirnext/CodeGen/Detail/X86Patterns.hpp"
+#include "mirnext/CodeGen/Detail/NativeVector.hpp"
+#include "mirnext/CodeGen/Detail/AArch64Patterns.hpp"
 #include "mirnext/CodeGen/Lowering.hpp"
 #include <bit>
 #include <charconv>
@@ -59,6 +61,41 @@ MachineOperand physical (MachineFunction &f, unsigned n) {
     f.target ().registers ()[n].reg);
 }
 }  // namespace
+TEST_CASE ("v128 arithmetic selects the correct SSE2 and NEON lane encoding") {
+  auto f = function ();
+  constexpr std::array elements{Type::VectorElement::I8,  Type::VectorElement::I16,
+                                Type::VectorElement::I32, Type::VectorElement::I64,
+                                Type::VectorElement::F32, Type::VectorElement::F64};
+  constexpr unsigned lanes[]{16, 8, 4, 2, 4, 2};
+  constexpr std::string_view sse_add[]{"66 Y 0F FC r0 R2", "66 Y 0F FD r0 R2", "66 Y 0F FE r0 R2",
+                                       "66 Y 0F D4 r0 R2", "Y 0F 58 r0 R2",    "66 Y 0F 58 r0 R2"};
+  constexpr std::string_view sse_sub[]{"66 Y 0F F8 r0 R2", "66 Y 0F F9 r0 R2", "66 Y 0F FA r0 R2",
+                                       "66 Y 0F FB r0 R2", "Y 0F 5C r0 R2",    "66 Y 0F 5C r0 R2"};
+  constexpr std::uint32_t neon_add[]{0x4e208400, 0x4e608400, 0x4ea08400,
+                                     0x4ee08400, 0x4e20d400, 0x4e60d400};
+  constexpr std::uint32_t neon_sub[]{0x6e208400, 0x6e608400, 0x6ea08400,
+                                     0x6ee08400, 0x4ea0d400, 0x4ee0d400};
+  for (unsigned n = 0; n < elements.size (); ++n) {
+    CAPTURE (n);
+    auto type = Type::vector128 (elements[n], lanes[n]);
+    auto first = reg (*f, type), second = reg (*f, type);
+    std::array operands{first, first, second};
+    auto add = select (Opcode::VAdd, {first, first, second});
+    auto sub = select (Opcode::VSub, {first, first, second});
+    REQUIRE (add);
+    REQUIRE (sub);
+    CHECK (add->encoding == sse_add[n]);
+    CHECK (sub->encoding == sse_sub[n]);
+    auto arm_add = aarch64_encoding_recipe (Opcode::VAdd, operands);
+    auto arm_sub = aarch64_encoding_recipe (Opcode::VSub, operands);
+    REQUIRE (arm_add);
+    REQUIRE (arm_sub);
+    REQUIRE (arm_add->words.size () == 1);
+    REQUIRE (arm_sub->words.size () == 1);
+    CHECK (arm_add->words[0].opcode == neon_add[n]);
+    CHECK (arm_sub->words[0].opcode == neon_sub[n]);
+  }
+}
 TEST_CASE ("x86 constraints enforce ties widths signedness and ordered immediate forms") {
   auto f = function ();
   auto a = reg (*f), b = reg (*f), c = reg (*f);
@@ -342,9 +379,17 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
     bool unavailable = false;
     while (tokens >> token) {
       if (token == "$") break;
-      if (token == "X" || token == "r")
-        operands.push_back (reg (*f));
-      else if (token == "l" || token == "L")
+      if (token == "X" || token == "r") {
+        auto native = mirnext::codegen::detail::native_vector_descriptor (p.opcode);
+        if (native && native->roles[operands.size ()] == 'n')
+          operands.push_back (integer (native->maximum));
+        else {
+          auto role = native ? native->roles[operands.size ()] : 'i';
+          operands.push_back (reg (*f, role == 'i' || role == 'I'
+                                         ? Type::i64 ()
+                                         : Type::vector128 (Type::VectorElement::U8, 16)));
+        }
+      } else if (token == "l" || token == "L")
         operands.emplace_back ((label).value ());
       else if (token == "z")
         operands.push_back (integer (0));
@@ -365,7 +410,8 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
       } else if (token.front () == 'c')
         operands.push_back (integer (number (std::string_view (token).substr (1))));
       else if (token.front () == 'm') {
-        Type::Kind kind;
+        Type::Kind kind = Type::Kind::I64;
+        bool vector = false;
         auto tag = token.substr (1);
         if (tag == "f")
           kind = Type::Kind::F32;
@@ -373,6 +419,8 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
           kind = Type::Kind::F64;
         else if (tag == "ld")
           kind = Type::Kind::LongDouble;
+        else if (tag == "v")
+          vector = true;
         else {
           const bool u = tag.front () == 'u';
           if (tag.front () == 's' || u) tag.erase (0, 1);
@@ -382,7 +430,8 @@ TEST_CASE ("x86 declaration rows have typed examples on every host without cross
                                                 Type::Kind::U64};
           kind = u ? unsigned_types[tag.front () - '0'] : signed_types[tag.front () - '0'];
         }
-        operands.push_back (memory (*f, Type (kind)));
+        operands.push_back (
+          memory (*f, vector ? Type::vector128 (Type::VectorElement::I8, 16) : Type (kind)));
       } else {
         REQUIRE (token.size () == 1);
         auto n = unsigned (token.front () - '0');
