@@ -21,7 +21,8 @@ Error invalid (const Function &function, std::string reason) {
           std::string (function.symbol ().name ()) + ": gvn: " + std::move (reason)};
 }
 bool move (Opcode op) {
-  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov;
+  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov
+         || op == Opcode::VMov;
 }
 bool address (Opcode op) {
   return op == Opcode::Addr || op == Opcode::Addr8 || op == Opcode::Addr16 || op == Opcode::Addr32;
@@ -67,11 +68,12 @@ Opcode move_code (Type type) {
   return type.kind () == Type::Kind::F32          ? Opcode::FMov
          : type.kind () == Type::Kind::F64        ? Opcode::DMov
          : type.kind () == Type::Kind::LongDouble ? Opcode::LDMov
+         : type.is_vector ()                      ? Opcode::VMov
                                                   : Opcode::Mov;
 }
-Type::Kind canonical (Type type) {
-  return type.kind () == Type::Kind::U64 || type.kind () == Type::Kind::Pointer ? Type::Kind::I64
-                                                                                : type.kind ();
+Type canonical (Type type) {
+  return type.kind () == Type::Kind::U64 || type.kind () == Type::Kind::Pointer ? Type::i64 ()
+                                                                                : type;
 }
 bool alias (const Memory &a, const Memory &b) {
   return (a.alias.empty () || b.alias.empty () || a.alias == b.alias)
@@ -86,7 +88,7 @@ struct MultiResult {
   const Instruction *identity;
   bool operator== (const MultiResult &) const = default;
 };
-using Atom = std::variant<ValueKey, Operand, Type::Kind, MultiResult>;
+using Atom = std::variant<ValueKey, Operand, Type, MultiResult>;
 struct ExpressionKey {
   Opcode opcode;
   std::vector<Atom> inputs;
@@ -106,9 +108,11 @@ struct ExpressionHash {
           if constexpr (std::is_same_v<T, ValueKey>) {
             mix (hash, value.constant);
             mix (hash, value.value);
-          } else if constexpr (std::is_same_v<T, Type::Kind>)
-            mix (hash, static_cast<unsigned> (value));
-          else if constexpr (std::is_same_v<T, MultiResult>)
+          } else if constexpr (std::is_same_v<T, Type>) {
+            mix (hash, static_cast<unsigned> (value.kind ()));
+            mix (hash, static_cast<unsigned> (value.vector_element ()));
+            mix (hash, value.vector_lanes ());
+          } else if constexpr (std::is_same_v<T, MultiResult>)
             mix (hash, std::hash<const Instruction *>{}(value.identity));
           else
             std::visit (
@@ -130,7 +134,7 @@ struct ExpressionHash {
 };
 struct MemoryKey {
   ValueKey address;
-  Type::Kind type;
+  Type type;
   std::string alias, nonalias;
   bool operator== (const MemoryKey &) const = default;
 };
@@ -138,7 +142,9 @@ struct MemoryHash {
   std::size_t operator() (const MemoryKey &key) const {
     std::size_t hash = key.address.value;
     mix (hash, key.address.constant);
-    mix (hash, static_cast<unsigned> (key.type));
+    mix (hash, static_cast<unsigned> (key.type.kind ()));
+    mix (hash, static_cast<unsigned> (key.type.vector_element ()));
+    mix (hash, key.type.vector_lanes ());
     mix (hash, std::hash<std::string>{}(key.alias));
     mix (hash, std::hash<std::string>{}(key.nonalias));
     return hash;
@@ -216,6 +222,8 @@ struct State {
   }
   ExpressionKey key (const Instruction &i) {
     ExpressionKey key{i.opcode (), {}};
+    if (auto definition = output (i); definition && definition->reg ().type ().is_vector ())
+      key.inputs.emplace_back (definition->reg ().type ());
     for (std::size_t p = 0; p < i.operands ().size (); ++p) {
       auto &operand = i.operands ()[p];
       if (ssa_output_operand (function, i, p)

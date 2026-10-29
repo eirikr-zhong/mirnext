@@ -3,6 +3,8 @@
    Licensed under the MIT License. No runtime addresses are folded here. */
 #include "mirnext/CodeGen/Lowering.hpp"
 #include "mirnext/CodeGen/Detail/AArch64Patterns.hpp"
+#include "mirnext/CodeGen/Detail/Vector.hpp"
+#include "mirnext/CodeGen/Detail/NativeVector.hpp"
 #include <array>
 #include <limits>
 
@@ -18,15 +20,23 @@ enum class PatternCode {
   SubUnsignedNoOverflow,
   MultiplyOverflow,
   MultiplyNoOverflow,
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding) name,
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
   Count
 };
 struct pattern {
   PatternCode code;
   const char *pattern, *replacement;
+  unsigned vector_shape = 0;
 };
 #define MIRNEXT_A64_OPCODE(name) PatternCode::name
+#define MIRNEXT_A64_NATIVE(name) PatternCode::name
 #define MIRNEXT_A64_TABLE static constexpr struct pattern patterns[]
 #include "mirnext/Target/AArch64Patterns.def"
+#undef MIRNEXT_A64_NATIVE
 #undef MIRNEXT_A64_TABLE
 #undef MIRNEXT_A64_OPCODE
 enum class ConstraintKind {
@@ -71,6 +81,9 @@ constexpr Constraint decode (std::string_view token) {
       scale = 8;
     } else if (tag == "ld") {
       mask = type_bit (K::LongDouble);
+      scale = 16;
+    } else if (tag == "v") {
+      mask = type_bit (K::Vector);
       scale = 16;
     } else {
       bool signed_ok = tag.front () != 'u', unsigned_ok = tag.front () != 's';
@@ -236,6 +249,18 @@ consteval EncodingTable compile_encoding () {
             field.parameter = number (token.substr (2), out.valid);
             if (field.shift == 255 || field.parameter > (field.flags == 1 ? 31 : 2))
               out.valid = false;
+          } else if (token.front () == 'b') {
+            field.kind = K::BitImmediate;
+            auto first = token.find ('.'), second = token.find ('.', first + 1);
+            if (first == token.npos || second == token.npos) {
+              out.valid = false;
+              break;
+            }
+            field.shift = number (token.substr (1, first - 1), out.valid);
+            field.flags = number (token.substr (first + 1, second - first - 1), out.valid);
+            field.parameter = number (token.substr (second + 1), out.valid);
+            if (!field.flags || field.shift + field.flags > 32 || field.parameter > 3)
+              out.valid = false;
           } else if (token == "m" || token == "M")
             field.kind = token == "m" ? K::IndexedMemory : K::DisplacedMemory;
           else if (token == "S")
@@ -354,10 +379,29 @@ bool match (const CompiledPattern &p, std::span<const MachineOperand> operands) 
   return true;
 }
 }  // namespace
+std::optional<unsigned> native_pattern_code (MachineOpcode code,
+                                             std::span<const MachineOperand> operands) {
+  if (auto native = detail::native_vector_descriptor (code)) {
+    if (native->architecture != target::Architecture::AArch64
+        || !detail::native_vector_operands (*native, operands))
+      return {};
+    switch (native->opcode) {
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding) \
+  case MachinePseudoOpcode::name: return static_cast<unsigned> (PatternCode::name);
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
+    default: return {};
+    }
+  }
+  if (auto op = std::get_if<Opcode> (&code)) return static_cast<unsigned> (*op);
+  return {};
+}
 bool aarch64_instruction_ok (MachineOpcode code, std::span<const MachineOperand> operands) {
-  auto op = std::get_if<Opcode> (&code);
-  if (!op) return false;
-  auto wanted = static_cast<unsigned> (*op);
+  auto mapped = native_pattern_code (code, operands);
+  if (!mapped) return false;
+  auto wanted = *mapped;
   if (wanted >= code_count) return false;
   // Overflow encodings select a different condition after sub/mul. Their
   // constraints are identical (one label), so legalization needs no def scan.
@@ -367,11 +411,14 @@ bool aarch64_instruction_ok (MachineOpcode code, std::span<const MachineOperand>
 }
 std::optional<AArch64Recipe> aarch64_encoding_recipe (MachineOpcode code,
                                                       std::span<const MachineOperand> operands,
-                                                      AArch64Overflow overflow) {
+                                                      AArch64Overflow overflow,
+                                                      unsigned vector_shape) {
+  auto mapped = native_pattern_code (code, operands);
+  if (!mapped) return {};
+  auto wanted = *mapped;
   auto op = std::get_if<Opcode> (&code);
-  if (!op) return {};
-  auto wanted = static_cast<unsigned> (*op);
-  if (*op == Opcode::Bo || *op == Opcode::Bno || *op == Opcode::UBo || *op == Opcode::UBno) {
+  if (op
+      && (*op == Opcode::Bo || *op == Opcode::Bno || *op == Opcode::UBo || *op == Opcode::UBno)) {
     if (overflow == AArch64Overflow::Subtract && (*op == Opcode::UBo || *op == Opcode::UBno))
       wanted = static_cast<unsigned> (*op == Opcode::UBo ? PatternCode::SubUnsignedOverflow
                                                          : PatternCode::SubUnsignedNoOverflow);
@@ -381,8 +428,10 @@ std::optional<AArch64Recipe> aarch64_encoding_recipe (MachineOpcode code,
                                         : PatternCode::MultiplyNoOverflow);
   }
   if (wanted >= code_count) return {};
+  auto shape = vector_shape ? vector_shape : detail::vector_shape (operands);
   for (unsigned n = table.offsets[wanted]; n < table.offsets[wanted + 1]; ++n) {
     auto row = table.indexes[n];
+    if (shape && patterns[row].vector_shape && shape != patterns[row].vector_shape) continue;
     if (match (table.compiled[row], operands))
       return AArch64Recipe{std::span (encoding.words)
                              .subspan (encoding.offsets[row],

@@ -1,3 +1,4 @@
+#include "mirnext/IR/Vector.hpp"
 /* Licensed under the MIT License. Thin handles over the canonical IR builder. */
 #include "mirnext/IR/Access.hpp"
 #include "mirnext/IR/Checked.hpp"
@@ -2387,45 +2388,286 @@ Value MIRBuilder::create_unary (Opcode op, Value input, std::string_view name) {
   if (!N::has_function (*this, "create unary")) return {};
   return N::output (*this, N::edit (*this)->unary (op, N::input (*this, input, "unary"), name));
 }
+Value MIRBuilder::constant_vector (Type type, std::span<const std::byte> bytes) const {
+  auto &builder = const_cast<MIRBuilder &> (*this);
+  if (!N::has_function (builder, "vector constant")) return {};
+  if (!type.valid () || !type.is_vector () || bytes.size () != 16) {
+    N::state (builder)->fail ("vector constant",
+                              invalid ("v128 constant requires a valid vector type and 16 bytes"));
+    return {};
+  }
+  VectorConstant value{type};
+  std::copy (bytes.begin (), bytes.end (), value.bytes.begin ());
+  return constant (type, Operand (value));
+}
+Value MIRBuilder::create_vector_operation (Opcode opcode, Type type,
+                                           std::span<const Value> values) {
+  if (!N::has_function (*this, "vector operation")) return {};
+  InputBuffer<Operand> operands (values.size ());
+  for (auto &value : values) {
+    auto checked = N::input (*this, value, "vector operand").get ();
+    if (!checked.has_value ()) return {};
+    operands.push_back (std::move (checked).value ());
+  }
+  auto result = N::function (*this)->builder.value_operation (opcode, operands.view (), type, {});
+  if (!result.has_value ()) {
+    N::state (*this)->fail ("vector operation", result.error ());
+    return {};
+  }
+  return Value (type, Operand (result.value ()), N::function (*this)->function);
+}
+Value MIRBuilder::create_vector_splat (Type type, Value scalar) {
+  const Value values[]{scalar};
+  return create_vector_operation (Opcode::VSplat, type, values);
+}
+Value MIRBuilder::create_extract_lane (Value vector, unsigned lane) {
+  const Value values[]{vector, constant (std::uint64_t (lane))};
+  return create_vector_operation (Opcode::VExtract, vector.type ().vector_lane_type (), values);
+}
+Value MIRBuilder::create_insert_lane (Value vector, Value scalar, unsigned lane) {
+  const Value values[]{vector, scalar, constant (std::uint64_t (lane))};
+  return create_vector_operation (Opcode::VInsert, vector.type (), values);
+}
+Value MIRBuilder::create_shuffle (Value a, Value b, std::span<const unsigned> lanes) {
+  if (!N::has_function (*this, "shuffle")) return {};
+  auto type = a.type ();
+  if (!type.valid () || !type.is_vector () || lanes.size () != type.vector_lanes ()) {
+    N::state (*this)->fail ("shuffle",
+                            invalid ("shuffle mask must contain one index per result lane"));
+    return {};
+  }
+  std::array<std::byte, 16> mask{};
+  for (std::size_t n = 0; n < lanes.size (); ++n) {
+    if (lanes[n] >= 2 * type.vector_lanes ()) {
+      N::state (*this)->fail ("shuffle", invalid ("shuffle lane index out of range"));
+      return {};
+    }
+    mask[n] = std::byte (lanes[n]);
+  }
+  const Value values[]{a, b, constant_vector (Type::vector128 (Type::VectorElement::U8, 16), mask)};
+  return create_vector_operation (Opcode::VShuffle, type, values);
+}
 Value MIRBuilder::create_binary (Opcode op, Value a, Value b, std::string_view name) {
   if (!N::has_function (*this, "create binary")) return {};
   auto lhs = N::input (*this, a, "binary lhs");
   auto rhs = N::input (*this, b, "binary rhs");
   return N::output (*this, N::edit (*this)->binary (op, lhs, rhs, name));
 }
-#define MIRNEXT_NATIVE_BINARY(name, operation)                                          \
+#define MIRNEXT_NATIVE_BINARY(name, operation, vector)                                  \
   Value MIRBuilder::create_##name (Value a, Value b) {                                  \
+    if (a.type ().is_vector ()) {                                                       \
+      const Value inputs[]{a, b};                                                       \
+      return create_vector_operation (Opcode::vector, a.type (), inputs);               \
+    }                                                                                   \
     auto lhs = N::input (*this, a, #name);                                              \
     auto rhs = N::input (*this, b, #name);                                              \
     return N::output (*this, lhs.apply (ConstructionValue::Operation::operation, rhs)); \
   }
-MIRNEXT_NATIVE_BINARY (add, Add)
-MIRNEXT_NATIVE_BINARY (sub, Sub)
-MIRNEXT_NATIVE_BINARY (mul, Mul)
-MIRNEXT_NATIVE_BINARY (div, Div)
-MIRNEXT_NATIVE_BINARY (mod, Mod)
-MIRNEXT_NATIVE_BINARY (and, And)
-MIRNEXT_NATIVE_BINARY (or, Or)
-MIRNEXT_NATIVE_BINARY (xor, Xor)
-MIRNEXT_NATIVE_BINARY (shl, LeftShift)
-MIRNEXT_NATIVE_BINARY (shr, RightShift)
-MIRNEXT_NATIVE_BINARY (eq, Equal)
-MIRNEXT_NATIVE_BINARY (ne, NotEqual)
-MIRNEXT_NATIVE_BINARY (lt, Less)
-MIRNEXT_NATIVE_BINARY (le, LessEqual)
-MIRNEXT_NATIVE_BINARY (gt, Greater)
-MIRNEXT_NATIVE_BINARY (ge, GreaterEqual)
+MIRNEXT_NATIVE_BINARY (add, Add, VAdd)
+MIRNEXT_NATIVE_BINARY (sub, Sub, VSub)
+MIRNEXT_NATIVE_BINARY (mul, Mul, VMul)
+MIRNEXT_NATIVE_BINARY (div, Div, VDiv)
+MIRNEXT_NATIVE_BINARY (mod, Mod, Mod)
+MIRNEXT_NATIVE_BINARY (and, And, VAnd)
+MIRNEXT_NATIVE_BINARY (or, Or, VOr)
+MIRNEXT_NATIVE_BINARY (xor, Xor, VXor)
+MIRNEXT_NATIVE_BINARY (shl, LeftShift, VShl)
+MIRNEXT_NATIVE_BINARY (shr, RightShift, VShr)
 #undef MIRNEXT_NATIVE_BINARY
-#define MIRNEXT_NATIVE_UNARY(name, token)                           \
-  Value MIRBuilder::create_##name (Value value) {                   \
-    return N::output (*this, token N::input (*this, value, #name)); \
+#define MIRNEXT_NATIVE_COMPARE(name, operation, code)                                       \
+  Value MIRBuilder::create_##name (Value a, Value b) {                                      \
+    if (a.type ().is_vector ()) {                                                           \
+      const Value inputs[]{a, b};                                                           \
+      return create_vector_operation (Opcode::code, a.type ().vector_mask_type (), inputs); \
+    }                                                                                       \
+    auto lhs = N::input (*this, a, #name);                                                  \
+    auto rhs = N::input (*this, b, #name);                                                  \
+    return N::output (*this, lhs.apply (ConstructionValue::Operation::operation, rhs));     \
   }
-MIRNEXT_NATIVE_UNARY (neg, -)
-MIRNEXT_NATIVE_UNARY (bit_not, ~)
-MIRNEXT_NATIVE_UNARY (logical_not, !)
-#undef MIRNEXT_NATIVE_UNARY
+MIRNEXT_NATIVE_COMPARE (eq, Equal, VEq)
+MIRNEXT_NATIVE_COMPARE (ne, NotEqual, VNe)
+MIRNEXT_NATIVE_COMPARE (lt, Less, VLt)
+MIRNEXT_NATIVE_COMPARE (le, LessEqual, VLe)
+MIRNEXT_NATIVE_COMPARE (gt, Greater, VGt)
+MIRNEXT_NATIVE_COMPARE (ge, GreaterEqual, VGe)
+#undef MIRNEXT_NATIVE_COMPARE
+Value MIRBuilder::create_neg (Value value) {
+  if (value.type ().is_vector ())
+    return create_vector_operation (Opcode::VNeg, value.type (), std::span (&value, 1));
+  return N::output (*this, -N::input (*this, value, "negate"));
+}
+Value MIRBuilder::create_bit_not (Value value) {
+  return N::output (*this, ~N::input (*this, value, "complement"));
+}
+Value MIRBuilder::create_logical_not (Value value) {
+  return N::output (*this, !N::input (*this, value, "logical not"));
+}
 Value MIRBuilder::create_convert (Value value, Type type) {
+  if (value.type ().is_vector () || type.is_vector ())
+    return create_vector_operation (Opcode::VConvert, type, std::span (&value, 1));
   return N::output (*this, N::input (*this, value, "convert").convert (type));
+}
+#define MIRNEXT_VECTOR_UNARY(name, code)                                                 \
+  Value MIRBuilder::create_##name (Value value) {                                        \
+    return create_vector_operation (Opcode::code, value.type (), std::span (&value, 1)); \
+  }
+MIRNEXT_VECTOR_UNARY (abs, VAbs)
+MIRNEXT_VECTOR_UNARY (sqrt, VSqrt)
+MIRNEXT_VECTOR_UNARY (popcount, VPopcnt)
+MIRNEXT_VECTOR_UNARY (ceil, VCeil)
+MIRNEXT_VECTOR_UNARY (floor, VFloor)
+MIRNEXT_VECTOR_UNARY (trunc, VTrunc)
+MIRNEXT_VECTOR_UNARY (nearest, VNearest)
+#undef MIRNEXT_VECTOR_UNARY
+#define MIRNEXT_VECTOR_BINARY(name, code)                             \
+  Value MIRBuilder::create_##name (Value a, Value b) {                \
+    const Value inputs[]{a, b};                                       \
+    return create_vector_operation (Opcode::code, a.type (), inputs); \
+  }
+MIRNEXT_VECTOR_BINARY (min, VMin)
+MIRNEXT_VECTOR_BINARY (max, VMax)
+MIRNEXT_VECTOR_BINARY (pmin, VPMin)
+MIRNEXT_VECTOR_BINARY (pmax, VPMax)
+MIRNEXT_VECTOR_BINARY (add_sat, VAddSat)
+MIRNEXT_VECTOR_BINARY (sub_sat, VSubSat)
+MIRNEXT_VECTOR_BINARY (avgr, VAvgr)
+MIRNEXT_VECTOR_BINARY (andnot, VAndNot)
+MIRNEXT_VECTOR_BINARY (swizzle, VSwizzle)
+MIRNEXT_VECTOR_BINARY (q15mulr_sat, VQ15MulrSat)
+#undef MIRNEXT_VECTOR_BINARY
+#define MIRNEXT_VECTOR_CONVERT(name, code)                                      \
+  Value MIRBuilder::create_##name (Value value, Type type) {                    \
+    return create_vector_operation (Opcode::code, type, std::span (&value, 1)); \
+  }
+MIRNEXT_VECTOR_CONVERT (bitcast, VBitcast)
+MIRNEXT_VECTOR_CONVERT (convert_low, VConvertLow)
+MIRNEXT_VECTOR_CONVERT (convert_zero, VConvertZero)
+MIRNEXT_VECTOR_CONVERT (trunc_sat, VTruncSat)
+MIRNEXT_VECTOR_CONVERT (trunc_sat_zero, VTruncSatZero)
+#undef MIRNEXT_VECTOR_CONVERT
+Value MIRBuilder::create_any_true (Value value) {
+  return create_vector_operation (Opcode::VAnyTrue, Type (Type::Kind::Bool), std::span (&value, 1));
+}
+Value MIRBuilder::create_all_true (Value value) {
+  return create_vector_operation (Opcode::VAllTrue, Type (Type::Kind::Bool), std::span (&value, 1));
+}
+Value MIRBuilder::create_bitmask (Value value) {
+  return create_vector_operation (Opcode::VBitmask, Type (Type::Kind::U32), std::span (&value, 1));
+}
+Value MIRBuilder::create_bitselect (Value mask, Value a, Value b) {
+  const Value inputs[]{mask, a, b};
+  return create_vector_operation (Opcode::VBitselect, a.type (), inputs);
+}
+Value MIRBuilder::create_extend (Value value, VectorHalf half) {
+  if (!N::has_function (*this, "extend")) return {};
+  if (half != VectorHalf::Low && half != VectorHalf::High) {
+    N::state (*this)->fail ("extend", invalid ("invalid vector half"));
+    return {};
+  }
+  return create_vector_operation (half == VectorHalf::Low ? Opcode::VExtendLow
+                                                          : Opcode::VExtendHigh,
+                                  detail::vector_widened (value.type ()), std::span (&value, 1));
+}
+Value MIRBuilder::create_extmul (Value a, Value b, VectorHalf half) {
+  if (!N::has_function (*this, "extmul")) return {};
+  if (half != VectorHalf::Low && half != VectorHalf::High) {
+    N::state (*this)->fail ("extmul", invalid ("invalid vector half"));
+    return {};
+  }
+  const Value inputs[]{a, b};
+  return create_vector_operation (half == VectorHalf::Low ? Opcode::VExtmulLow
+                                                          : Opcode::VExtmulHigh,
+                                  detail::vector_widened (a.type ()), inputs);
+}
+Value MIRBuilder::create_extadd_pairwise (Value value) {
+  return create_vector_operation (Opcode::VExtaddPairwise, detail::vector_widened (value.type ()),
+                                  std::span (&value, 1));
+}
+Value MIRBuilder::create_narrow_sat (Value a, Value b, Type type) {
+  const Value inputs[]{a, b};
+  return create_vector_operation (Opcode::VNarrowSat, type, inputs);
+}
+Value MIRBuilder::create_dot (Value a, Value b) {
+  const Value inputs[]{a, b};
+  return create_vector_operation (Opcode::VDot, detail::vector_integer (32, true), inputs);
+}
+Value MIRBuilder::create_load_extend (Type type, Value address, std::int64_t displacement) {
+  if (!N::has_function (*this, "load extend")) return {};
+  if (!type.valid () || !type.is_vector () || !type.vector_lane_type ().is_integer ()
+      || type.vector_lanes () == 16) {
+    N::state (*this)->fail ("load extend",
+                            invalid ("extended load requires integer lanes of 16, 32 or 64 bits"));
+    return {};
+  }
+  auto loaded = create_load (memory (Type (Type::Kind::U64), address, displacement));
+  auto bits = create_vector_splat (detail::vector_integer (64, false), loaded);
+  auto source = detail::vector_integer (64 / type.vector_lanes (), detail::vector_signed (type));
+  return create_extend (create_bitcast (bits, source), VectorHalf::Low);
+}
+Value MIRBuilder::create_load_splat (Type type, Memory source) {
+  if (!N::has_function (*this, "load splat")) return {};
+  if (!type.valid () || !type.is_vector () || source.type != type.vector_lane_type ()) {
+    N::state (*this)->fail ("load splat", invalid ("splat memory must have the vector lane type"));
+    return {};
+  }
+  return create_vector_splat (type, create_load (source));
+}
+Value MIRBuilder::create_load_zero (Type type, Memory source) {
+  if (!N::has_function (*this, "load zero")) return {};
+  const auto kind = source.type.kind ();
+  bool word = kind == Type::Kind::I32 || kind == Type::Kind::U32 || kind == Type::Kind::F32;
+  bool wide = kind == Type::Kind::I64 || kind == Type::Kind::U64 || kind == Type::Kind::F64;
+  if (!type.valid () || !type.is_vector () || (!word && !wide)) {
+    N::state (*this)->fail ("load zero",
+                            invalid ("zero load requires a vector result and 32/64-bit memory"));
+    return {};
+  }
+  auto loaded = create_load (source);
+  auto vector
+    = Type::vector128 (word ? (source.type.is_float ()                  ? Type::VectorElement::F32
+                               : source.type.kind () == Type::Kind::I32 ? Type::VectorElement::I32
+                                                                        : Type::VectorElement::U32)
+                            : (source.type.is_float ()                  ? Type::VectorElement::F64
+                               : source.type.kind () == Type::Kind::I64 ? Type::VectorElement::I64
+                                                                        : Type::VectorElement::U64),
+                       word ? 4 : 2);
+  std::array<std::byte, 16> zero{};
+  return create_bitcast (create_insert_lane (constant_vector (vector, zero), loaded, 0), type);
+}
+Value MIRBuilder::create_load_lane (Value vector, Memory source, unsigned lane) {
+  if (!N::has_function (*this, "load lane") || !N::input (*this, vector, "load lane").is_valid ())
+    return {};
+  if (!vector.type ().valid () || !vector.type ().is_vector ()
+      || source.type != vector.type ().vector_lane_type ()
+      || lane >= vector.type ().vector_lanes ()) {
+    N::state (*this)->fail ("load lane", invalid ("lane load type or lane mismatch"));
+    return {};
+  }
+  return create_insert_lane (vector, create_load (source), lane);
+}
+void MIRBuilder::create_store_lane (Memory destination, Value vector, unsigned lane) {
+  if (!N::has_function (*this, "store lane") || !N::input (*this, vector, "store lane").is_valid ())
+    return;
+  if (!vector.type ().valid () || !vector.type ().is_vector ()
+      || destination.type != vector.type ().vector_lane_type ()
+      || lane >= vector.type ().vector_lanes ()) {
+    N::state (*this)->fail ("store lane", invalid ("lane store type or lane mismatch"));
+    return;
+  }
+  // Validate the store address and mutability before emitting the extract.
+  auto opcode = destination.type.kind () == Type::Kind::F32   ? Opcode::FMov
+                : destination.type.kind () == Type::Kind::F64 ? Opcode::DMov
+                                                              : Opcode::Mov;
+  Operand zero = destination.type.kind () == Type::Kind::F32   ? Operand (0.0f)
+                 : destination.type.kind () == Type::Kind::F64 ? Operand (0.0)
+                                                               : Operand (std::int64_t (0));
+  const std::array<Operand, 2> operands{Operand (destination), zero};
+  auto checked = validate_instruction (*N::function (*this)->function, opcode, operands);
+  if (!checked.has_value ()) {
+    N::state (*this)->fail ("store lane", checked.error ());
+    return;
+  }
+  create_store (destination, create_extract_lane (vector, lane));
 }
 void MIRBuilder::create_assign (Value to, Value from) {
   if (!N::has_function (*this, "assign")) return;

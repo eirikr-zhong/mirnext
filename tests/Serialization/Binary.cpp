@@ -626,3 +626,27 @@ TEST_CASE ("native binary validates wire roles labels symbols and register owner
     CHECK_FALSE ((decompress (bytes, 1024 * 1024)).has_value ());
   }
 }
+
+TEST_CASE ("native formats roundtrip v128 types and literals") {
+  auto source = parse_text (R"(m:module
+f:func v128<i32x4>
+local v128<i32x4>:x
+vmov x,v128<i32x4>:0x01000000020000000300000004000000
+ret x
+endfunc
+endmodule
+)");
+  REQUIRE ((source).has_value ());
+  auto text = write_text ((source).value ());
+  REQUIRE ((text).has_value ());
+  auto text_roundtrip = parse_text ((text).value ());
+  REQUIRE ((text_roundtrip).has_value ());
+  CHECK ((text_roundtrip.value ().verify ()).has_value ());
+  CHECK (dump ((text_roundtrip).value ()).find ("v128<i32x4>") != std::string::npos);
+  auto bytes = write_binary ((source).value ());
+  REQUIRE ((bytes).has_value ());
+  auto binary_roundtrip = read_binary ((bytes).value ());
+  REQUIRE ((binary_roundtrip).has_value ());
+  CHECK ((binary_roundtrip.value ().verify ()).has_value ());
+  CHECK (dump ((binary_roundtrip).value ()).find ("v128<i32x4>") != std::string::npos);
+}

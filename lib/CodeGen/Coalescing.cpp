@@ -23,7 +23,7 @@ std::optional<std::array<const MachineVirtualRegister *, 2>> move_pair (
   auto op = std::get_if<ir::Opcode> (&code);
   if (!op
       || (*op != ir::Opcode::Mov && *op != ir::Opcode::FMov && *op != ir::Opcode::DMov
-          && *op != ir::Opcode::LDMov))
+          && *op != ir::Opcode::LDMov && *op != ir::Opcode::VMov))
     return {};
   auto a = detail::operand_access (i.operands ()[0]).get<const MachineVirtualRegister *> (),
        b = detail::operand_access (i.operands ()[1]).get<const MachineVirtualRegister *> ();

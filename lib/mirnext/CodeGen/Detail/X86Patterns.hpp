@@ -13,6 +13,7 @@ struct X86PatternOptions {
   std::optional<X86BranchRange> branch_range;
   // Use each candidate's precompiled maximum, rather than a supplied test bound.
   bool encoding_layout = false;
+  unsigned vector_shape = 0;
 };
 struct X86InstructionPattern {
   std::size_t index;

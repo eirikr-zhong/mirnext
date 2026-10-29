@@ -30,7 +30,7 @@ Error invalid (const MachineFunction &f, std::string why,
 bool is (MachineOpcode c, Opcode op) { return c == MachineOpcode (op); }
 bool move (MachineOpcode c) {
   return is (c, Opcode::Mov) || is (c, Opcode::FMov) || is (c, Opcode::DMov)
-         || is (c, Opcode::LDMov);
+         || is (c, Opcode::LDMov) || is (c, Opcode::VMov);
 }
 bool property (MachineOpcode c) {
   return is (c, Opcode::PrSet) || is (c, Opcode::PrBeq) || is (c, Opcode::PrBne);

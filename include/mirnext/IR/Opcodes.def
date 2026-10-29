@@ -184,3 +184,8 @@ MIRNEXT_OPCODE (Label, 180, "label", "", Fixed, Next)
 MIRNEXT_OPCODE (PrSet, 182, "prset", "ai", Fixed, Next)
 MIRNEXT_OPCODE (PrBeq, 183, "prbeq", "lai", Fixed, Branch)
 MIRNEXT_OPCODE (PrBne, 184, "prbne", "lai", Fixed, Branch)
+/* Fixed-width SIMD. File identifiers remain independent of enum numbering. */
+#define MIRNEXT_VECTOR_OPCODE(name, wire, spelling, roles, rule) \
+  MIRNEXT_OPCODE (name, wire, spelling, roles, Fixed, Next)
+#include "mirnext/IR/VectorOps.def"
+#undef MIRNEXT_VECTOR_OPCODE

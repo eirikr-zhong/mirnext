@@ -10,15 +10,17 @@
 namespace mirnext::transforms {
 namespace {
 using namespace ir;
-Type scalar (Type type) { return type.is_float () ? type : Type::i64 (); }
+Type scalar (Type type) { return type.is_float () || type.is_vector () ? type : Type::i64 (); }
 Opcode move (Type type) {
   return type.kind () == Type::Kind::F32          ? Opcode::FMov
          : type.kind () == Type::Kind::F64        ? Opcode::DMov
          : type.kind () == Type::Kind::LongDouble ? Opcode::LDMov
+         : type.is_vector ()                      ? Opcode::VMov
                                                   : Opcode::Mov;
 }
 bool is_move (Opcode op) {
-  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov;
+  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov
+         || op == Opcode::VMov;
 }
 bool move_like (Opcode op) {
   return is_move (op)
@@ -141,6 +143,10 @@ std::size_t operand_hash (const Operand &op) {
       } else if constexpr (std::is_same_v<T, SymbolReference>) {
         hash_combine (hash, std::hash<const Symbol *>{}(ir::detail::NodeAccess::symbol (value)));
         hash_combine (hash, std::hash<std::int64_t>{}(value.displacement));
+      } else if constexpr (std::is_same_v<T, ir::VectorConstant>) {
+        hash_combine (hash, static_cast<unsigned> (value.type.kind ()));
+        hash_combine (hash, value.type.vector_lanes ());
+        for (auto byte : value.bytes) hash_combine (hash, std::to_integer<unsigned char> (byte));
       } else
         hash_combine (hash, std::hash<T>{}(value));
     },
@@ -425,7 +431,8 @@ class Simplifier {
       auto operand = instruction.operands ()[n];
       const bool output = output_operand (function_, instruction, n);
       auto after_anchor = &instruction;
-      if ((call && n == 0)
+      if ((call && n == 0) || (opcode == Opcode::VExtract && n == 2)
+          || (opcode == Opcode::VInsert && n == 3)
           || (call && n == 1 && ir::detail::operand_access (operand).get<SymbolReference> ())
           || (opcode == Opcode::VaArg && n == 2)
           || ((opcode == Opcode::PrBeq || opcode == Opcode::PrBne) && n == 2)

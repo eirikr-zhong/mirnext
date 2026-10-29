@@ -438,8 +438,9 @@ struct X86EncodingEngine {
         auto &p = prepared.back ();
         auto normalized = normalize (p);
         if (!(normalized).has_value ()) return normalized.error ();
-        auto selected
-          = x86_instruction_pattern (i.opcode (), p.operands (), {.allow_short_branches = false});
+        auto selected = x86_instruction_pattern (i.opcode (), p.operands (),
+                                                 {.allow_short_branches = false,
+                                                  .vector_shape = i.vector_shape ()});
         if (!selected)
           return invalid ("no encoding for " + std::string (opcode_name (i.opcode ())));
         p.pattern = selected->index;
@@ -551,8 +552,9 @@ struct X86EncodingEngine {
       if (!(normalized).has_value ()) return normalized.error ();
       // BBV targets live in separately published blocks. Match MIR's forced
       // rel32 selection, never whole-function branch shortening or alignment.
-      auto selected
-        = x86_instruction_pattern (emission.opcode, p.operands (), {.allow_short_branches = false});
+      auto selected = x86_instruction_pattern (emission.opcode, p.operands (),
+                                               {.allow_short_branches = false,
+                                                .vector_shape = i.vector_shape ()});
       if (!selected)
         return invalid ("no BBV encoding for " + std::string (opcode_name (emission.opcode)));
       auto start = labels.size ();

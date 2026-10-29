@@ -11,7 +11,8 @@ namespace mirnext::transforms {
 namespace {
 using namespace ir;
 bool move (Opcode op) {
-  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov;
+  return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov
+         || op == Opcode::VMov;
 }
 bool store (const Instruction &i) {
   return move (i.opcode ()) && ir::detail::operand_access (i.operands ()[0]).get<Memory> ();
@@ -30,6 +31,7 @@ std::size_t size (Type type) {
   case Type::Kind::F32: return 4;
   case Type::Kind::Pointer: return sizeof (std::uintptr_t);
   case Type::Kind::LongDouble: return sizeof (long double);
+  case Type::Kind::Vector: return 16;
   default: return 8;
   }
 }

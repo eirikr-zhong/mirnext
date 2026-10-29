@@ -8,6 +8,8 @@
 #include "mirnext/CodeGen/Detail/RegisterEffects.hpp"
 #include "mirnext/CodeGen/Detail/InstructionPatterns.hpp"
 #include "mirnext/CodeGen/SpillEmitter.hpp"
+#include "mirnext/CodeGen/Detail/Vector.hpp"
+#include "mirnext/CodeGen/Detail/NativeVector.hpp"
 #include <algorithm>
 #include <bit>
 #include <climits>
@@ -26,12 +28,14 @@ bool address (MachineOpcode c) {
 bool move (MachineOpcode c) {
   auto p = std::get_if<Opcode> (&c);
   return p
-         && (*p == Opcode::Mov || *p == Opcode::FMov || *p == Opcode::DMov || *p == Opcode::LDMov);
+         && (*p == Opcode::Mov || *p == Opcode::FMov || *p == Opcode::DMov || *p == Opcode::LDMov
+             || *p == Opcode::VMov);
 }
 Opcode move_type (Type t) {
   return t.kind () == K::F32          ? Opcode::FMov
          : t.kind () == K::F64        ? Opcode::DMov
          : t.kind () == K::LongDouble ? Opcode::LDMov
+         : t.is_vector ()             ? Opcode::VMov
                                       : Opcode::Mov;
 }
 bool equal (const MachineOperand &a, const MachineOperand &b) {
@@ -56,6 +60,10 @@ DataMode data_mode (MachineOpcode code, std::span<const MachineOperand> ops, std
   if (code == MachineOpcode (MachinePseudoOpcode::X86Mov128)
       || code == MachineOpcode (MachinePseudoOpcode::X86Mov128Unaligned))
     return {Type (K::F64), p == 0};
+  if (auto native = detail::native_vector_descriptor (code)) {
+    auto role = native->roles[p];
+    return {detail::native_operand_type (ops[p], role), role >= 'A' && role <= 'Z'};
+  }
   if (address (code)) return {Type::i64 (), p == 0, p != 0};
   auto op = std::get<Opcode> (code);
   if (op == Opcode::Ret) return {Type::i64 (), false, true};
@@ -73,6 +81,9 @@ DataMode data_mode (MachineOpcode code, std::span<const MachineOperand> ops, std
   auto d = ir::instruction_descriptor (op).get ();
   if (d->count != ir::OperandCount::Fixed) return {};
   auto r = d->roles[p];
+  if (r == 'V' || r == 'v')
+    return {detail::vector_type (ops).value_or (Type::vector128 (Type::VectorElement::I8, 16)),
+            r == 'V'};
   return {Type (r == 'F' || r == 'f'   ? K::F32
                 : r == 'D' || r == 'd' ? K::F64
                 : r == 'E' || r == 'e' ? K::LongDouble

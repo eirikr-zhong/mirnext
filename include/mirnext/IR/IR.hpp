@@ -1,6 +1,7 @@
 /* Licensed under the MIT License. Canonical register IR with stable object ownership. */
 #pragma once
 #include "mirnext/Support/Result.hpp"
+#include <array>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
@@ -82,12 +83,17 @@ class Type {
     Pointer,
     Block,
     ReturnBlock,
-    Undef
+    Undef,
+    Vector
   };
+  enum class VectorElement : std::uint8_t { I8, U8, I16, U16, I32, U32, I64, U64, F32, F64 };
   enum class BlockClass { Default, Class1, Class2, Class3, Class4 };
   constexpr explicit Type (Kind kind) : kind_ (kind) {}
   static constexpr Type i64 () { return Type (Kind::I64); }
   static constexpr Type pointer () { return Type (Kind::Pointer); }
+  static constexpr Type vector128 (VectorElement element, unsigned lanes) {
+    return Type (Kind::Vector, element, 128, lanes);
+  }
   static constexpr Type block (std::size_t size, BlockClass classification = BlockClass::Default) {
     return Type (Kind::Block, size, classification);
   }
@@ -101,15 +107,35 @@ class Type {
   constexpr bool is_float () const { return kind_ >= Kind::F32 && kind_ <= Kind::LongDouble; }
   constexpr bool is_integer () const { return kind_ <= Kind::U64 || kind_ == Kind::Pointer; }
   constexpr bool is_scalar () const { return is_integer () || is_float (); }
+  constexpr bool is_vector () const { return kind_ == Kind::Vector; }
+  constexpr VectorElement vector_element () const { return vector_element_; }
+  constexpr unsigned vector_bits () const { return vector_bits_; }
+  constexpr unsigned vector_lanes () const { return vector_lanes_; }
+  constexpr Type vector_lane_type () const {
+    return is_vector () ? Type (static_cast<Kind> (static_cast<unsigned> (vector_element_) + 1))
+                        : Type (Kind::Undef);
+  }
+  constexpr Type vector_mask_type () const {
+    return !is_vector ()         ? Type (Kind::Undef)
+           : vector_lanes_ == 16 ? vector128 (VectorElement::U8, 16)
+           : vector_lanes_ == 8  ? vector128 (VectorElement::U16, 8)
+           : vector_lanes_ == 4  ? vector128 (VectorElement::U32, 4)
+                                 : vector128 (VectorElement::U64, 2);
+  }
   bool valid () const noexcept;
   friend auto operator<=> (const Type &, const Type &) = default;
 
  private:
   constexpr Type (Kind kind, std::size_t size, BlockClass classification)
-    : kind_ (kind), size_ (size), class_ (classification) {}
+    : kind_ (kind), class_ (classification), size_ (size) {}
+  constexpr Type (Kind kind, VectorElement element, unsigned bits, unsigned lanes)
+    : kind_ (kind), vector_element_ (element), vector_bits_ (bits), vector_lanes_ (lanes) {}
   Kind kind_;
-  std::size_t size_ = 0;
   BlockClass class_ = BlockClass::Default;
+  std::size_t size_ = 0;
+  VectorElement vector_element_ = VectorElement::I8;
+  std::uint16_t vector_bits_ = 0;
+  unsigned vector_lanes_ = 0;
 };
 
 struct Signature {
@@ -386,9 +412,30 @@ struct SymbolReference {
     : displacement (displacement), symbol_ (symbol) {}
   const Symbol *symbol_;
 };
+struct VectorConstant {
+  Type type;
+  std::array<std::byte, 16> bytes{};
+  friend bool operator== (const VectorConstant &, const VectorConstant &) = default;
+};
+}  // namespace mirnext::ir
+namespace std {
+template <>
+struct hash<mirnext::ir::VectorConstant> {
+  std::size_t operator() (const mirnext::ir::VectorConstant &value) const noexcept {
+    std::size_t result = static_cast<unsigned> (value.type.kind ());
+    result ^= value.type.vector_lanes () + (result << 6) + (result >> 2);
+    result ^= static_cast<unsigned> (value.type.vector_element ()) + (result << 6) + (result >> 2);
+    for (auto byte : value.bytes)
+      result ^= std::to_integer<unsigned char> (byte) + (result << 6) + (result >> 2);
+    return result;
+  }
+};
+}  // namespace std
+namespace mirnext::ir {
 class Operand {
-  using Storage = std::variant<std::int64_t, std::uint64_t, float, double, long double, std::string,
-                               const Register *, Memory, const Label *, SymbolReference>;
+  using Storage
+    = std::variant<std::int64_t, std::uint64_t, float, double, long double, std::string,
+                   VectorConstant, const Register *, Memory, const Label *, SymbolReference>;
 
  public:
   Operand (std::int64_t value) : value_ (value) {}
@@ -403,6 +450,7 @@ class Operand {
   Operand (double value) : value_ (value) {}
   Operand (long double value) : value_ (value) {}
   Operand (std::string value) : value_ (std::move (value)) {}
+  Operand (VectorConstant value) : value_ (std::move (value)) {}
   Operand (const Register &value) : value_ (&value) {}
   Operand (Memory value) : value_ (std::move (value)) {}
   Operand (const Label &value) : value_ (&value) {}

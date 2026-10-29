@@ -29,6 +29,7 @@ Opcode move (Type t) {
   return t.kind () == Kind::F32          ? Opcode::FMov
          : t.kind () == Kind::F64        ? Opcode::DMov
          : t.kind () == Kind::LongDouble ? Opcode::LDMov
+         : t.is_vector ()                ? Opcode::VMov
                                          : Opcode::Mov;
 }
 std::optional<Opcode> extension (Type t) {
@@ -198,8 +199,8 @@ Operand AArch64Lowering::address_memory (Instruction &at, Type t, std::int64_t o
                       : t.kind () == Kind::I16 || t.kind () == Kind::U16 ? 2
                       : t.kind () == Kind::I32 || t.kind () == Kind::U32 || t.kind () == Kind::F32
                         ? 4
-                      : t.kind () == Kind::LongDouble ? 16
-                                                      : 8;
+                      : t.kind () == Kind::LongDouble || t.is_vector () ? 16
+                                                                        : 8;
   if (offset >= 0 && offset % scale == 0 && static_cast<std::uint64_t> (offset) / scale < 4096)
     return memory (t, offset, base);
   auto temp = hard ? physical (10) : temporary ();
@@ -212,7 +213,7 @@ Operand AArch64Lowering::address_memory (Instruction &at, Type t, std::int64_t o
 }
 std::optional<unsigned> AArch64Lowering::argument_register (Type type, std::size_t &ints,
                                                             std::size_t &floats) {
-  if (type.is_float ()) {
+  if (type.is_float () || type.is_vector ()) {
     auto n = floats++;
     return n < 8 ? std::optional<unsigned> (32 + n) : std::nullopt;
   }
@@ -321,11 +322,12 @@ void AArch64Lowering::parameters (Instruction &at) {
         state.has_block_arguments = true;
         before (at, Opcode::Mov, {physical (8), memory (Type::i64 (), 16, physical_register (29))});
       }
-      auto mem_type = type.is_float () ? type : Type::i64 ();
-      if (type.kind () == Kind::LongDouble) stack_parameters = align16 (stack_parameters);
+      auto mem_type = (type.is_float () || type.is_vector ()) ? type : Type::i64 ();
+      if (type.kind () == Kind::LongDouble || type.is_vector ())
+        stack_parameters = align16 (stack_parameters);
       auto mem = address_memory (at, mem_type, stack_parameters, physical_register (8), true);
       before (at, move (type), {arg, mem});
-      stack_parameters += type.kind () == Kind::LongDouble ? 16 : 8;
+      stack_parameters += type.kind () == Kind::LongDouble || type.is_vector () ? 16 : 8;
     }
   }
 }
@@ -368,8 +370,8 @@ void AArch64Lowering::check_call_area (const ir::Signature &s, std::span<const O
       if (ints + words > 8) add (block, words * 8);
       ints += words;
     } else if (!argument_register (t, ints, floats)) {
-      if (t.kind () == Kind::LongDouble) align (block);
-      add (block, t.kind () == Kind::LongDouble ? 16 : 8);
+      if (t.kind () == Kind::LongDouble || t.is_vector ()) align (block);
+      add (block, t.kind () == Kind::LongDouble || t.is_vector () ? 16 : 8);
     }
   }
   if (error) return;
@@ -392,8 +394,8 @@ void AArch64Lowering::check_call_area (const ir::Signature &s, std::span<const O
       add (block, words * 8);
     }
     if (!argument_register (t, ints, floats)) {
-      if (t.kind () == Kind::LongDouble) align (stack);
-      add (stack, t.kind () == Kind::LongDouble ? 16 : 8);
+      if (t.kind () == Kind::LongDouble || t.is_vector ()) align (stack);
+      add (stack, t.kind () == Kind::LongDouble || t.is_vector () ? 16 : 8);
     }
   }
   if (error) return;
@@ -442,8 +444,8 @@ void AArch64Lowering::lower_call (Instruction &at) {
       if (ints + words > 8) block += words * 8;
       ints += words;
     } else if (!argument_register (t, ints, floats)) {
-      if (t.kind () == Kind::LongDouble) block = align16 (block);
-      block += t.kind () == Kind::LongDouble ? 16 : 8;
+      if (t.kind () == Kind::LongDouble || t.is_vector ()) block = align16 (block);
+      block += t.kind () == Kind::LongDouble || t.is_vector () ? 16 : 8;
     }
   }
   block = align16 (block);
@@ -515,11 +517,11 @@ void AArch64Lowering::lower_call (Instruction &at) {
                  ? memory (type, type.block_size (), physical_register (*reg))
                  : physical (*reg);
     } else {
-      if (type.kind () == Kind::LongDouble) stack = align16 (stack);
-      auto mem_type = type.is_float () ? type : Type::i64 ();
-      std::size_t scale = mem_type.kind () == Kind::F32          ? 4
-                          : mem_type.kind () == Kind::LongDouble ? 16
-                                                                 : 8;
+      if (type.kind () == Kind::LongDouble || type.is_vector ()) stack = align16 (stack);
+      auto mem_type = (type.is_float () || type.is_vector ()) ? type : Type::i64 ();
+      std::size_t scale = mem_type.kind () == Kind::F32                                   ? 4
+                          : mem_type.kind () == Kind::LongDouble || mem_type.is_vector () ? 16
+                                                                                          : 8;
       auto destination = memory (mem_type, stack, physical_register (31));
       if (stack % scale || stack / scale >= 4096) {
         prefix_insert (Opcode::Mov, {physical (10), integer (stack)});
@@ -534,7 +536,7 @@ void AArch64Lowering::lower_call (Instruction &at) {
             : arg;
       prefix_insert (move (type), {destination, source});
       ops[i] = destination;
-      stack += type.kind () == Kind::LongDouble ? 16 : 8;
+      stack += type.kind () == Kind::LongDouble || type.is_vector () ? 16 : 8;
     }
   }
   block = align16 (block);
@@ -542,8 +544,8 @@ void AArch64Lowering::lower_call (Instruction &at) {
   std::size_t ret_ints = 0, ret_floats = 0;
   for (std::size_t i = 0; i < signature.results.size () && !error; ++i) {
     auto t = signature.results[i];
-    auto &count = t.is_float () ? ret_floats : ret_ints;
-    auto physical_result = physical ((t.is_float () ? 32 : 0) + count++);
+    auto &count = (t.is_float () || t.is_vector ()) ? ret_floats : ret_ints;
+    auto physical_result = physical (((t.is_float () || t.is_vector ()) ? 32 : 0) + count++);
     auto result = ops[i + 2];
     auto moved = after (at, move (t), {result, physical_result});
     ops[i + 2] = physical_result;
@@ -624,7 +626,7 @@ void AArch64Lowering::lower_return (Instruction &at) {
   std::size_t ints = 0, floats = 0;
   for (std::size_t i = 0; i < ops.size (); ++i) {
     auto type = f.signature ().results[i];
-    auto reg = physical (type.is_float () ? 32 + floats++ : ints++);
+    auto reg = physical ((type.is_float () || type.is_vector ()) ? 32 + floats++ : ints++);
     before (at, move (type), {reg, ops[i]});
     ops[i] = reg;
   }
@@ -643,7 +645,7 @@ Result<void> AArch64Lowering::preflight () {
   auto returns_valid = [&] (const ir::Signature &signature) {
     std::size_t ints = 0, floats = 0;
     for (auto t : signature.results)
-      if ((t.is_float () ? ++floats : ++ints) > 8) return false;
+      if (((t.is_float () || t.is_vector ()) ? ++floats : ++ints) > 8) return false;
     return true;
   };
   if (!returns_valid (f.signature ()))

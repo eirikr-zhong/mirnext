@@ -36,7 +36,8 @@ unsigned scale (Type t) {
   case K::I32:
   case K::U32:
   case K::F32: return 4;
-  case K::LongDouble: return 16;
+  case K::LongDouble:
+  case K::Vector: return 16;
   default: return 8;
   }
 }
@@ -108,7 +109,7 @@ struct EncodingEngine {
   }
   Result<void> instruction (MachineOpcode opcode, std::span<const MachineOperand> ops,
                             AArch64Overflow overflow, bool lowered_call = false,
-                            std::uint64_t order = 0) {
+                            std::uint64_t order = 0, unsigned vector_shape = 0) {
     std::optional<std::vector<MachineOperand>> normalized;
     auto change = [&] (std::size_t n, MachineOperand o) {
       if (!normalized) normalized.emplace (ops.begin (), ops.end ());
@@ -133,7 +134,7 @@ struct EncodingEngine {
           change (n, detail::NodeAccess::make_MachineOperand ((value).value ()));
         }
       }
-    auto recipe = aarch64_encoding_recipe (opcode, ops, overflow);
+    auto recipe = aarch64_encoding_recipe (opcode, ops, overflow, vector_shape);
     if (!recipe)
       return invalid ("no target encoding for " + std::string (opcode_name (opcode)) + " #"
                       + std::to_string (order));
@@ -170,6 +171,16 @@ struct EncodingEngine {
             }
           }
           status = set_field (r, 5, spec.shift);
+          break;
+        }
+        case K::BitImmediate: {
+          if (spec.parameter >= ops.size ()) return invalid ("missing native vector immediate");
+          auto immediate = integer (ops[spec.parameter]);
+          if (!immediate) return invalid ("invalid native vector immediate");
+          status = set_field (*immediate, spec.flags, spec.shift);
+          if (status.has_value ()
+              && opcode == MachineOpcode (MachinePseudoOpcode::A64VectorExtract))
+            status = set_field ((*immediate & 7) == 0, 1, 30);
           break;
         }
         case K::IndexedMemory:
@@ -301,7 +312,7 @@ struct EncodingEngine {
       for (auto &i : b.instructions ()) {
         if (i.opcode () == MachineOpcode (MachinePseudoOpcode::Use)) continue;
         auto r = instruction (i.opcode (), i.operands (), overflow, i.has_lowered_call (),
-                              i.creation_order ());
+                              i.creation_order (), i.vector_shape ());
         if (!(r).has_value ()) return r.error ();
         auto code = i.opcode ();
         if (code == MachineOpcode (Opcode::Subo) || code == MachineOpcode (Opcode::Subos))
@@ -355,8 +366,8 @@ struct EncodingEngine {
       auto ops = i.operands ();
       if (emission.opcode != i.opcode ()) ops = ops.first (1);  // folded property branch
       auto start = fixups.size ();
-      auto status
-        = instruction (emission.opcode, ops, overflow, i.has_lowered_call (), i.creation_order ());
+      auto status = instruction (emission.opcode, ops, overflow, i.has_lowered_call (),
+                                 i.creation_order (), i.vector_shape ());
       if (!(status).has_value ()) return status.error ();
       for (std::size_t n = start; n < fixups.size (); ++n) {
         auto &r = fixups[n];

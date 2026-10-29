@@ -24,6 +24,11 @@ void store (std::uintptr_t address, T value) {
 }  // namespace
 Result<ScalarValue> load_scalar (ir::Type type, std::uintptr_t address) {
   if (!address) return invalid ("null scalar memory read");
+  if (type.is_vector ()) {
+    ScalarValue::Storage bytes{};
+    std::memcpy (bytes.data (), reinterpret_cast<const std::byte *> (address), bytes.size ());
+    return ScalarValue::vector (type, bytes);
+  }
   using K = ir::Type::Kind;
   switch (type.kind ()) {
   case K::I8: return ScalarValue (std::int64_t (load<std::int8_t> (address)));
@@ -44,6 +49,11 @@ Result<ScalarValue> load_scalar (ir::Type type, std::uintptr_t address) {
 }
 Result<void> store_scalar (ir::Type type, std::uintptr_t address, const ScalarValue &value) {
   if (!address) return invalid ("null scalar memory write");
+  if (type.is_vector ()) {
+    std::memcpy (reinterpret_cast<std::byte *> (address), value.storage ().data (),
+                 ScalarValue::storage_size);
+    return {};
+  }
   using K = ir::Type::Kind;
   switch (type.kind ()) {
   case K::I8:
@@ -129,6 +139,8 @@ Result<ScalarValue> InterpreterFrame::read (const PreparedOperand &p, ir::Type t
   if (auto v = ir::detail::operand_access (o).get<float> ()) return ScalarValue (*v);
   if (auto v = ir::detail::operand_access (o).get<double> ()) return ScalarValue (*v);
   if (auto v = ir::detail::operand_access (o).get<long double> ()) return ScalarValue (*v);
+  if (auto v = ir::detail::operand_access (o).get<ir::VectorConstant> ())
+    return ScalarValue::vector (v->type, v->bytes);
   if (auto v = ir::detail::operand_access (o).get<std::string> ())
     return ScalarValue::pointer (reinterpret_cast<std::uintptr_t> (v->c_str ()));
   if (auto v = ir::detail::operand_access (o).get<ir::SymbolReference> ())

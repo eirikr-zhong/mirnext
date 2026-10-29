@@ -8,7 +8,9 @@
 namespace mirnext::execution {
 class ScalarValue {
  public:
-  static constexpr std::size_t storage_size = sizeof (long double) > 8 ? sizeof (long double) : 8;
+  // Keep one ABI slot representation for scalar and v128 values. Scalars use
+  // the leading bytes; vectors always occupy the full 16-byte slot.
+  static constexpr std::size_t storage_size = 16;
   using Storage = std::array<std::byte, storage_size>;
   ScalarValue () = default;
   ScalarValue (std::int64_t v) : ScalarValue (ir::Type::i64 (), v) {}
@@ -24,6 +26,7 @@ class ScalarValue {
   static ScalarValue pointer (std::uintptr_t v) {
     return ScalarValue (ir::Type::pointer (), std::uint64_t (v));
   }
+  static Result<ScalarValue> vector (ir::Type type, std::span<const std::byte> bytes);
   static Result<ScalarValue> from_storage (ir::Type, std::span<const std::byte>);
   ir::Type type () const { return type_; }
   const Storage &storage () const { return storage_; }
@@ -32,6 +35,7 @@ class ScalarValue {
   Result<float> as_float () const;
   Result<double> as_double () const;
   Result<long double> as_long_double () const;
+  std::span<const std::byte> as_vector () const { return storage_; }
 
  private:
   template <class T>

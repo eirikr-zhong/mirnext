@@ -11,11 +11,12 @@ namespace mirnext::transforms {
 using namespace ir;
 namespace {
 Error invalid (std::string message) { return {ErrorCode::InvalidOperand, std::move (message)}; }
-Type scalar (Type type) { return type.is_float () ? type : Type::i64 (); }
+Type scalar (Type type) { return type.is_float () || type.is_vector () ? type : Type::i64 (); }
 Opcode move (Type type) {
   return type.kind () == Type::Kind::F32          ? Opcode::FMov
          : type.kind () == Type::Kind::F64        ? Opcode::DMov
          : type.kind () == Type::Kind::LongDouble ? Opcode::LDMov
+         : type.is_vector ()                      ? Opcode::VMov
                                                   : Opcode::Mov;
 }
 bool call (Opcode opcode) {

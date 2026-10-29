@@ -41,6 +41,32 @@ Result<InterpreterOutcome> InterpreterFrame::run () {
         return failure (invalid ("interpreter instruction limit exceeded"));
       ++invocation.steps;
     }
+    if (operation.vector_inputs) {
+      auto type_of = [&] (const PreparedOperand &operand) {
+        if (operand.reg != no_slot) return body.registers[operand.reg]->type ();
+        if (auto memory = ir::detail::operand_access (*operand.source).get<ir::Memory> ())
+          return memory->type;
+        if (auto constant = ir::detail::operand_access (*operand.source).get<ir::VectorConstant> ())
+          return constant->type;
+        if (ir::detail::operand_access (*operand.source).get<float> ())
+          return ir::Type (ir::Type::Kind::F32);
+        if (ir::detail::operand_access (*operand.source).get<double> ())
+          return ir::Type (ir::Type::Kind::F64);
+        return ir::Type::i64 ();
+      };
+      std::array<ScalarValue, 4> args;
+      for (std::size_t n = 0; n < operation.vector_inputs; ++n) {
+        auto value = read (p[n + 1], type_of (p[n + 1]));
+        if (!(value).has_value ()) return failure (value.error ());
+        args[n] = std::move ((value).value ());
+      }
+      auto value
+        = evaluate_vector (op, type_of (p[0]), std::span (args).first (operation.vector_inputs));
+      if (!(value).has_value ()) return failure (value.error ());
+      auto assigned = write (p[0], (value).value ());
+      if (!(assigned).has_value ()) return failure (assigned.error ());
+      continue;
+    }
     auto integer = [&] (std::size_t n) -> Result<std::uint64_t> {
       auto v = read (p[n], ir::Type::i64 ());
       if (!(v).has_value ()) return v.error ();

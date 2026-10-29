@@ -6,6 +6,7 @@ bool aarch64_instruction_ok (MachineOpcode, std::span<const MachineOperand>);
 enum class AArch64Overflow { Default, Subtract, Multiply };
 enum class AArch64FieldKind : std::uint8_t {
   Register,
+  BitImmediate,
   IndexedMemory,
   DisplacedMemory,
   RightShift,
@@ -34,6 +35,7 @@ struct AArch64Recipe {
 // legalization. No template-string parsing occurs in the encoder.
 std::optional<AArch64Recipe> aarch64_encoding_recipe (MachineOpcode,
                                                       std::span<const MachineOperand>,
-                                                      AArch64Overflow = AArch64Overflow::Default);
+                                                      AArch64Overflow = AArch64Overflow::Default,
+                                                      unsigned vector_shape = 0);
 Result<std::uint32_t> aarch64_branch_displacement (std::int64_t, bool short_branch);
 }  // namespace mirnext::codegen

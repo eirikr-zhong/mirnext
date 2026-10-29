@@ -259,7 +259,16 @@ class MachineOperand {
 };
 // USE is a backend liveness boundary (empty USE is the backend's no-op).
 // Private SSE moves have no magic selector operand; alignment is explicit.
-enum class MachinePseudoOpcode { Use, X86Mov128, X86Mov128Unaligned };
+enum class MachinePseudoOpcode {
+  Use,
+  X86Mov128,
+  X86Mov128Unaligned,
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding) name,
+#define MIRNEXT_NATIVE_A64 MIRNEXT_NATIVE_X86
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_A64
+#undef MIRNEXT_NATIVE_X86
+};
 using MachineOpcode = std::variant<ir::Opcode, MachinePseudoOpcode>;
 std::string_view opcode_name (MachineOpcode);
 // A copied stack block retains its source value's analysis identity after
@@ -291,6 +300,8 @@ class MachineInstruction {
   MachineInstruction &operator= (const MachineInstruction &) = delete;
   const MachineBasicBlock &block () const { return *block_; }
   MachineOpcode opcode () const { return opcode_; }
+  // Retained through physical allocation for lane-specific SIMD selection.
+  unsigned vector_shape () const { return vector_shape_; }
   std::span<const MachineOperand> operands () const { return operands_; }
   std::span<const target::PhysicalRegister> call_arguments () const { return call_arguments_; }
   std::span<const CallArgumentDependency> call_dependencies () const { return call_dependencies_; }
@@ -302,6 +313,7 @@ class MachineInstruction {
   friend class MachineRewriter;
   MachineBasicBlock *block_;
   MachineOpcode opcode_;
+  std::uint8_t vector_shape_ = 0;
   std::vector<MachineOperand> operands_;
   std::vector<target::PhysicalRegister> call_arguments_;
   std::vector<CallArgumentDependency> call_dependencies_;

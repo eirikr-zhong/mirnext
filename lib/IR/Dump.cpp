@@ -14,6 +14,13 @@ std::string type_name (Type type) {
   constexpr std::string_view names[]{"bool", "i8", "u8", "i16", "u16", "i32", "u32",  "i64",
                                      "u64",  "f",  "d",  "ld",  "p",   "blk", "rblk", "undef"};
   auto n = static_cast<unsigned> (type.kind ());
+  if (type.is_vector ()) {
+    if (!type.valid ()) return "<invalid-vector-type>";
+    constexpr std::string_view elements[]{"i8",  "u8",  "i16", "u16", "i32",
+                                          "u32", "i64", "u64", "f32", "f64"};
+    return "v128<" + std::string (elements[static_cast<unsigned> (type.vector_element ())]) + "x"
+           + std::to_string (type.vector_lanes ()) + ">";
+  }
   if (n >= std::size (names)) return "<invalid-type>";
   auto result = std::string (names[n]);
   if (type.is_block ())
@@ -67,7 +74,13 @@ struct Printer {
         else if constexpr (std::is_same_v<T, long double>)
           out << "ld:" << std::setprecision (std::numeric_limits<long double>::max_digits10)
               << value;
-        else if constexpr (std::is_same_v<T, std::uint64_t>)
+        else if constexpr (std::is_same_v<T, VectorConstant>) {
+          out << type_name (value.type) << ":0x" << std::hex;
+          for (auto byte : value.bytes)
+            out << std::setw (2) << std::setfill ('0')
+                << static_cast<unsigned> (std::to_integer<unsigned char> (byte));
+          out << std::setfill (' ') << std::dec;
+        } else if constexpr (std::is_same_v<T, std::uint64_t>)
           out << 'u' << value;
         else
           out << value;

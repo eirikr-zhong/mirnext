@@ -10,6 +10,7 @@ namespace {
 Error invalid (std::string message) { return {ErrorCode::InvalidOperand, std::move (message)}; }
 std::size_t storage_size (Type type) {
   switch (type.kind ()) {
+  case Type::Kind::Vector: return 16;
   case Type::Kind::I8:
   case Type::Kind::U8: return 1;
   case Type::Kind::I16:
@@ -25,6 +26,7 @@ Opcode move_opcode (Type type) {
   return type.kind () == Type::Kind::F32          ? Opcode::FMov
          : type.kind () == Type::Kind::F64        ? Opcode::DMov
          : type.kind () == Type::Kind::LongDouble ? Opcode::LDMov
+         : type.is_vector ()                      ? Opcode::VMov
                                                   : Opcode::Mov;
 }
 bool compatible_storage (Type binding, Type storage) {
@@ -34,7 +36,8 @@ bool compatible_storage (Type binding, Type storage) {
 }
 }  // namespace
 Result<void> validate_variable_binding (const Symbol &symbol, Type type, bool writable) {
-  if (!type.valid () || !type.is_scalar ()) return invalid ("variable type must be scalar");
+  if (!type.valid () || (!type.is_scalar () && !type.is_vector ()))
+    return invalid ("variable type must be scalar or vector");
   if (symbol.name ().empty ()) return invalid ("variable requires a named symbol");
   if (symbol.kind () == Symbol::Kind::Import && !symbol.signature ().get ()) return {};
   if (symbol.kind () != Symbol::Kind::Data || !symbol.data ().get ())
@@ -83,8 +86,8 @@ Result<const GlobalVariable &> Module::create_variable (std::string_view name, T
                                                         std::optional<Operand> initial,
                                                         bool writable) {
   if (error_) return *error_;
-  if (name.empty () || !type.valid () || !type.is_scalar ())
-    return fail (invalid ("variable requires a name and scalar type"));
+  if (name.empty () || !type.valid () || (!type.is_scalar () && !type.is_vector ()))
+    return fail (invalid ("variable requires a name and scalar or vector type"));
   if (initial && type.kind () == Type::Kind::Bool) {
     if (auto value = detail::operand_access (*(initial)).get<std::int64_t> ())
       initial = Operand (*value != 0);
@@ -104,8 +107,8 @@ Result<const GlobalVariable &> Module::create_variable (std::string_view name, T
 Result<const GlobalVariable &> Module::import_variable (std::string_view name, Type type,
                                                         bool writable) {
   if (error_) return *error_;
-  if (!type.valid () || !type.is_scalar ())
-    return fail (invalid ("imported variable type must be scalar"));
+  if (!type.valid () || (!type.is_scalar () && !type.is_vector ()))
+    return fail (invalid ("imported variable type must be scalar or vector"));
   auto symbol = import (name);
   if (!(symbol).has_value ()) return symbol.error ();
   return bind_variable ((symbol).value (), type, writable);

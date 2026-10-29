@@ -238,6 +238,8 @@ Result<void> ProgramImage::data () {
               store (at, *value);
             else if (auto value = ir::detail::operand_access (v).get<double> ())
               store (at, *value);
+            else if (auto value = ir::detail::operand_access (v).get<ir::VectorConstant> ())
+              std::memcpy (at, value->bytes.data (), value->bytes.size ());
             else
               store (at, *ir::detail::operand_access (v).get<long double> ());
             at += width.value ().size;

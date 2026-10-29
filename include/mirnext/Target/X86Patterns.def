@@ -494,6 +494,27 @@ MIRNEXT_X86_TABLE = {
   /* fld m2;fld m1;fucomip st,st1;fstp st;jp rel32;jne rel32 */
   {MIRNEXT_X86_OPCODE (LDBne), "L mld mld", "DB /5 m2; DB /5 m1; DF E9; DD D8; 0F 8A L0; 0F 85 L0"},
 
+  /* SSE2 v128 arithmetic. Shape survives virtual-to-physical allocation:
+     1/2/3/4 = integer 8/16/32/64-bit lanes, 5/6 = f32/f64 lanes. */
+  {MIRNEXT_X86_OPCODE (VMov), "r r", "F3 Y 0F 6F r0 R1"},
+  {MIRNEXT_X86_OPCODE (VMov), "r mv", "F3 Y 0F 6F r0 m1"},
+  {MIRNEXT_X86_OPCODE (VMov), "mv r", "F3 Y 0F 7F r1 m0"},
+  {MIRNEXT_X86_OPCODE (VAdd), "r 0 r", "66 Y 0F FC r0 R2", 1},
+  {MIRNEXT_X86_OPCODE (VAdd), "r 0 r", "66 Y 0F FD r0 R2", 2},
+  {MIRNEXT_X86_OPCODE (VAdd), "r 0 r", "66 Y 0F FE r0 R2", 3},
+  {MIRNEXT_X86_OPCODE (VAdd), "r 0 r", "66 Y 0F D4 r0 R2", 4},
+  {MIRNEXT_X86_OPCODE (VAdd), "r 0 r", "Y 0F 58 r0 R2", 5},
+  {MIRNEXT_X86_OPCODE (VAdd), "r 0 r", "66 Y 0F 58 r0 R2", 6},
+  {MIRNEXT_X86_OPCODE (VSub), "r 0 r", "66 Y 0F F8 r0 R2", 1},
+  {MIRNEXT_X86_OPCODE (VSub), "r 0 r", "66 Y 0F F9 r0 R2", 2},
+  {MIRNEXT_X86_OPCODE (VSub), "r 0 r", "66 Y 0F FA r0 R2", 3},
+  {MIRNEXT_X86_OPCODE (VSub), "r 0 r", "66 Y 0F FB r0 R2", 4},
+  {MIRNEXT_X86_OPCODE (VSub), "r 0 r", "Y 0F 5C r0 R2", 5},
+  {MIRNEXT_X86_OPCODE (VSub), "r 0 r", "66 Y 0F 5C r0 R2", 6},
+  {MIRNEXT_X86_OPCODE (VAnd), "r 0 r", "66 Y 0F DB r0 R2"},
+  {MIRNEXT_X86_OPCODE (VOr), "r 0 r", "66 Y 0F EB r0 R2"},
+  {MIRNEXT_X86_OPCODE (VXor), "r 0 r", "66 Y 0F EF r0 R2"},
+
   {MIRNEXT_X86_OPCODE (Call), "X i3 $", "FF /2 P1"},  /* call *rel32(rip)  */
   {MIRNEXT_X86_OPCODE (Call), "X r $", "Y FF /2 R1"}, /* call *r1 */
   {MIRNEXT_X86_OPCODE (Ret), "$", "C3"},              /* ret ax, dx, xmm0, xmm1, st0, st1  */
@@ -506,6 +527,14 @@ MIRNEXT_X86_TABLE = {
   {MIRNEXT_X86_PRIVATE (UnalignedMove), "r r", "F3 Y 0F 6F r0 R1"},
   {MIRNEXT_X86_PRIVATE (UnalignedMove), "r md", "F3 Y 0F 6F r0 m1"},
   {MIRNEXT_X86_PRIVATE (UnalignedMove), "md r", "F3 Y 0F 7F r1 m0"},
+#ifdef MIRNEXT_X86_NATIVE
+#define MIRNEXT_NATIVE_X86(name, roles, tied, maximum, constraints, encoding) \
+  {MIRNEXT_X86_NATIVE (name), constraints, encoding},
+#define MIRNEXT_NATIVE_A64(name, roles, tied, maximum, constraints, encoding)
+#include "mirnext/Target/NativeVectorOps.def"
+#undef MIRNEXT_NATIVE_X86
+#undef MIRNEXT_NATIVE_A64
+#endif
 };
 
 #undef IOP0

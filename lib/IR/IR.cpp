@@ -1,3 +1,4 @@
+#include "mirnext/IR/Vector.hpp"
 /* Licensed under the MIT License. */
 #include "mirnext/IR/Checked.hpp"
 #include "mirnext/IR/Access.hpp"
@@ -31,8 +32,22 @@ char type_role (Type type) {
   case Type::Kind::F32: return 'f';
   case Type::Kind::F64: return 'd';
   case Type::Kind::LongDouble: return 'e';
+  case Type::Kind::Vector: return 'v';
   default: return 'i';
   }
+}
+std::optional<Type> operand_type (const Operand &operand) {
+  if (auto reg = detail::operand_access (operand).get<const Register *> ())
+    return *reg ? std::optional ((*reg)->type ()) : std::nullopt;
+  if (auto memory = detail::operand_access (operand).get<Memory> ()) return memory->type;
+  if (auto constant = detail::operand_access (operand).get<VectorConstant> ())
+    return constant->type;
+  if (detail::operand_access (operand).get<float> ()) return Type (Type::Kind::F32);
+  if (detail::operand_access (operand).get<double> ()) return Type (Type::Kind::F64);
+  if (detail::operand_access (operand).get<long double> ()) return Type (Type::Kind::LongDouble);
+  if (detail::operand_access (operand).get<std::int64_t> ()) return Type::i64 ();
+  if (detail::operand_access (operand).get<std::uint64_t> ()) return Type (Type::Kind::U64);
+  return {};
 }
 const Symbol *symbol_operand (const Operand &operand) {
   auto ref = detail::operand_access (operand).get<SymbolReference> ();
@@ -96,6 +111,11 @@ Result<void> check_role (const Function &function, const Operand &operand, char 
     actual = 'd';
   else if (detail::operand_access (operand).get<long double> ())
     actual = 'e';
+  else if (auto vector = detail::operand_access (operand).get<VectorConstant> ()) {
+    if (!vector->type.valid () || !vector->type.is_vector ())
+      return invalid ("invalid vector constant type");
+    actual = 'v';
+  }
   if (output && !writable) return invalid ("result must be a register or memory");
   if (role == 'r' && !detail::operand_access (operand).get<const Register *> ())
     return invalid ("expected a register");
@@ -139,6 +159,25 @@ Result<void> check_data_definition (const Module &module, const DataInitializer 
 }  // namespace
 
 bool Type::valid () const noexcept {
+  if (kind_ == Kind::Vector) {
+    const auto element_bits = [this] {
+      switch (vector_element_) {
+      case VectorElement::I8:
+      case VectorElement::U8: return 8u;
+      case VectorElement::I16:
+      case VectorElement::U16: return 16u;
+      case VectorElement::I32:
+      case VectorElement::U32:
+      case VectorElement::F32: return 32u;
+      case VectorElement::I64:
+      case VectorElement::U64:
+      case VectorElement::F64: return 64u;
+      }
+      return 0u;
+    }();
+    return element_bits != 0 && vector_bits_ == 128 && vector_lanes_ != 0
+           && vector_lanes_ == vector_bits_ / element_bits;
+  }
   return static_cast<unsigned> (kind_) <= static_cast<unsigned> (Kind::Undef)
          && (!is_block ()
              || (size_ <= static_cast<std::size_t> (INT64_MAX)
@@ -146,7 +185,8 @@ bool Type::valid () const noexcept {
 }
 Result<void> Signature::verify () const {
   for (auto type : results)
-    if (!type.valid () || !type.is_scalar ()) return invalid ("function result must be scalar");
+    if (!type.valid () || (!type.is_scalar () && !type.is_vector ()))
+      return invalid ("function result must be scalar or vector");
   for (std::size_t n = 0; n < parameters.size (); ++n) {
     auto type = parameters[n];
     if (!type.valid () || type.kind () == Type::Kind::Undef)
@@ -298,14 +338,16 @@ Result<Label &> Function::create_label (BasicBlock &block, std::string_view name
 }
 Result<Register &> Function::add_register (Type type, std::string_view name,
                                            std::string_view hardware, bool argument) {
-  if (!type.valid () || (!type.is_scalar () && !(argument && type.is_block ())))
-    return invalid ("local register must be scalar");
+  if (!type.valid ()
+      || (!type.is_scalar () && !type.is_vector () && !(argument && type.is_block ())))
+    return invalid ("local register must be scalar or vector");
   if (name.find ('\0') != name.npos || hardware.find ('\0') != hardware.npos)
     return invalid ("register name or binding contains NUL");
   if (!name.empty () && register_names_.contains (name))
     return Error{ErrorCode::DuplicateName, "duplicate register: " + std::string (name)};
   if (!hardware.empty ()) {
-    if (argument || !type.is_scalar ()) return invalid ("invalid hardware binding");
+    if (argument || (!type.is_scalar () && !type.is_vector ()))
+      return invalid ("invalid hardware binding");
     if (auto found = hardware_registers_.find (hardware); found != hardware_registers_.end ()) {
       if (!compatible_binding (found->second->type (), type))
         return invalid ("incompatible hardware binding types");
@@ -818,13 +860,18 @@ Result<void> validate_initializer (const Module &module, const DataInitializer &
     [&] (const auto &value) -> Result<void> {
       using T = std::decay_t<decltype (value)>;
       if constexpr (std::is_same_v<T, InitializedData>) {
-        if (!value.type.valid () || !value.type.is_scalar ())
-          return invalid ("data element type must be scalar");
+        if (!value.type.valid () || (!value.type.is_scalar () && !value.type.is_vector ()))
+          return invalid ("data element type must be scalar or vector");
         auto expected = type_role (value.type);
         for (auto &element : value.values) {
           bool valid
-            = expected == 'i' ? detail::operand_access (element).template get<std::int64_t> ()
-                                  || detail::operand_access (element).template get<std::uint64_t> ()
+            = expected == 'v'
+                ? detail::operand_access (element).template get<VectorConstant> ()
+                    && detail::operand_access (element).template get<VectorConstant> ()->type
+                         == value.type
+              : expected == 'i'
+                ? detail::operand_access (element).template get<std::int64_t> ()
+                    || detail::operand_access (element).template get<std::uint64_t> ()
               : expected == 'f' ? detail::operand_access (element).template get<float> () != nullptr
               : expected == 'd'
                 ? detail::operand_access (element).template get<double> () != nullptr
@@ -898,7 +945,7 @@ Result<void> validate_instruction (const Function &function, Opcode opcode,
   const bool address = opcode == Opcode::Addr || opcode == Opcode::Addr8 || opcode == Opcode::Addr16
                        || opcode == Opcode::Addr32;
   const bool transfer = opcode == Opcode::Mov || opcode == Opcode::FMov || opcode == Opcode::DMov
-                        || opcode == Opcode::LDMov;
+                        || opcode == Opcode::LDMov || opcode == Opcode::VMov;
   for (std::size_t n = 0; n < operands.size (); ++n)
     if (auto reg = detail::operand_access (operands[n]).get<const Register *> ();
         reg && *reg && (*reg)->is_memory_backed () && !address && !transfer)
@@ -942,12 +989,16 @@ Result<void> validate_instruction (const Function &function, Opcode opcode,
     }
     std::size_t n = 2;
     for (auto type : signature.results) {
+      if (type.is_vector () && operand_type (operands[n]) != std::optional (type))
+        return invalid ("call vector result type mismatch");
       checked
         = check_role (function, operands[n++], static_cast<char> (std::toupper (type_role (type))));
       if (!(checked).has_value ()) return checked;
     }
     for (auto type : signature.parameters) {
       auto &operand = operands[n++];
+      if (type.is_vector () && operand_type (operand) != std::optional (type))
+        return invalid ("call vector argument type mismatch");
       if (type.is_block ()) {
         auto memory = detail::operand_access (operand).get<Memory> ();
         if (!memory || memory->type != type)
@@ -964,6 +1015,8 @@ Result<void> validate_instruction (const Function &function, Opcode opcode,
     for (; n < operands.size (); ++n) {
       checked = check_role (function, operands[n], 'a');
       if (!(checked).has_value ()) return checked;
+      if (auto type = operand_type (operands[n]); type && type->is_vector ())
+        return invalid ("v128 variadic arguments are not supported");
       auto reg = detail::operand_access (operands[n]).get<const Register *> ();
       auto memory = detail::operand_access (operands[n]).get<Memory> ();
       if (detail::operand_access (operands[n]).get<float> ()
@@ -980,8 +1033,10 @@ Result<void> validate_instruction (const Function &function, Opcode opcode,
     if (operands.size () != function.signature ().results.size ())
       return invalid ("return count does not match signature");
     for (std::size_t n = 0; n < operands.size (); ++n) {
-      auto checked
-        = check_role (function, operands[n], type_role (function.signature ().results[n]));
+      auto type = function.signature ().results[n];
+      if (type.is_vector () && operand_type (operands[n]) != std::optional (type))
+        return invalid ("return vector type mismatch");
+      auto checked = check_role (function, operands[n], type_role (type));
       if (!(checked).has_value ()) return checked;
     }
     return {};
@@ -1006,6 +1061,37 @@ Result<void> validate_instruction (const Function &function, Opcode opcode,
     auto checked = check_role (function, operands[n], descriptor->roles[n]);
     if (!(checked).has_value ()) return checked;
   }
+  if (detail::vector_opcode (opcode)) {
+    std::array<Type, 3> inputs{Type::i64 (), Type::i64 (), Type::i64 ()};
+    for (unsigned n = 1; n < operands.size (); ++n)
+      inputs[n - 1] = operand_type (operands[n]).value_or (Type::i64 ());
+    auto destination = operand_type (operands[0]);
+    if (!destination
+        || !detail::vector_types (opcode, *destination,
+                                  std::span (inputs).first (operands.size () - 1)))
+      return invalid ("invalid SIMD128 operand/result types for " + std::string (descriptor->name));
+    auto vector = opcode == Opcode::VSplat ? destination : operand_type (operands[1]);
+    if (opcode == Opcode::VExtract || opcode == Opcode::VInsert) {
+      auto &index = operands[opcode == Opcode::VExtract ? 2 : 3];
+      auto signed_index = detail::operand_access (index).get<std::int64_t> ();
+      auto unsigned_index = detail::operand_access (index).get<std::uint64_t> ();
+      if ((!signed_index && !unsigned_index)
+          || (signed_index
+              && (*signed_index < 0 || std::uint64_t (*signed_index) >= vector->vector_lanes ()))
+          || (unsigned_index && *unsigned_index >= vector->vector_lanes ()))
+        return invalid ("vector lane index must be an in-range integer literal");
+    }
+    if (opcode == Opcode::VShuffle) {
+      auto mask = detail::operand_access (operands[3]).get<VectorConstant> ();
+      if (!mask || mask->type != Type::vector128 (Type::VectorElement::U8, 16))
+        return invalid ("shuffle requires a constant u8x16 lane mask");
+      for (unsigned n = 0; n < 16; ++n) {
+        auto index = std::to_integer<unsigned> (mask->bytes[n]);
+        if (n < vector->vector_lanes () ? index >= 2 * vector->vector_lanes () : index != 0)
+          return invalid ("shuffle lane index out of range or nonzero unused mask lane");
+      }
+    }
+  }
   if (address) {
     auto source = detail::operand_access (operands[1]).get<const Register *> ();
     if (source && !(*source)->hardware_binding ().empty ())
@@ -1017,6 +1103,9 @@ Result<void> validate_instruction (const Function &function, Opcode opcode,
     return invalid ("va_start requires a variadic function");
   if (opcode == Opcode::VaArg && !detail::operand_access (operands[2]).get<Memory> ())
     return invalid ("va_arg requires a memory type operand");
+  if (opcode == Opcode::VaArg
+      && detail::operand_access (operands[2]).get<Memory> ()->type.is_vector ())
+    return invalid ("v128 va_arg is not supported");
   if (opcode == Opcode::JRet
       && (!function.signature ().results.empty () || !function.signature ().parameters.empty ()
           || function.signature ().variadic))

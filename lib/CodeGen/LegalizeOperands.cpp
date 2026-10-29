@@ -6,6 +6,7 @@
 #include "mirnext/CodeGen/Lowering.hpp"
 #include "mirnext/CodeGen/Detail/AArch64Patterns.hpp"
 #include "mirnext/CodeGen/Detail/X86Patterns.hpp"
+#include "mirnext/CodeGen/Detail/Vector.hpp"
 #include <algorithm>
 #include <array>
 
@@ -37,19 +38,29 @@ ReloadType reload_type (const MachineFunction &f, const MachineInstruction &i, s
   if (code == Opcode::Ret) return {f.signature ().results[n], false};
   if (code == Opcode::Switch) return {Type::i64 (), false};
   auto role = ir::instruction_descriptor (code).get ()->roles[n];
+  if (role == 'V' || role == 'v') {
+    auto type = detail::vector_type (i.operands ());
+    return {type.value_or (Type::vector128 (Type::VectorElement::I8, 16)), role == 'V'};
+  }
   return {Type (role == 'F' || role == 'f'   ? K::F32
                 : role == 'D' || role == 'd' ? K::F64
                 : role == 'E' || role == 'e' ? K::LongDouble
+                : role == 'V' || role == 'v' ? K::Vector
                                              : K::I64),
           role >= 'A' && role <= 'Z'};
 }
 unsigned type_index (Type t) {
-  return t.kind () == K::F32 ? 1 : t.kind () == K::F64 ? 2 : t.kind () == K::LongDouble ? 3 : 0;
+  return t.kind () == K::F32          ? 1
+         : t.kind () == K::F64        ? 2
+         : t.kind () == K::LongDouble ? 3
+         : t.is_vector ()             ? 4
+                                      : 0;
 }
 Opcode move (Type t) {
   return t.kind () == K::F32          ? Opcode::FMov
          : t.kind () == K::F64        ? Opcode::DMov
          : t.kind () == K::LongDouble ? Opcode::LDMov
+         : t.is_vector ()             ? Opcode::VMov
                                       : Opcode::Mov;
 }
 Result<void> reload (MachineRewriter &rw, MachineInstruction &i, MachineOperand memory,
@@ -94,10 +105,11 @@ Result<void> legalize_operands (MachineFunction &f) {
   auto instruction_ok = [&] (MachineOpcode code, std::span<const MachineOperand> operands) {
     return x86 ? x86_instruction_ok (code, operands) : aarch64_instruction_ok (code, operands);
   };
-  auto can_reload
-    = [&] (Type type) { return type.is_scalar () && (!x86 || type.kind () != K::LongDouble); };
+  auto can_reload = [&] (Type type) {
+    return (type.is_scalar () || type.is_vector ()) && (!x86 || type.kind () != K::LongDouble);
+  };
   MachineRewriter rw (f);
-  std::array<const MachineVirtualRegister *, 4> reusable{};
+  std::array<const MachineVirtualRegister *, 5> reusable{};
   for (auto &b : f.blocks ())
     for (auto at = b.instructions ().begin (); at != b.instructions ().end ();) {
       auto &i = *at++;  // Inserted reloads are deliberately not visited again.
@@ -131,6 +143,7 @@ Result<void> legalize_operands (MachineFunction &f) {
         if (!can_reload (type.type)) continue;
         type.type = f.target ().scalar_type (type.type);
         auto &reg = reusable[type_index (type.type)];
+        if (reg && reg->type () != type.type) reg = nullptr;
         if (!reg) {
           auto created = detail::access (f).create_register (type.type);
           if (!(created).has_value ()) return created.error ();

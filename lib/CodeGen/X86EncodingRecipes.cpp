@@ -8,11 +8,14 @@ namespace {
 struct Declaration {
   int code;
   std::string_view constraints, encoding;
+  unsigned vector_shape = 0;
 };
 #define MIRNEXT_X86_TABLE static constexpr Declaration declarations[]
 #define MIRNEXT_X86_OPCODE(name) 0
 #define MIRNEXT_X86_PRIVATE(name) 0
+#define MIRNEXT_X86_NATIVE(name) 0
 #include "mirnext/Target/X86Patterns.def"
+#undef MIRNEXT_X86_NATIVE
 #undef MIRNEXT_X86_PRIVATE
 #undef MIRNEXT_X86_OPCODE
 #undef MIRNEXT_X86_TABLE

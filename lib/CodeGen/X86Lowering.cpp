@@ -20,6 +20,7 @@ Opcode move (Type t) {
   return t.kind () == K::F32          ? Opcode::FMov
          : t.kind () == K::F64        ? Opcode::DMov
          : t.kind () == K::LongDouble ? Opcode::LDMov
+         : t.is_vector ()             ? Opcode::VMov
                                       : Opcode::Mov;
 }
 std::optional<Opcode> extension (Type t) {
@@ -245,6 +246,12 @@ Result<void> X86Lowering::preflight () {
         for (std::size_t n = 2 + s.results.size (); n < i.operands ().size (); ++n) {
           auto &o = i.operands ()[n];
           auto type = argument_type (s, n - 2 - s.results.size (), o);
+          if (win && type.is_vector ()) {
+            if (copy_bytes > std::size_t (INT64_MAX) - 95)
+              fail ("vector argument copy area overflow");
+            else
+              copy_bytes = (copy_bytes + 15) / 16 * 16 + 16;
+          }
           if (type.is_block ()) {
             auto m = detail::operand_access (o).get<MachineMemory> ();
             if (!m || !m->base || m->index || m->displacement)
@@ -287,7 +294,17 @@ void X86Lowering::parameters (Instruction &anchor) {
       auto i = before (*front, code, std::move (operands));
       if (!first) first = i;
     };
-    if (loc.aggregate && !win && loc.register_count) {
+    if (loc.indirect) {
+      auto address = temporary (Type::pointer ());
+      if (loc.register_count)
+        emit (Opcode::Mov, {address, physical (loc.registers[0])});
+      else {
+        state.requires_frame_pointer = state.has_block_arguments = true;
+        emit (Opcode::Mov,
+              {address, memory (Type::pointer (), loc.stack_offset + 16, physical (R::BP))});
+      }
+      emit (Opcode::VMov, {arg, memory (type, 0, address)});
+    } else if (loc.aggregate && !win && loc.register_count) {
       emit (Opcode::Alloca, {arg, integer (loc.size)});
       for (unsigned p = 0; p < loc.register_count; ++p) {
         auto scalar = static_cast<unsigned> (loc.registers[p]) >= static_cast<unsigned> (R::XMM0)
@@ -309,7 +326,7 @@ void X86Lowering::parameters (Instruction &anchor) {
       emit (move (type), {arg, physical (loc.registers[0])});
     else {
       state.requires_frame_pointer = state.has_block_arguments = true;
-      auto scalar = type.is_float () ? type : Type::i64 ();
+      auto scalar = (type.is_float () || type.is_vector ()) ? type : Type::i64 ();
       emit (move (scalar), {arg, memory (scalar, loc.stack_offset + 16, physical (R::BP))});
     }
     if (first) front = first;  // Prepend incoming argument groups.
@@ -352,6 +369,13 @@ void X86Lowering::lower_call (Instruction &at) {
     auto &loc = layout.value ().arguments[n];
     auto type = argument_type (s, n, ops[start + n]);
     auto source = ops[start + n];
+    if (loc.indirect) {
+      copy_offset = (copy_offset + 15) / 16 * 16;
+      before (at, Opcode::VMov, {memory (type, copy_offset, physical (R::SP)), source});
+      source = temporary (Type::pointer ());
+      before (at, Opcode::Add, {source, physical (R::SP), integer (copy_offset)});
+      copy_offset += 16;
+    }
     std::optional<std::pair<Opcode, Operand>> extend;
     if (auto code = extension (type)) {
       auto t = temporary ();
@@ -443,7 +467,7 @@ void X86Lowering::lower_call (Instruction &at) {
         before (at, Opcode::Mov, {reg, base});
         ops[start + n] = block_marker (reg, static_cast<std::int64_t> (type.block_size ()), type);
       } else {
-        auto scalar = loc.aggregate ? Type::i64 () : type;
+        auto scalar = loc.aggregate || loc.indirect ? Type::i64 () : type;
         before (at, move (scalar), {reg, source});
         ops[start + n] = reg;
       }
@@ -458,11 +482,11 @@ void X86Lowering::lower_call (Instruction &at) {
     } else {
       if (type.kind () == K::ReturnBlock)
         source = address (*detail::operand_access (source).get<MachineMemory> ());
-      auto scalar = type.is_float () ? type : Type::i64 ();
+      auto scalar = !loc.indirect && (type.is_float () || type.is_vector ()) ? type : Type::i64 ();
       auto dest = memory (scalar, loc.stack_offset, physical (R::SP));
       // Windows aggregate loads/copies are inserted at the early boundary.
       // Consume their result at the call, after those producers have run.
-      if (win && loc.aggregate)
+      if (win && (loc.aggregate || loc.indirect))
         before (at, move (scalar), {dest, source});
       else
         early (move (scalar), {dest, source});
@@ -556,6 +580,17 @@ void X86Lowering::lower_variadic_start (Instruction &at) {
         gp += 8;
         if (gp >= 48) overflow += 8;
       }
+    }
+    if (std::ranges::any_of (f.signature ().parameters,
+                             [] (auto type) { return type.is_vector (); })) {
+      auto layout = target::layout_x86_arguments (abi, f.signature ().parameters);
+      if (!layout.has_value ()) {
+        fail (layout.error ().message);
+        return;
+      }
+      gp = std::min<std::size_t> (6, layout.value ().integer_count) * 8;
+      fp = 48 + std::min<std::size_t> (8, layout.value ().floating_count) * 16;
+      overflow = layout.value ().stack_bytes;
     }
     before (at, Opcode::Mov, {memory (Type (K::U32), 0, va), integer (gp)});
     before (at, Opcode::Mov, {memory (Type (K::U32), 4, va), integer (fp)});

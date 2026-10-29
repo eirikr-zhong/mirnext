@@ -1,3 +1,4 @@
+#include "mirnext/IR/Vector.hpp"
 /* Licensed under the MIT License. All edits validate before publishing a change. */
 #include "mirnext/IR/Access.hpp"
 #include "mirnext/IR/Checked.hpp"
@@ -13,6 +14,7 @@ Opcode move_opcode (Type type) {
   case Type::Kind::F32: return Opcode::FMov;
   case Type::Kind::F64: return Opcode::DMov;
   case Type::Kind::LongDouble: return Opcode::LDMov;
+  case Type::Kind::Vector: return Opcode::VMov;
   default: return Opcode::Mov;
   }
 }
@@ -103,7 +105,17 @@ Result<const Register &> InstructionBuilder::binary (Opcode opcode, Operand lhs,
   Type type = descriptor->roles[0] == 'F'   ? Type (Type::Kind::F32)
               : descriptor->roles[0] == 'D' ? Type (Type::Kind::F64)
               : descriptor->roles[0] == 'E' ? Type (Type::Kind::LongDouble)
+              : descriptor->roles[0] == 'V' ? Type::vector128 (Type::VectorElement::I8, 16)
                                             : Type::i64 ();
+  if (descriptor->roles[0] == 'V') {
+    if (auto reg = detail::operand_access (lhs).get<const Register *> ())
+      type = (*reg)->type ();
+    else if (auto memory = detail::operand_access (lhs).get<Memory> ())
+      type = memory->type;
+    else if (auto constant = detail::operand_access (lhs).get<VectorConstant> ())
+      type = constant->type;
+  }
+  if (detail::vector_comparison (opcode)) type = type.vector_mask_type ();
   const Operand inputs[]{std::move (lhs), std::move (rhs)};
   return value_operation (opcode, inputs, type, name);
 }
@@ -141,7 +153,16 @@ Result<const Register &> InstructionBuilder::unary (Opcode opcode, Operand input
   Type type = descriptor->roles[0] == 'F'   ? Type (Type::Kind::F32)
               : descriptor->roles[0] == 'D' ? Type (Type::Kind::F64)
               : descriptor->roles[0] == 'E' ? Type (Type::Kind::LongDouble)
+              : descriptor->roles[0] == 'V' ? Type::vector128 (Type::VectorElement::I8, 16)
                                             : Type::i64 ();
+  if (descriptor->roles[0] == 'V') {
+    if (auto reg = detail::operand_access (input).get<const Register *> ())
+      type = (*reg)->type ();
+    else if (auto memory = detail::operand_access (input).get<Memory> ())
+      type = memory->type;
+    else if (auto constant = detail::operand_access (input).get<VectorConstant> ())
+      type = constant->type;
+  }
   return value_operation (opcode, std::span<const Operand> (&input, 1), type, name);
 }
 Result<const Register &> InstructionBuilder::allocate_stack (Operand size, std::string_view name) {

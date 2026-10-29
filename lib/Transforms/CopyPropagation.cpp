@@ -14,6 +14,7 @@ bool address (Opcode op) {
 }
 bool move (Opcode op) {
   return op == Opcode::Mov || op == Opcode::FMov || op == Opcode::DMov || op == Opcode::LDMov
+         || op == Opcode::VMov
          || (sizeof (long double) == sizeof (double) && (op == Opcode::D2LD || op == Opcode::LD2D));
 }
 bool copy (const Instruction &i) {

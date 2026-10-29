@@ -26,7 +26,9 @@ std::optional<target::PhysicalRegister> MachineSpillEmitter::temporary (Type typ
     return r ? std::optional (f.target ().registers ()[static_cast<unsigned> (*r)].reg)
              : std::nullopt;
   }
-  return f.target ().registers ()[type.is_float () ? (first ? 48 : 49) : (first ? 9 : 10)].reg;
+  return f.target ()
+    .registers ()[(type.is_float () || type.is_vector ()) ? (first ? 48 : 49) : (first ? 9 : 10)]
+    .reg;
 }
 Result<std::int64_t> MachineSpillEmitter::offset (StackLocation slot, Type type,
                                                   std::size_t extra) const {
@@ -54,7 +56,7 @@ bool MachineSpillEmitter::valid_offset (target::Architecture architecture, Type 
   auto scale = t.kind () == K::I8 || t.kind () == K::U8                            ? 1
                : t.kind () == K::I16 || t.kind () == K::U16                        ? 2
                : t.kind () == K::I32 || t.kind () == K::U32 || t.kind () == K::F32 ? 4
-               : t.kind () == K::LongDouble                                        ? 16
+               : t.is_vector () || t.kind () == K::LongDouble                      ? 16
                                                                                    : 8;
   return value >= 0 && value % scale == 0 && value / scale < 4096;
 }
@@ -75,6 +77,7 @@ Result<void> MachineSpillEmitter::access (StackLocation slot, Type type,
   auto move = type.kind () == K::F32          ? Opcode::FMov
               : type.kind () == K::F64        ? Opcode::DMov
               : type.kind () == K::LongDouble ? Opcode::LDMov
+              : type.is_vector ()             ? Opcode::VMov
                                               : Opcode::Mov;
   used.insert (data.encoding ());
   struct Emission {
@@ -119,7 +122,7 @@ Result<void> MachineSpillEmitter::preserve (const MachineVirtualRegister *r,
     const auto &ranges = (*a.live_ranges_)[index->second];
     for (auto &lr : ranges)
       for (int n = lr.start; n <= lr.finish; ++n) conflicts.union_with (a.used_[n].stack);
-    auto size = r->type ().kind () == K::LongDouble ? 16u : 8u;
+    auto size = r->type ().is_vector () || r->type ().kind () == K::LongDouble ? 16u : 8u;
     std::optional<StackLocation> slot;
     for (auto offset = a.reusable_stack_; offset + size <= a.stack_bytes_; offset += 8) {
       if (offset % size) continue;

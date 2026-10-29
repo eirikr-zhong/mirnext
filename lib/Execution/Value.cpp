@@ -11,11 +11,16 @@ T read (const ScalarValue::Storage &s) {
 }
 }  // namespace
 Result<ScalarValue> ScalarValue::from_storage (ir::Type type, std::span<const std::byte> bytes) {
-  if (!type.valid () || !type.is_scalar () || bytes.size () < storage_size) return invalid ();
+  if (!type.valid () || (!type.is_scalar () && !type.is_vector ()) || bytes.size () < storage_size)
+    return invalid ();
   ScalarValue result;
   result.type_ = type;
   std::memcpy (result.storage_.data (), bytes.data (), storage_size);
   return result;
+}
+Result<ScalarValue> ScalarValue::vector (ir::Type type, std::span<const std::byte> bytes) {
+  if (!type.valid () || !type.is_vector () || bytes.size () != storage_size) return invalid ();
+  return from_storage (type, bytes);
 }
 Result<std::int64_t> ScalarValue::as_i64 () const {
   if (!type_.is_integer ()) return invalid ();
@@ -63,6 +68,8 @@ Result<ExecutionArgument> normalize_argument (ir::Type type, const ExecutionArgu
   }
   auto scalar = argument.scalar ().get ();
   if (!scalar) return invalid ("scalar parameter received a block");
+  if (unnamed && scalar->type ().is_vector ())
+    return invalid ("v128 variadic arguments are not supported");
   if (unnamed && scalar->type ().kind () == ir::Type::Kind::F32)
     return invalid ("float variadic argument must be promoted to double");
   auto value = normalize_scalar (type, *scalar);
@@ -90,6 +97,10 @@ Result<NormalizedArguments> normalize_arguments (const ir::Signature &sig,
   return normalized;
 }
 Result<ScalarValue> normalize_scalar (ir::Type type, const ScalarValue &value) {
+  if (type.is_vector () || value.type ().is_vector ()) {
+    if (type != value.type ()) return invalid ("vector type mismatch");
+    return ScalarValue::from_storage (type, value.storage ());
+  }
   if (!type.is_scalar () || !value.type ().is_scalar ()) return invalid ("invalid scalar type");
   using K = ir::Type::Kind;
   if (type.is_float ()) {

@@ -1,5 +1,7 @@
 /* Licensed under the MIT License. Machine ownership and checked mutation. */
 #include "mirnext/CodeGen/Access.hpp"
+#include "mirnext/CodeGen/Detail/Vector.hpp"
+#include "mirnext/CodeGen/Detail/NativeVector.hpp"
 #include "mirnext/CodeGen/EditState.hpp"
 #include "mirnext/CodeGen/Checked.hpp"
 #include "mirnext/IR/Access.hpp"
@@ -28,6 +30,7 @@ char role (ir::Type type) {
   return type.kind () == K::F32          ? 'f'
          : type.kind () == K::F64        ? 'd'
          : type.kind () == K::LongDouble ? 'e'
+         : type.is_vector ()             ? 'v'
                                          : 'i';
 }
 bool valid_abi_type (const MachineFunction &f, ir::Type type) {
@@ -45,10 +48,12 @@ std::string_view opcode_name (MachineOpcode code) {
     auto descriptor = ir::instruction_descriptor (*op).get ();
     return descriptor ? descriptor->name : "invalid-opcode";
   }
+  if (auto native = detail::native_vector_descriptor (code)) return native->name;
   switch (std::get<MachinePseudoOpcode> (code)) {
   case MachinePseudoOpcode::Use: return "use";
   case MachinePseudoOpcode::X86Mov128: return "x86-mov128";
   case MachinePseudoOpcode::X86Mov128Unaligned: return "x86-mov128-unaligned";
+  default: break;
   }
   return "invalid-pseudo";
 }
@@ -70,7 +75,10 @@ MachineVirtualRegister::MachineVirtualRegister (MachineFunction &function, ir::T
     binding_ (binding) {}
 MachineInstruction::MachineInstruction (ConstructionKey, MachineBasicBlock &block,
                                         MachineOpcode code, std::vector<MachineOperand> operands)
-  : block_ (&block), opcode_ (code), operands_ (std::move (operands)) {}
+  : block_ (&block),
+    opcode_ (code),
+    vector_shape_ (detail::vector_shape (operands)),
+    operands_ (std::move (operands)) {}
 MachineFunction::MachineFunction (std::string module, std::string name, ir::Signature signature,
                                   target::TargetMachine target)
   : edit_state_ (std::make_unique<detail::MachineEditState> (detail::MachineEditState{this})),
@@ -147,7 +155,8 @@ MachineFunction &MachineFunction::operator= (MachineFunction &&other) noexcept {
 Result<MachineVirtualRegister &> MachineFunction::create_register (
   ir::Type type, std::string name, bool argument, bool memory_backed,
   std::optional<target::PhysicalRegister> binding) {
-  if (!type.valid () || (!type.is_scalar () && !(argument && type.is_block ())))
+  if (!type.valid ()
+      || (!type.is_scalar () && !type.is_vector () && !(argument && type.is_block ())))
     return invalid (*this, "invalid register type");
   if (!valid_abi_type (*this, type))
     return invalid (*this, "invalid block ABI size or classification");
@@ -319,11 +328,13 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
     if (r == 'a') return true;
     if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
       return role ((*v)->type ()) == r;
-    if (auto v = detail::operand_access (o).get<target::PhysicalRegister> ())
-      return (function_.target ().register_info (*v).get ()->bank == target::RegisterBank::Integer)
-             == (r == 'i');
+    if (auto v = detail::operand_access (o).get<target::PhysicalRegister> ()) {
+      auto bank = function_.target ().register_info (*v).get ()->bank;
+      return r == 'v' ? bank == target::RegisterBank::Floating
+                      : (bank == target::RegisterBank::Integer) == (r == 'i');
+    }
     if (auto m = detail::operand_access (o).get<MachineMemory> ())
-      return m->type.is_scalar () && role (m->type) == r;
+      return (m->type.is_scalar () || m->type.is_vector ()) && role (m->type) == r;
     if (detail::operand_access (o).get<StackSlotReference> ())
       return true;  // Its scalar access type is supplied by the instruction.
     if (detail::operand_access (o).get<const MachineLabel *> ()) return false;
@@ -352,6 +363,10 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
               && !detail::operand_access (operands[1]).get<StackSlotReference> ())
           || (!vector (operands[0]) && !vector (operands[1])))
         return invalid (function_, "invalid aligned SSE move");
+    } else if (auto native = detail::native_vector_descriptor (code)) {
+      if (!detail::native_vector_operands (*native, operands, &function_.target ()))
+        return invalid (function_,
+                        "invalid native SIMD operands for " + std::string (native->name));
     } else
       return invalid (function_, "unknown machine pseudo opcode");
     return {};
@@ -419,11 +434,15 @@ Result<void> MachineRewriter::validate (MachineOpcode code,
           return invalid (function_,
                           "lowered argument requires a physical register or memory location");
         if (memory && memory->type.kind () != ir::Type::Kind::Undef && !memory->type.is_scalar ()
-            && memory->type.kind () != ir::Type::Kind::ReturnBlock)
+            && !memory->type.is_vector () && memory->type.kind () != ir::Type::Kind::ReturnBlock)
           return invalid (function_, "invalid lowered argument memory");
         if (param < s.parameters.size ()) {
           auto t = s.parameters[param];
-          if (!t.is_block () && !matches (operands[p], role (function_.target ().scalar_type (t))))
+          const bool indirect_vector
+            = t.is_vector () && function_.target ().abi () == target::ABI::X86Windows;
+          if (!t.is_block ()
+              && !matches (operands[p],
+                           indirect_vector ? 'i' : role (function_.target ().scalar_type (t))))
             return invalid (function_, "invalid lowered scalar argument");
           if (!t.is_block () && memory && memory->type.kind () == ir::Type::Kind::Undef)
             return invalid (function_, "undefined memory cannot hold a scalar argument");
@@ -522,6 +541,8 @@ Result<void> MachineRewriter::replace (MachineInstruction &insn, MachineOpcode c
     checked = validate_dependencies (code, operands, insn.call_dependencies ());
     if (!(checked).has_value ()) return checked;
   }
+  auto shape = detail::vector_shape (operands);
+  if (shape || code != insn.opcode_) insn.vector_shape_ = static_cast<std::uint8_t> (shape);
   insn.opcode_ = code;
   insn.operands_ = std::move (operands);
   if (!call (code)) {
@@ -540,6 +561,8 @@ Result<void> MachineRewriter::lower_call (MachineInstruction &insn, MachineOpcod
   if (!(checked).has_value ()) return checked;
   checked = validate_dependencies (code, operands, insn.call_dependencies ());
   if (!(checked).has_value ()) return checked;
+  auto shape = detail::vector_shape (operands);
+  if (shape || code != insn.opcode_) insn.vector_shape_ = static_cast<std::uint8_t> (shape);
   insn.opcode_ = code;
   insn.operands_ = std::move (operands);
   insn.lowered_call_ = true;
@@ -789,6 +812,9 @@ std::string MachineFunction::dump () const {
     out << "  %" << id << ' ' << reg->name ();
     if (auto binding = reg->binding ()) out << ':' << target_.register_info (*binding).get ()->name;
     out << " type=" << static_cast<unsigned> (reg->type ().kind ());
+    if (reg->type ().is_vector ())
+      out << " element=" << static_cast<unsigned> (reg->type ().vector_element ())
+          << " lanes=" << reg->type ().vector_lanes ();
     if (reg->is_memory_backed ()) out << " memory-backed";
     out << '\n';
   }
@@ -815,6 +841,11 @@ std::string MachineFunction::dump () const {
           << (label->address_taken () ? " address-taken" : "") << '\n';
     for (auto &insn : block->instructions ()) {
       out << "    " << opcode_name (insn.opcode ());
+      if (insn.vector_shape ()) {
+        constexpr std::string_view shapes[]{"",      "i8x16", "i16x8", "i32x4",
+                                            "i64x2", "f32x4", "f64x2"};
+        out << '<' << shapes[insn.vector_shape ()] << '>';
+      }
       for (auto &o : insn.operands ()) {
         out << ' ';
         if (auto v = detail::operand_access (o).get<const MachineVirtualRegister *> ())
@@ -837,8 +868,11 @@ std::string MachineFunction::dump () const {
         else if (auto v = detail::operand_access (o).get<BuiltinReference> ())
           out << "builtin:" << static_cast<unsigned> (v->builtin);
         else if (auto m = detail::operand_access (o).get<MachineMemory> ()) {
-          out << "mem(" << static_cast<unsigned> (m->type.kind ()) << ',' << m->type.block_size ()
-              << ',' << m->displacement;
+          out << "mem(" << static_cast<unsigned> (m->type.kind ());
+          if (m->type.is_vector ())
+            out << "[element=" << static_cast<unsigned> (m->type.vector_element ())
+                << ",lanes=" << m->type.vector_lanes () << ']';
+          out << ',' << m->type.block_size () << ',' << m->displacement;
           if (m->base) {
             out << ',';
             reg (*m->base);

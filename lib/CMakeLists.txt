@@ -39,6 +39,7 @@ add_library(mirnext
   CodeGen/Editor.cpp
   CodeGen/MachineIR.cpp
   CodeGen/Prepare.cpp
+  CodeGen/VectorPreparation.cpp
   CodeGen/GraphAnalysis.cpp
   CodeGen/Liveness.cpp
   CodeGen/Lowering.cpp
@@ -86,6 +87,7 @@ add_library(mirnext
   Execution/Value.cpp
   Execution/NativeCalls.cpp
   Execution/InterpreterEntries.cpp
+  Execution/InterpreterVector.cpp
   Execution/InterpreterScalar.cpp
   Execution/Interpreter.cpp
   Execution/InterpreterFrame.cpp

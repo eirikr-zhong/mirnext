@@ -1,0 +1,20 @@
+WebAssembly Core 2.0 SIMD128 conformance data
+
+Repository: https://github.com/WebAssembly/spec
+Revision: fffc6e12fa454e475455a7b58d3b5dc343980c10 (tag wg-2.0)
+
+Cases.tsv contains 22,632 literal assert_return cases extracted from
+ test/core/simd/*.wast. It is derived test data under Apache-2.0 (LICENSE).
+The generator resolves simple exported operations and retains literal inputs,
+expected bit patterns, expected NaN lanes and the original source filename.
+It excludes compound expressions. For direct load cases it freezes the accessed
+bytes of initialized memory into an input snapshot; the C++ adapter uses an
+ordinary MIR address. Protection-page tests additionally check access widths.
+
+Instructions.def lists all 236 standard 0xfd instructions from
+ document/core/binary/instructions.rst. The source document is covered by the
+W3C Software and Document Notice and License (DOCUMENT-LICENSE).
+The numbers are inventory identifiers, never MIR protocol numbers.
+
+Regenerate: python3 tests/SIMD/GenerateCases.py /path/to/pinned/spec
+No network access, Wasm parser or code generation is used by normal builds.

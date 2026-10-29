@@ -70,8 +70,8 @@ class ExpressionState {
   ExpressionState literal_like (Operand) const;
   InstructionBuilder *builder_;
   Type type_;
-  using Scalar
-    = std::variant<std::int64_t, std::uint64_t, float, double, long double, const Register *>;
+  using Scalar = std::variant<std::int64_t, std::uint64_t, float, double, long double,
+                              VectorConstant, const Register *>;
   std::optional<Scalar> value_;
 };
 
