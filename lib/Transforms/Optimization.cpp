@@ -17,7 +17,7 @@
 #include <array>
 namespace mirnext::transforms {
 namespace {
-constexpr std::array<std::string_view, 18> names{"materialize-stack-scopes",
+constexpr std::array<std::string_view, 20> names{"materialize-stack-scopes",
                                                  "simplify",
                                                  "inline",
                                                  "build-cfg",
@@ -34,7 +34,9 @@ constexpr std::array<std::string_view, 18> names{"materialize-stack-scopes",
                                                  "conventional-ssa",
                                                  "ssa-combine",
                                                  "destroy-ssa",
-                                                 "jump-opt"};
+                                                 "jump-opt",
+                                                 "slp-vectorize",
+                                                 "vector-combine"};
 std::optional<PassId> pass_id (std::string_view name) {
   for (std::size_t n = 0; n < names.size (); ++n)
     if (names[n] == name) return static_cast<PassId> (n);
@@ -99,7 +101,7 @@ bool addresses (const ir::Function &function) {
   return false;
 }
 void middle_end (FunctionPassManager &passes, OptimizationLevel level, target::Architecture target,
-                 bool address) {
+                 bool address, const VectorizationOptions &vectorization) {
   passes.add<BuildCFGPass> (level != OptimizationLevel::O0);
   if (level < OptimizationLevel::O2) return;
   if (!address) passes.add<BlockCloningPass> ();
@@ -116,6 +118,11 @@ void middle_end (FunctionPassManager &passes, OptimizationLevel level, target::A
   passes.add<SSADeadCodePass> ();
   passes.add<BuildLoopsPass> ();
   passes.add<LICMPass> ();
+  if (vectorization.slp) passes.add<SLPVectorizePass> (target, vectorization);
+  if (vectorization.slp || vectorization.combine) {
+    passes.add<VectorCombinePass> ();
+    passes.add<SSADeadCodePass> ();
+  }
   passes.add<PressureReliefPass> ();
   passes.add<ConventionalSSAPass> ();
   passes.add<SSACombinePass> (target);
@@ -173,7 +180,7 @@ struct OptimizedProgram::Impl {
     });
     if (!(checked).has_value ()) return checked;
     FunctionPassManager scalar;
-    middle_end (scalar, level, target, false);
+    middle_end (scalar, level, target, false, options.vectorization);
     std::optional<FunctionPassManager> addressed;
     for (auto &module : context.modules ())
       for (auto &function : module.functions ()) {
@@ -181,7 +188,7 @@ struct OptimizedProgram::Impl {
         bool address = level >= OptimizationLevel::O2 && addresses (function);
         if (address && !addressed) {
           addressed.emplace ();
-          middle_end (*addressed, level, target, true);
+          middle_end (*addressed, level, target, true, options.vectorization);
         }
         analysis::FunctionAnalysisManager analyses (function);
         checked
