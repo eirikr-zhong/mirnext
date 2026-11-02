@@ -181,3 +181,103 @@ TEST_CASE ("optional references distinguish absence from error results") {
   (mutable_view).value () = 43;
   CHECK ((readonly).value () == 43);
 }
+
+namespace {
+template <class T>
+concept Dereferenceable = requires (T &&value) { *std::forward<T> (value); };
+static_assert (std::is_same_v<decltype (*std::declval<Result<int> &> ()), int &>);
+static_assert (std::is_same_v<decltype (*std::declval<const Result<int> &> ()), const int &>);
+static_assert (std::is_same_v<decltype (*std::declval<Result<int> &&> ()), int &&>);
+static_assert (std::is_same_v<decltype (*std::declval<const Result<int> &&> ()), const int &&>);
+static_assert (std::is_same_v<decltype (*std::declval<const Result<int &> &> ()), int &>);
+static_assert (std::is_same_v<decltype (*std::declval<Result<const int &> &&> ()), const int &>);
+static_assert (std::is_same_v<decltype (std::declval<Result<int> &> ().operator->()), int *>);
+static_assert (
+  std::is_same_v<decltype (std::declval<const Result<int> &> ().operator->()), const int *>);
+static_assert (std::is_constructible_v<bool, Result<int>>);
+static_assert (std::is_constructible_v<bool, Result<int &>>);
+static_assert (std::is_constructible_v<bool, Result<void>>);
+static_assert (!std::is_convertible_v<Result<int>, bool>);
+static_assert (!std::is_convertible_v<Result<int &>, bool>);
+static_assert (!std::is_convertible_v<Result<void>, bool>);
+static_assert (!std::is_convertible_v<Result<int>, int>);
+static_assert (!Dereferenceable<Result<void>>);
+}  // namespace
+TEST_CASE ("Result Boolean conversion reports presence rather than payload truth") {
+  for (int payload : {0, 42}) {
+    Result<int> value = payload;
+    int branches = 0;
+    if (value) {
+      ++branches;
+      CHECK (*value == payload);
+      *value += 1;
+    }
+    CHECK (branches == 1);
+    CHECK (value.value () == payload + 1);
+    CHECK_FALSE (!value);
+  }
+  Result<bool> false_value = false;
+  CHECK (static_cast<bool> (false_value));
+  CHECK_FALSE (*false_value);
+  Result<int *> null_pointer = nullptr;
+  CHECK (static_cast<bool> (null_pointer));
+  CHECK (*null_pointer == nullptr);
+  Result<int> failed = failure ();
+  if (failed)
+    FAIL ("an error must not take the success branch");
+  else
+    CHECK (failed.error ().message == "first diagnostic");
+  CHECK (!failed);
+  CHECK_FALSE ((failed && false_value));
+  CHECK ((failed || false_value));
+  CHECK (failed.has_error ());
+  CHECK (failed.error ().code == ErrorCode::UnknownName);
+}
+TEST_CASE ("Result<void> uses the same success convention without a payload") {
+  Result<void> success;
+  const Result<void> failed = failure ();
+  int completed = 0;
+  if (success) ++completed;
+  if (failed) ++completed;
+  CHECK (completed == 1);
+  CHECK (!failed);
+  CHECK (failed.error ().message == "first diagnostic");
+  auto complete = [] () -> Result<void> { return {}; };
+  if (auto built = complete ()) ++completed;
+  CHECK (completed == 2);
+}
+TEST_CASE ("Result arrow and dereference preserve payload references constness and ownership") {
+  struct Payload {
+    int value;
+  };
+  Result<Payload> owned = Payload{41};
+  REQUIRE (owned);
+  CHECK (owned.operator->() == std::addressof (*owned));
+  owned->value = 42;
+  const auto &readonly = owned;
+  CHECK (readonly->value == 42);
+  CHECK (std::addressof (*readonly) == owned.operator->());
+  auto extracted = *std::move (owned);
+  CHECK (extracted.value == 42);
+  Result<std::unique_ptr<int>> unique = std::make_unique<int> (42);
+  auto address = unique->get ();
+  REQUIRE (unique);
+  CHECK (unique->get () == address);
+  auto transferred = *std::move (unique);
+  CHECK (transferred.get () == address);
+  CHECK (*transferred == 42);
+  CHECK (unique.value () == nullptr);
+  Payload payload{41};
+  const Result<Payload &> borrowed = payload;
+  REQUIRE (borrowed);
+  borrowed->value = 43;
+  CHECK (std::addressof (*borrowed) == &payload);
+  CHECK (payload.value == 43);
+  Result<const Payload &> constant = payload;
+  REQUIRE (constant);
+  CHECK (constant->value == 43);
+  CHECK (constant.operator->() == &payload);
+  Result<Payload &> failed = failure ();
+  CHECK (!failed);
+  CHECK (failed.error ().message == "first diagnostic");
+}

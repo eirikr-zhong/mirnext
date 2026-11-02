@@ -55,6 +55,8 @@ OptionalRef<T> borrow_optional (T *value) noexcept {
 }  // namespace detail
 
 // Result<T> is the no-exceptions error carrier used by the C++ API.
+// Contextual Boolean conversion reports success, including for Result<void>.
+// Dereference and arrow access the payload and require a successful result.
 template <class T>
 class [[nodiscard]] Result {
  public:
@@ -65,6 +67,15 @@ class [[nodiscard]] Result {
   explicit Result (std::in_place_t, Args &&...args)
     : storage_ (std::in_place_type<T>, std::forward<Args> (args)...) {}
   Result (Error error) : storage_ (std::move (error)) {}
+
+  explicit operator bool () const noexcept { return has_value (); }
+
+  T &operator* () & noexcept { return value (); }
+  const T &operator* () const & noexcept { return value (); }
+  T &&operator* () && noexcept { return std::move (*this).value (); }
+  const T &&operator* () const && noexcept { return std::move (*this).value (); }
+  T *operator->() noexcept { return std::addressof (value ()); }
+  const T *operator->() const noexcept { return std::addressof (value ()); }
 
   bool has_value () const noexcept { return std::holds_alternative<T> (storage_); }
   bool has_error () const noexcept { return std::holds_alternative<Error> (storage_); }
@@ -96,6 +107,10 @@ class [[nodiscard]] Result {
     if (T *value = std::get_if<T> (&storage_)) return std::move (*value);
     std::abort ();
   }
+  const T &&value () const && noexcept {
+    if (const T *value = std::get_if<T> (&storage_)) return std::move (*value);
+    std::abort ();
+  }
 
  private:
   std::variant<T, Error> storage_;
@@ -111,6 +126,9 @@ class [[nodiscard]] Result<T &> {
               && std::is_convertible_v<std::remove_reference_t<U> *, T *>)
   Result (U &&value) noexcept : storage_ (std::addressof (value)) {}
   Result (Error error) : storage_ (std::move (error)) {}
+  explicit operator bool () const noexcept { return has_value (); }
+  T &operator* () const noexcept { return value (); }
+  T *operator->() const noexcept { return std::addressof (value ()); }
   bool has_value () const noexcept { return std::holds_alternative<T *> (storage_); }
   bool has_error () const noexcept { return !has_value (); }
   Error &error () & noexcept {
@@ -140,6 +158,7 @@ class [[nodiscard]] Result<void> {
   Result () = default;
   Result (Error error) : error_ (std::move (error)) {}
 
+  explicit operator bool () const noexcept { return has_value (); }
   bool has_value () const noexcept { return !error_.has_value (); }
   bool has_error () const noexcept { return error_.has_value (); }
 

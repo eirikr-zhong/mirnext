@@ -22,7 +22,7 @@ int main () {
     b.create_store (b.memory (f32, destination, lane * 4), sums[lane]);
   b.create_return (b.constant_i64 (0));
   auto built = b.finish ();
-  if (!built.has_value ()) {
+  if (!built) {
     std::cerr << built.error ().message << '\n';
     return 1;
   }
@@ -35,7 +35,7 @@ int main () {
     return {};
   };
   auto session = ExecutionSession::create (std::move (program), {.optimization = options});
-  if (!session.has_value ()) {
+  if (!session) {
     std::cerr << session.error ().message << '\n';
     return 1;
   }
@@ -46,7 +46,7 @@ int main () {
                    {static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (output.data ())),
                     static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (x.data ())),
                     static_cast<std::int64_t> (reinterpret_cast<std::uintptr_t> (y.data ()))});
-  if (!result.has_value ()) {
+  if (!result) {
     std::cerr << result.error ().message << '\n';
     return 1;
   }

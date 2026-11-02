@@ -26,10 +26,11 @@ concept HasDereference = requires (T a) { *a; };
 template <class T>
 concept HasArrow = requires (T a) { a.operator->(); };
 static_assert (!HasArithmetic<Value>);
-static_assert (!HasDereference<Result<int>>);
-static_assert (!HasArrow<Result<int>>);
+static_assert (HasDereference<Result<int>>);
+static_assert (HasArrow<Result<int>>);
 static_assert (!HasDereference<OptionalRef<int>>);
-static_assert (!std::is_constructible_v<bool, Result<int>>);
+static_assert (std::is_constructible_v<bool, Result<int>>);
+static_assert (!std::is_convertible_v<Result<int>, bool>);
 static_assert (!std::is_constructible_v<bool, Value>);
 
 Program equivalent (bool explicit_api) {

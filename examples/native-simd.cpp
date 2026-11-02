@@ -22,23 +22,23 @@ int main () {
   auto lane = builder.create_convert (builder.create_extract_lane (reversed, 0), Type::i64 ());
   builder.create_return (lane);
   auto built = builder.finish ();
-  if (!built.has_value ()) {
+  if (!built) {
     std::cerr << built.error ().message << '\n';
     return 1;
   }
   auto session = ExecutionSession::create (std::move (program));
-  if (!session.has_value ()) {
+  if (!session) {
     std::cerr << session.error ().message << '\n';
     return 1;
   }
   std::array<std::int32_t, 4> input{1, 2, 3, 4};
-  auto result = session.value ().call_i64 ("simd", "example",
-                                           {std::bit_cast<std::int64_t> (
-                                             reinterpret_cast<std::uintptr_t> (input.data ()))});
-  if (!result.has_value ()) {
+  auto result = session->call_i64 ("simd", "example",
+                                   {std::bit_cast<std::int64_t> (
+                                     reinterpret_cast<std::uintptr_t> (input.data ()))});
+  if (!result) {
     std::cerr << result.error ().message << '\n';
     return 1;
   }
-  std::cout << "v128 result = " << result.value () << '\n';
-  return result.value () == 42 ? 0 : 1;
+  std::cout << "v128 result = " << *result << '\n';
+  return *result == 42 ? 0 : 1;
 }
