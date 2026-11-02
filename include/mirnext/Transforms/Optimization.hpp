@@ -5,6 +5,7 @@
 #include "mirnext/IR/SSA.hpp"
 #include "mirnext/Serialization/Format.hpp"
 #include "mirnext/Target/Addressing.hpp"
+#include "mirnext/Transforms/Vectorization.hpp"
 namespace mirnext::transforms {
 enum class OptimizationLevel { O0, O1, O2, O3 };
 enum class PassId {
@@ -25,7 +26,9 @@ enum class PassId {
   ConventionalSSA,
   SSACombine,
   DestroySSA,
-  JumpOptimization
+  JumpOptimization,
+  SLPVectorize,
+  VectorCombine
 };
 std::string_view pass_name (PassId) noexcept;
 struct PassStatistics {
@@ -47,6 +50,7 @@ struct OptimizationOptions {
   OptimizationLevel level = OptimizationLevel::O2;
   target::Architecture target = target::Architecture::Native;
   std::function<Result<void> (const OptimizationSnapshot &)> observer;
+  VectorizationOptions vectorization;
 };
 class OptimizedProgram {
  public:

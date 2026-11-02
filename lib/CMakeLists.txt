@@ -30,8 +30,11 @@ add_library(mirnext
   Transforms/Motion.cpp
   Transforms/SSACombine.cpp
   Transforms/JumpOptimization.cpp
+  Transforms/SLPVectorize.cpp
+  Transforms/VectorCombine.cpp
   Transforms/Optimization.cpp
 
+  Target/VectorCost.cpp
   Target/Addressing.cpp
   Target/TargetMachine.cpp
   Target/X86ABI.cpp

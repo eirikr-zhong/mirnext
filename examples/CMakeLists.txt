@@ -53,3 +53,5 @@ mirnext_add_example(mirnext_execution_values_example mirnext-execution-values-ex
   execution-values.cpp)
 mirnext_add_example(mirnext_interpreted_callback_example mirnext-interpreted-callback-example
   interpreted-callback.cpp)
+mirnext_add_example(mirnext_vectorization_example mirnext-vectorization-example
+  native-vectorization.cpp)

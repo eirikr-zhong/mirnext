@@ -141,6 +141,8 @@ mirnext_add_test(mirnext_combine_test mirnext-unified-combine
   SOURCES Transforms/SSACombine.cpp)
 mirnext_add_test(mirnext_jump_test mirnext-unified-jump
   SOURCES Transforms/JumpOptimization.cpp)
+mirnext_add_test(mirnext_vectorization_test mirnext-unified-vectorization
+  SOURCES Transforms/Vectorization.cpp)
 mirnext_add_test(mirnext_optimization_test mirnext-unified-optimization
   SOURCES Transforms/Optimization.cpp)
 mirnext_add_test(mirnext_machine_ir_test mirnext-unified-machine-ir
