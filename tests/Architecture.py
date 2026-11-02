@@ -30,9 +30,6 @@ for path in public_headers:
         raise RuntimeError(f"Public borrowed results must return references: {path}")
     if re.search(r"class\s+(?:Context|IRBuilder|ProgramBuilder|ModuleBuilder|FunctionBuilder|ProgramEditor|ModuleEditor|FunctionEditor|InstructionBuilder|InstructionRewriter|SSAUpdater|MachineRewriter)\s*(?:final\s*)?\{", source):
         raise RuntimeError(f"Old construction interface in installed headers: {path}")
-result_source = (root / "include/mirnext/Support/Result.hpp").read_text(encoding="utf-8")
-if re.search(r"operator\s*(?:\*|->|bool)", result_source):
-    raise RuntimeError("Result and OptionalRef access must use named methods")
 for path in (root / "examples").glob("*.cpp"):
     for name in re.findall(r'#\s*include\s*["<]([^">]+)[">]', path.read_text(encoding="utf-8")):
         if name.startswith("mirnext/") and not (root / "include" / name).is_file():

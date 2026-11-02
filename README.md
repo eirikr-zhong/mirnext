@@ -1,299 +1,13 @@
 # MIRNext
 
-MIRNext is an embeddable register IR, interpreter and lightweight JIT built with
-modern C++20. It provides typed construction, checked transformations and owning
-execution results. SSA is an internal optimization representation.
+MIRNext is an embeddable register IR, interpreter and lightweight JIT written in
+C++20. Build typed IR with an explicit `MIRBuilder`, optimize it, and execute it
+through one `ExecutionSession`. SSA is internal to the optimizer.
 
-Hardware-bound registers have no memory address. Copy their value to an ordinary
-local before calling `MIRBuilder::create_address_of`; writes through that address update
-the copy.
+Native targets: **x86_64 on Linux, macOS and Windows; AArch64 on Linux and macOS.**
+The library supports builds without exceptions or RTTI.
 
-IR construction, analysis, optimization, machine code generation and execution
-share one owning C++ object model. Supported native targets are Linux and macOS
-on x86_64 and aarch64. Windows x86_64 is validated with MSVC in CI.
-
-## Architecture
-
-The library is organized under `include/mirnext` and `lib`:
-
-| Layer | Responsibilities |
-| --- | --- |
-| IR | Program/module/function ownership, stable basic blocks and instructions, typed references and data-use relationships, explicit MIRBuilder batches, verification and stack-scope materialization |
-| Analysis | CFG, traversal, dominance, loops, liveness and module/function caches with owner-scoped dependency invalidation |
-| Transforms | Module/function pass managers, O0–O3 optimization, internal SSA, pass observation and independently owned optimized programs |
-| Target | Native target facts, data layout, register information, addressing and ABI rules |
-| CodeGen | Owning machine IR, lowering, allocation, spill rewriting, post-allocation optimization, frame formation and compiled artifacts |
-| Serialization | MIR text and binary readers/writers |
-| Execution | Loaded programs, symbols, data initialization, interpreter, code publication, typed calls and eager/lazy/BBV JIT |
-
-AArch64 has a complete owning machine-code pipeline connected to the interpreter,
-linker and execution session, including eager/lazy JIT and native ABI adapters.
-Linux and macOS retain their separate ABI rules.
-
-MIRNext exposes fixed-width 128-bit vectors through `Type::vector128(element, lanes)`:
-signed/unsigned 8-, 16-, 32- and 64-bit integer lanes, `f32x4` and `f64x2`.
-The operation inventory is fixed to [WebAssembly Core 2.0 SIMD128](https://webassembly.github.io/spec/versions/core/WebAssembly-2.0.pdf).
-All 236 standard instruction entries are mapped by the test adapter to typed MIR
-operations or checked Builder sequences. This adds arithmetic capabilities to MIR;
-it does not add Wasm loading, linear memory or sandboxing. There are no 256-bit,
-Relaxed SIMD, SSE4/SSSE3/AVX, FMA or runtime feature-dispatch requirements.
-
-| Group | Supported lane combinations and operations |
-| --- | --- |
-| Existing core | All ten types: unaligned load/store, add/subtract, bitwise operations, comparisons, splat, lane extraction/insertion, constant two-input shuffle |
-| Integer arithmetic | 16/32/64-bit multiply; integer negation; signed abs; shifts modulo lane width; signed/unsigned 8/16/32-bit min/max |
-| Saturation and counts | Signed/unsigned 8/16-bit saturating add/subtract; unsigned rounded average; byte population count |
-| Widening | Signed/unsigned low/high 8→16, 16→32, 32→64 extension and multiplication; pairwise 8→16 and 16→32 addition |
-| Narrowing and products | Signed 16→8 and 32→16 inputs narrowed with signed/unsigned saturation; signed i16 dot→i32; signed Q15 rounded saturating multiply |
-| Floating point | f32/f64 multiply/divide, sqrt, abs/neg, canonical NaN-propagating min/max, comparison-select pmin/pmax, ceil/floor/trunc/nearest |
-| Masks and rearrangement | Bitcast, AND-NOT, arbitrary-bit bitselect, any-true, integer all-true/bitmask, byte swizzle with out-of-range indices producing zero |
-| Conversion | Signed/unsigned i32→f32, low i32→f64, low f32→f64, f64→f32 with upper half zero, saturating f32→i32 and f64→i32 with upper half zero |
-| Narrow memory | 8-byte widening loads, 1/2/4/8-byte splat loads, 4/8-byte zero loads, 1/2/4/8-byte lane loads/stores |
-
-`MIRBuilder` uses explicit methods such as `create_mul`, `create_add_sat`,
-`create_extend(value, VectorHalf::High)`, `create_narrow_sat(a, b, type)`,
-`create_bitselect(mask, yes, no)` and `create_load_lane`.
-Conversions and bitcasts use `(value, destination_type)` order. The signedness of
-typed integer lanes selects signed/unsigned operations; unsigned narrowing still
-interprets its wider input as signed. Unsupported combinations fail before IR is
-appended. See [the SIMD example](examples/native-simd.cpp).
-
-Comparisons produce unsigned masks. Floating min/max return canonical quiet NaNs;
-min selects −0 and max selects +0 when both inputs are zero. `pmin/pmax` preserve
-the selected operand bits, including NaN payloads and signed zero. Abs/neg and
-rearrangements preserve payload bits. Nearest uses ties-to-even independently of
-the host rounding mode; ordinary arithmetic uses the existing default FP environment.
-
-NEON uses direct instructions where available. SSE2 operations without a direct
-instruction use vector and GP/scalar-FP register sequences: this includes 64-bit
-integer multiply/comparison, dynamic swizzle, Q15, rounding and some conversions.
-NEON 64-bit integer multiplication also uses a vector sequence: low-word widening
-products and shifted cross products, without GP lane extraction. These sequences
-are not advertised as single hardware instructions. Lowering
-creates no temporary stack objects for vector assembly; ABI stack arguments and
-actual allocation spills remain supported. Constants are constructed in registers
-and reused within a basic block. Narrow memory methods compose scalar accesses
-with vector operations and retain the exact defined access width.
-
-Vector types/constants and all new opcodes round-trip through MIR text and binary
-formats; previous protocol numbers remain unchanged. Vectors can be function
-parameters/results and module variables. Unnamed vector varargs and vector
-`va_arg` retain explicit diagnostics.
-
-Scalar code can opt into SIMD128 packing at O2/O3:
-
-```cpp
-mirnext::transforms::OptimizationOptions options;
-options.vectorization.slp = true;
-auto optimized = mirnext::transforms::optimize(program, options);
-```
-
-`SLPVectorizePass` packs independent, isomorphic scalar computation trees ending
-in contiguous stores within one basic block. It supports full 128-bit packs of
-integer add/subtract/negation and bitwise operations, legal integer multiplication,
-and f32/f64 add/subtract/multiply/divide/negation. Contiguous loads, constants and
-shared-scalar broadcasts are supported. The pass recovers constant offsets from
-SSA address arithmetic, preserves the exact access width, and checks memory
-ordering using address ranges and MIR alias/nonalias classes. Distinct pointer
-values alone are not considered disjoint. Calls, stack operations, control flow,
-external uses of packed scalar definitions, incomplete packs and unsupported
-operations retain their scalar form.
-
-Floating-point trees retain each lane's original operation order: there is no
-reassociation, FMA contraction or reduction vectorization. This is basic-block SLP;
-it does not widen loop iterations, generate scalar tails or runtime alias guards.
-Both vectorization options default to false. O0/O1 retain their original pipeline.
-
-`VectorCombinePass` removes identity moves/bitcasts/shuffles, simplifies nested
-bitcasts and exact extract/insert identities, and shares repeated splats/bitcasts.
-Narrow integer extraction keeps its sign/zero extension. SLP automatically runs
-this cleanup and SSA DCE; `options.vectorization.combine = true` also enables
-cleanup independently for explicitly constructed vector IR. Both passes are
-available as custom function passes and through `PassId` stage observation.
-
-`target::VectorCostModel` uses relative NEON/SSE2 sequence estimates, not cycle
-predictions, and requires a strict estimated saving before packing. For example,
-it rejects two-lane integer multiplication on both targets. The bounded search
-limits (`max_pack_nodes`, `max_block_packs`, `max_store_distance`) cap JIT work;
-reaching a limit keeps scalar IR. See the
-[scalar-to-SIMD example](examples/native-vectorization.cpp).
-
-The offline test inventory and 22,632 official literal cases are pinned to
-`WebAssembly/spec` tag `wg-2.0` (revision
-`fffc6e12fa454e475455a7b58d3b5dc343980c10`); attribution and licenses are retained
-in [tests/SIMD/SOURCE](tests/SIMD/SOURCE). Memory, immediate-lane and compound cases
-also have native MIR tests, including protection pages, payload bits, altered
-rounding modes, mixed engines and register pressure. The normal build does not
-parse Wasm or regenerate fixtures.
-
-Native lowering was measured on Apple M1 (arm64 macOS, Release shared library).
-Earlier O2 measurements of the core migration compared the preserved scalar-stack
-implementation with register-only lowering, using identical programs and inputs:
-
-| Workload | JIT preparation, µs (before → after) | Generated bytes (before → after) | Stack-memory instructions (before → after) | ns/loop iteration (before → after) |
-| --- | --- | --- | --- | --- |
-| Unsigned 64-bit comparison | 591 → 406 | 176 → 80 | 13 → 0 | 7.58 → 1.19 |
-| Two-input byte shuffle | 518 → 422 | 240 → 160 | 39 → 0 | 7.09 → 1.70 |
-| 32-bit extract/insert/splat | 556 → 484 | 160 → 80 | 16 → 0 | 7.35 → 3.92 |
-
-The new arithmetic workloads also have equivalent scalar MIR implementations.
-On the same machine at O2 (scalar → SIMD128):
-
-| Workload | JIT preparation, µs | Generated bytes | Stack-memory instructions | ns/loop iteration |
-| --- | --- | --- | --- | --- |
-| Eight-lane signed Q15 multiply | 5,233 → 605 | 848 → 64 | 14 → 0 | 7.54 → 0.98 |
-| Eight-lane signed saturating addition | 6,151 → 526 | 1,072 → 64 | 14 → 0 | 9.98 → 0.61 |
-| Two-lane 64-bit integer multiplication | 712 → 634 | 96 → 96 | 0 → 0 | 1.08 → 3.11 |
-
-The 64-bit multiply sequence remains slower than two scalar multiplications in
-this dependent-loop workload on M1. SIMD128 support does not imply a speedup for
-every operation; NEON has no direct 64-bit lane multiply. The scalar Q15 and
-saturation kernels also incur real register-allocation spills.
-
-`mirnext_simd_benchmark` checks results against the interpreter, warms native
-entries, and reports medians of 31 samples after three warmups at every O0–O3
-level. Each runtime sample makes 100,000 native calls, each containing 128 loop
-iterations; session-call overhead is excluded. JIT preparation includes session
-creation, optimization, compilation and linking. Generated bytes are the session
-code total; instruction and stack-memory counts describe the machine-IR body,
-excluding the encoded prologue/epilogue. Each vector kernel has two user loads and
-one user store; scalar reference kernels have those accesses per lane. All remaining
-memory instructions count as stack accesses, including accesses through derived
-addresses.
-These are small dependent-loop workloads, not general application speedups.
-Raw timing results are not stored in the repository.
-
-The opt-in SLP benchmark starts with identical scalar MIR and compares SLP off/on.
-Apple M1, native arm64 macOS, Release/shared, O2; values below are medians of three
-complete runs. Each run reports the median of 15 samples after three warmups.
-Runtime samples make 2,000 checked-result native calls over 128 independent
-16-byte chunks; session-call overhead is excluded. Optimization includes cloning
-and all middle-end passes; total preparation additionally includes compilation,
-loading and linking. These are L1-sized array kernels, not application speedups.
-
-| Scalar kernel | Optimization, µs (off → on) | Total JIT preparation, µs | Generated bytes | ns/16-byte chunk | Runtime speedup |
-| --- | --- | --- | --- | --- | --- |
-| f32 addition | 811 → 869 | 995 → 1,003 | 112 → 48 | 1.011 → 0.388 | 2.61× |
-| f32 multiplication | 809 → 886 | 992 → 1,024 | 112 → 48 | 1.011 → 0.388 | 2.60× |
-| f64 multiplication | 472 → 528 | 630 → 649 | 96 → 48 | 0.768 → 0.388 | 1.98× |
-| i32 addition | 805 → 876 | 983 → 1,008 | 128 → 48 | 1.004 → 0.388 | 2.59× |
-| i16 multiplication | 1,541 → 1,611 | 1,803 → 1,785 | 192 → 48 | 1.959 → 0.388 | 5.05× |
-| i64 multiplication, retained scalar | 470 → 554 | 633 → 711 | 96 → 96 | 0.846 → 0.847 | 1.00× |
-
-SLP increases middle-end work; smaller machine functions can recover part of that
-cost in code generation. Rejected candidates still incur search overhead. There
-are no timing assertions in tests, and raw benchmark files are not committed.
-Run `mirnext_vectorization_benchmark` for O2/O3 measurements on another machine.
-
-The current tree passes native macOS arm64 Debug/static and Release/shared suites
-(61/61 each), ASan core tests (33/33), a Release/static no-tests build, and installed
-CXX-only consumers of both static and shared libraries. The 22 vectorization tests
-include 16,657 assertions covering all ten lane types, deterministic randomized
-execution, eager/lazy JIT and BBV, NaNs/signed zero, overlapping memory, guard pages,
-word arithmetic, hardware bindings, budgets, observers and analysis invalidation.
-The new SLP/VectorCombine changes still require CI validation on native x86_64,
-Linux AArch64 and Windows; local execution used no Rosetta.
-
-The x86_64 backend implements instruction selection,
-ABI lowering, two-address legalization, allocation, spill rewriting and
-post-allocation optimization using the new machine objects. Frame plans preserve
-variadic areas and full vector saves, with explicit no-red-zone support and
-corrective unaligned vector moves for JRET frames. Owning encoding and relocation
-include branch layout, switch tables, constant pools and near-call patching.
-The same owning session and IR-built host adapters now connect the x86 pipeline
-to eager/lazy JIT and native interpreted callbacks. Immutable x86 lazy gates share
-a resolver that preserves integer, XMM and x87 state across cold compilation.
-
-BBV now has owning machine preparation, stable block/version identities,
-property specialization and independently owned block bytes with typed successor
-relocations, including GVN memory identities and alias rules. Immutable cold/warm
-block entries preserve live registers, flags, floating state and dynamic stacks.
-An owning block runtime now selects, compiles and publishes reached versions in
-a bounded code arena; later batches use separate pages and retain stable gates.
-`ExecutionSession` supports `JITCompilation::BlockVersioning`: ordinary function
-entries install native recovery checkpoints, label/data references retain stable
-block gates, and expression initializers use the same typed calls and symbol
-image. Failed cold compilation reports diagnostics and leaves entries retryable,
-including raw variadic entries and nested host callbacks. Block observers and
-per-function statistics expose demand-driven compilation; there is no fallback
-to whole-function compilation. `ExecutionOptions::select_engine`
-chooses interpretation, eager JIT, lazy JIT or BBV per definition in one loaded
-program. Engines share symbols, global data and typed function handles.
-Public examples cover
-[custom code memory](examples/custom-code-memory.cpp),
-[machine IR](examples/native-machine-ir.cpp) and
-[compilation stages](examples/native-compile.cpp).
-
-## Build
-
-A C++20 compiler and CMake 3.14 or newer are required. Script integration checks
-are enabled with tests by default and require Python 3.8 or newer. Optional
-platform acceptance auditing also requires CTest 3.21 or newer for JUnit output:
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --parallel 2
-ctest --test-dir build --output-on-failure --parallel 8
-```
-
-Compilation uses two jobs; test parallelism is independent. MIR language fixtures
-in `tests/Fixtures` run through the C++ interpreter and JIT.
-
-Useful options:
-
-| Option | Purpose |
-| --- | --- |
-| `BUILD_SHARED_LIBS=ON` | Build a shared library; defaults to a static library |
-| `BUILD_TESTING=OFF` | Build without test executables |
-| `MIRNEXT_BUILD_SCRIPT_TESTS=OFF` | Omit Python integration checks; C++ tests remain available without Python |
-| `MIRNEXT_BUILD_EXAMPLES=OFF` | Build without examples |
-| `MIRNEXT_BUILD_BENCHMARKS=ON` | Build native architecture microbenchmarks |
-| `MIRNEXT_BUILD_UTILITIES=OFF` | Omit the native format converters and binary runner; enabled by default |
-| `MIRNEXT_ENABLE_ASAN=ON` | Compile and link with AddressSanitizer; disabled by default |
-| `MIRNEXT_ENABLE_NATIVE_EVIDENCE=ON` | Build source-stamped acceptance tests and register audit checks; disabled by default, enabled in CI |
-| `MIRNEXT_TEST_EXPECTED_TARGET` | Require a native test ABI instead of accepting the detected host target |
-
-The native `m2b`, `b2m`, `b2cpp` and `mir-bin-run` commands use the same owning
-C++ format and execution layers. See [command usage](tools/README.md) for binary
-execution, host library loading and embedding a program.
-
-For a library/commands build without tests or examples, configure
-with `-DBUILD_TESTING=OFF -DMIRNEXT_BUILD_EXAMPLES=OFF`.
-
-Select build features through `-D` options without editing build files. For example,
-to build tests with AddressSanitizer:
-
-```sh
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
-  -DBUILD_TESTING=ON -DMIRNEXT_BUILD_EXAMPLES=OFF -DMIRNEXT_ENABLE_ASAN=ON
-cmake --build build-asan --parallel 2
-ASAN_OPTIONS=detect_leaks=0 ctest --test-dir build-asan --output-on-failure --parallel 4
-```
-
-`CMAKE_BUILD_TYPE` and the standard CMake compiler/toolchain and installation
-variables select the configuration, compiler, toolchain and install prefix.
-Optimization and execution behavior are selected through the C++ API.
-CMake declares build targets, dependencies, compiler options, installation and
-test commands. Source auditing, report validation and command behavior checks
-are implemented in standalone Python scripts. Native evidence requires script
-tests to be enabled. After building with `MIRNEXT_ENABLE_NATIVE_EVIDENCE=ON`, run
-its audit independently (use the actual build configuration):
-
-```sh
-ctest --test-dir build --output-on-failure --parallel 8 --output-junit build/native-tests.xml
-python3 tests/Platform/AuditAcceptance.py --source . --platform native \
-  --configuration Release --linkage static --output build/native-evidence-Release.json build
-```
-
-Use `--linkage shared` for a shared build. To audit both linkages together, omit
-`--linkage` and pass both build directories.
-
-## Build and execute IR
-
-`Program` owns modules, functions, blocks and instructions. `MIRBuilder` selects an
-insertion point and creates instructions through explicit methods, in the style
-of LLVM's IRBuilder. Values have no arithmetic or comparison operators. Results
-use named `has_value()`, `value()` and `error()` accessors.
+## Quick start
 
 ```cpp
 #include <mirnext/Execution/Session.hpp>
@@ -305,215 +19,124 @@ int main() {
 
   Program program;
   MIRBuilder builder(program);
-  auto* module = builder.create_module("example");
+  auto module = builder.create_module("example");
   builder.create_function<std::int64_t(std::int64_t)>(module, "add_one");
-  auto sum = builder.create_add(builder.argument(0), builder.constant_i64(1));
-  builder.create_return(sum);
+  builder.create_return(
+      builder.create_add(builder.argument(0), builder.constant_i64(1)));
 
   auto built = builder.finish();
-  if (!built.has_value()) {
+  if (!built) {
     std::cerr << built.error().message << '\n';
     return 1;
   }
   auto session = execution::ExecutionSession::create(std::move(program));
-  if (!session.has_value()) {
+  if (!session) {
     std::cerr << session.error().message << '\n';
     return 1;
   }
-  auto result = session.value().call_i64("example", "add_one", {41});
-  if (!result.has_value()) {
+  auto result = session->call_i64("example", "add_one", {41});
+  if (!result) {
     std::cerr << result.error().message << '\n';
     return 1;
   }
-  std::cout << result.value() << '\n';
+  std::cout << *result << '\n'; // 42
 }
 ```
 
-`create_function<Return(Arguments...)>(module, name)` maps C++ scalar types to MIR
-types and selects an entry block automatically. Explicit `Signature` values cover
-block arguments, multiple results, variadic and special calling conventions.
-`create_block()` creates a layout block; `set_insert_point(block)` selects it.
-Creating another function changes the selected function; `set_function(function)`
-selects an existing function for editing.
+`Program` owns the IR; moving it preserves node identity. Builder values and node
+references borrow that storage. The builder records the first error and stops
+further changes; call `finish()` before using the program. Stage boundaries and
+execution return `Result`: `if (result)` checks success, `*result` accesses the value,
+`result->method()` accesses its members, and `result.error()` retrieves a failure.
 
-| Operation | Explicit construction API |
-| --- | --- |
-| Parameters, constants and locals | `argument(index)`, `constant_i64(value)`, `create_register(type)` |
-| Arithmetic, comparison and conversion | `create_add(a, b)`, `create_lt(a, b)`, `create_convert(value, type)` |
-| Direct and indirect calls | `create_call(callee, {args...})`, `create_indirect_call(signature, address, {args...})` |
-| Call results | `call.value()` requires exactly one result; `call.result(index)` selects a result |
-| Variables and memory | `create_load(variable)`, `create_store(variable, value)`, `memory(type, address, offset)` |
-| Control flow | `create_block(name)`, `set_insert_point(block)`, `create_cond_branch(condition, target)`, `create_jump(target)` |
-| Block ABI arguments | `block_argument(address, Type::block(size, classification))`, `return_buffer(address, size)` |
-| Precise instructions | `create_instruction(opcode, {operands...})` uses the same validator |
+## Capabilities
 
-Methods above are members of `MIRBuilder`. Creation returns ordinary borrowed node
-pointers or typed `Value` objects. Required owner relationships return references;
-collections yield objects directly. There is one canonical instruction body.
-Moving a `Program` preserves node identity. Nodes and values must not outlive
-their program; deleting a node invalidates references to it. A builder can move
-without invalidating its insertion state or values. Replacing a call invalidates
-its `CallResult` view.
+- **IR:** typed registers, basic blocks, calls, block ABI arguments, module data,
+  symbols and cross-module references; MIR text and binary serialization.
+- **Optimization:** O0–O3, inlining, SSA, GVN, copy propagation, dead code/store
+  elimination, loop-invariant code motion and target-aware combines. Custom
+  passes, analysis caching and stage observers are available.
+- **Execution:** interpreter, eager/lazy JIT, basic-block versioning (BBV), and
+  per-function engine selection in one session. JIT defaults to O2.
+- **Code generation:** native C++ lowering, register allocation, spill handling,
+  encoding, relocation and executable-memory management.
+- **SIMD128:** signed/unsigned integer lanes plus f32x4/f64x2, covering the standard
+  SIMD128 operations from WebAssembly Core 2.0 through NEON/SSE2 instructions or
+  register sequences. Includes arithmetic, comparisons, saturation, conversions,
+  shuffle/swizzle and narrow memory operations. No Wasm loader or 256-bit types.
 
-The builder records the first error and stops subsequent changes. `finish()` checks
-the batch and closes it before analysis, optimization, serialization or execution.
-Successful changes before a failure remain applied; unfinished or failed batches
-prevent later stages. An invalid result is safely propagated by subsequent builder
-calls. Inspect `status()` or `error()` for an early diagnostic.
-
-`create_import`, `declare_function` and `create_prototype` create symbols without
-a body; `define_function` defines a declaration with the same symbol identity.
-`export_symbol` connects modules. Module data accepts typed `DataInitializer`
-values: `InitializedData`, `ZeroData`, `SymbolReference`, `LabelReference` and
-`ExpressionData`. `create_anonymous_data` preserves contiguous layout; declarations
-and later definitions share symbol identity. See [block calls](examples/native-calls.cpp),
-[cross-module calls](examples/native-cross-module.cpp) and
-[shared variables](examples/native-variables.cpp).
-
-Parsing, cloning and materialization return owning `Result<Program>` values.
-Fallible borrowed results use `Result<T&>`; optional queries use `OptionalRef<T>`.
-Both use `has_value()` and `value()` and never extend the referent's lifetime.
-`OptionalRef::get()` exposes a nullable borrowed pointer when needed. Neither
-wrapper provides dereference, arrow or implicit Boolean conversion operators.
-Structural edits invalidate collection views; obtain a fresh view after editing.
-
-On a supported JIT host, `ExecutionMode::JIT` is the session default.
-Select `ExecutionMode::Interpreter` to interpret instead.
-Use `LinkOptions::compilation = JITCompilation::Lazy` for first-call compilation.
-`FunctionHandle::compile()` prepares a lazy body explicitly.
-Select `JITCompilation::BlockVersioning` for demand-driven block compilation;
-in this mode `compile()` prepares only the call-entry block. Set
-`LinkOptions::block_versioning` for the per-function code budget and block
-observer, and use `FunctionHandle::block_statistics()` to inspect publication.
-
-For mixed execution, supply a fallible `select_engine(const ir::Function &)`
-callback returning `ExecutionEngine::{Interpreter,EagerJIT,LazyJIT,BlockVersioning}`.
-It runs once per owned optimized definition, before linking and code publication;
-aliases share the definition's choice. Optimization precedes engine selection, so
-inlined code uses its caller's engine. Mixed sessions automatically publish native
-ABI entries for interpreted definitions. Ordinary calls can cross engines with
-scalar, block and variadic arguments; `JCALL/JRET` continuations must stay within
-the interpreted domain or the native domain. Cross-domain jump calls return a
-diagnostic. `FunctionHandle::engine()` reports a definition's selected engine.
-See [the mixed execution example](examples/mixed-engines.cpp).
-
-Construction and execution report diagnostics through `Result`, including in
-no-exceptions builds. Optimization returns an independent `OptimizedProgram`;
-source IR is retained unchanged. Runtime data and compilation caches belong to
-the loaded program rather than the source Program.
-
-
-## Editing, analyses and compilation stages
-
-Read-only traversal yields objects directly:
+SLP vectorization is opt-in at O2/O3:
 
 ```cpp
-for (const auto &module : program.modules())
-  for (const auto &function : module.functions())
-    for (const auto &block : function.blocks())
-      for (const auto &instruction : block.instructions()) {
-        // Inspect instruction.opcode() and instruction.operands().
-      }
+mirnext::transforms::OptimizationOptions options;
+options.vectorization.slp = true;
+auto optimized = mirnext::transforms::optimize(program, options);
 ```
 
-Required owner relationships, such as `instruction.block()`, return references.
-Optional relationships and tagged operand queries return `OptionalRef`, for example
-`operand.get<Register>()`. A missing optional value is distinct from a failed
-`Result`. Both wrappers borrow the object and require a presence check before
-access through `has_value()` and `value()`.
+SLP packs independent scalar operations within a basic block and checks memory
+dependencies and target costs. It preserves floating-point operation order;
+loop-iteration widening and reductions are not implemented. Vector cleanup can
+also be enabled separately with `options.vectorization.combine = true`.
 
-An `MIRBuilder` can borrow an existing `Program`, `Function` or `BasicBlock` to
-edit it using the same explicit creation methods. `replace_instruction`,
-`replace_operand`, `erase_instruction`, `split_before` and `merge_fallthrough`
-maintain the existing validation and invalidation rules. `ssa()` supplies a checked
-`SSARewriter` for internal SSA extensions. `MachineEditor` provides the machine
-mutation batch. Checked SSA/machine handles detect deletion while their editing
-state remains alive; they do not extend its lifetime. Analysis references become
-invalid when the cache is invalidated, and SSA references on SSA destruction.
+## Build
 
-`FunctionAnalysisManager` and `ModuleAnalysisManager` are value objects sharing
-their cache state when copied. `get<Analysis>()` returns
-`Result<const Analysis::Result&>`; `get_cached<Analysis>()` returns `OptionalRef`.
-Custom function passes receive an `MIRBuilder`; module passes receive the module
-and a context containing the builder. Pass managers check
-each batch before advancing, apply `PreservedAnalyses`, and propagate observer
-failures. The default optimization pipeline and its O0–O3 decisions are unchanged;
-SIMD packing and cleanup are explicit opt-ins.
-
-`MachineCompilation::create(function, target, options)` returns an owning value
-for both incremental and complete compilation. `step()` and `run_until(stage)`
-advance that same state, `graph()` and other analysis queries expose optional
-read-only views, and `finish()` returns an owning `CompiledFunction`. Use `edit()`
-before lowering to obtain a machine editing batch. The compiler retains no source
-IR; a prepared or compiled result can outlive the source program. The
-[stage example](examples/native-machine-ir.cpp) demonstrates this lifetime and
-[the compilation example](examples/native-compile.cpp) demonstrates observation
-and code publication. Stage observers borrow views only for the callback duration.
-
-`ExecutionSession` is the loading and execution entry point. Moving a `Program`
-or an `OptimizedProgram` into it transfers ownership; passing a borrowed program
-preserves it. Function and data handles retain the loaded program independently
-of the session. Native entries, executable memory and host callbacks keep explicit
-ABI address types. All other object access follows the same reference rules.
-
-## Examples
-
-- [Interpreter and typed C++ imports](examples/native-interpreter.cpp)
-- [Eager/lazy execution and persistent module variables](examples/native-session.cpp)
-- [Per-function interpretation and JIT in one program](examples/mixed-engines.cpp)
-- [Block arguments and calls](examples/native-calls.cpp)
-- [Module variables](examples/native-variables.cpp)
-- [Cross-module function calls](examples/native-cross-module.cpp)
-- [Stack scopes](examples/native-stack-scope.cpp)
-- [Block and multiple-result execution](examples/execution-values.cpp)
-- [Interpreted native callbacks](examples/interpreted-callback.cpp)
-- [Machine stages and dumps](examples/native-machine-ir.cpp)
-- [Compilation, observation and code publication](examples/native-compile.cpp)
-- [Custom code-memory service and mapping lifetime](examples/custom-code-memory.cpp)
-- [BBV preparation, property specialization and block encoding diagnostics](examples/native-bbv.cpp)
-- [Demand-driven BBV execution and block observation](examples/bbv-session.cpp)
-
-The target-specific examples explicitly report unsupported hosts.
-
-## Formats and diagnostics
-
-`serialization::parse_text` and `read_binary` return independently owned
-Programs. `write_text` and `write_binary` traverse the unified IR and preserve
-the existing MIR file protocols. Stack scopes are materialized on a copy when
-needed; ordinary read-only traversal does not rewrite the source.
-
-Diagnostic IR/machine dumps are separate from portable text serialization.
-Internal SSA, machine operands and runtime compilation state are not written
-into the public binary protocol.
-
-## CMake integration
-
-Install the library:
+Requires a C++20 compiler and CMake 3.14+. Default script tests also require
+Python 3.8+.
 
 ```sh
-cmake --install build --prefix /your/install/prefix
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure --parallel 4
 ```
 
-A consumer uses CXX-only CMake and the installed C++ headers:
+For multi-configuration generators such as Visual Studio, add `--config Release`
+to the build command and `-C Release` to CTest.
+
+| CMake option | Default | Purpose |
+| --- | --- | --- |
+| `BUILD_SHARED_LIBS` | `OFF` | Build a shared library |
+| `BUILD_TESTING` | `ON` | Build and register tests |
+| `MIRNEXT_BUILD_EXAMPLES` | `ON` | Build API examples |
+| `MIRNEXT_BUILD_UTILITIES` | `ON` | Build format converters and binary runner |
+| `MIRNEXT_BUILD_SCRIPT_TESTS` | `ON` | Run Python integration checks |
+| `MIRNEXT_BUILD_BENCHMARKS` | `OFF` | Build native microbenchmarks |
+| `MIRNEXT_ENABLE_ASAN` | `OFF` | Enable AddressSanitizer |
+| `MIRNEXT_ENABLE_NATIVE_EVIDENCE` | `OFF` | Enable platform acceptance auditing |
+
+## Use in your project
+
+Install with `cmake --install build --prefix <prefix>`, then configure your
+project with `CMAKE_PREFIX_PATH` pointing to that prefix:
 
 ```cmake
 cmake_minimum_required(VERSION 3.14)
 project(MyJIT LANGUAGES CXX)
 find_package(MIRNext CONFIG REQUIRED)
 add_executable(my_jit main.cpp)
-target_compile_features(my_jit PRIVATE cxx_std_20)
 target_link_libraries(my_jit PRIVATE MIRNext::MIRNext)
 ```
 
-Configure the consumer with `CMAKE_PREFIX_PATH` pointing to the installation.
-The single `MIRNext::MIRNext` target provides IR construction, optimization,
-serialization, interpretation and JIT execution. Configure MIRNext with
-`-DBUILD_SHARED_LIBS=ON` for a shared library, or `OFF` (the default) for a static
-library. To build and test both, use separate build and installation directories.
+The single `MIRNext::MIRNext` target supplies the library and its C++20 requirement.
+
+## Examples and reference
+
+| Topic | Example |
+| --- | --- |
+| Interpreter and host imports | [native-interpreter.cpp](examples/native-interpreter.cpp) |
+| Eager/lazy JIT and module variables | [native-session.cpp](examples/native-session.cpp) |
+| Mixed execution engines | [mixed-engines.cpp](examples/mixed-engines.cpp) |
+| Block arguments and multiple results | [native-calls.cpp](examples/native-calls.cpp), [execution-values.cpp](examples/execution-values.cpp) |
+| Cross-module calls | [native-cross-module.cpp](examples/native-cross-module.cpp) |
+| SIMD and automatic packing | [native-simd.cpp](examples/native-simd.cpp), [native-vectorization.cpp](examples/native-vectorization.cpp) |
+| Custom passes and analyses | [native-simplify.cpp](examples/native-simplify.cpp), [native-analysis.cpp](examples/native-analysis.cpp) |
+| Machine stages and code publication | [native-machine-ir.cpp](examples/native-machine-ir.cpp), [native-compile.cpp](examples/native-compile.cpp) |
+| BBV and code memory | [bbv-session.cpp](examples/bbv-session.cpp), [custom-code-memory.cpp](examples/custom-code-memory.cpp) |
+
+Public headers are under [include/mirnext](include/mirnext); native tools have
+[command usage](tools/README.md). Benchmarks live in [benchmarks](benchmarks),
+including SIMD lowering and scalar-to-vector comparisons. Timing results depend
+on the target and workload. SIMD fixture provenance is in [tests/SIMD/SOURCE](tests/SIMD/SOURCE).
 
 ## License
 
-MIRNext is licensed under the [MIT License](LICENSE), retaining the original MIR
-copyright and adding attribution for MIRNext contributors. Project attribution
-is recorded in [NOTICE](NOTICE). Both files are included in installations under
-`share/licenses/MIRNext` with the default CMake data directory.
+[MIT](LICENSE). Original MIR and MIRNext attribution is retained in [NOTICE](NOTICE).

@@ -18,7 +18,7 @@ mirnext::Result<mirnext::execution::FunctionHandle> build () {
                                               {builder.constant_i64 (40)});
   builder.create_return (answer.value ());
   auto built = builder.finish ();
-  if (!built.has_value ()) {
+  if (!built) {
     return built.error ();
   }
   auto session = ExecutionSession::create (std::move (program),
@@ -28,23 +28,23 @@ mirnext::Result<mirnext::execution::FunctionHandle> build () {
                                                       ? ExecutionEngine::Interpreter
                                                       : ExecutionEngine::LazyJIT;
                                            }});
-  if (!session.has_value ()) return session.error ();
-  if (session.value ().mode () != ExecutionMode::Mixed)
+  if (!session) return session.error ();
+  if (session->mode () != ExecutionMode::Mixed)
     return Error{ErrorCode::InvalidArgument, "expected mixed execution"};
-  return session.value ().find_function ("mixed", "entry");
+  return session->find_function ("mixed", "entry");
 }
 int main () {
   auto function = build ();
-  if (!function.has_value ()) {
+  if (!function) {
     std::cerr << function.error ().message << '\n';
     return 1;
   }
   // The handle owns the program after both source builder and session die.
-  auto result = function.value ().call_i64 ();
-  if (!result.has_value ()) {
+  auto result = function->call_i64 ();
+  if (!result) {
     std::cerr << result.error ().message << '\n';
     return 1;
   }
-  std::cout << "mixed result = " << result.value () << '\n';
-  return result.value () == 42 ? 0 : 1;
+  std::cout << "mixed result = " << *result << '\n';
+  return *result == 42 ? 0 : 1;
 }
